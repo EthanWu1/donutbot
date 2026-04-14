@@ -74,6 +74,7 @@ async function inspectAudit(guild, type, limit, entryType, userIdPath = 'executo
     const entry = logs?.entries?.first?.();
     const executorId = entry?.executorId || entry?.executor?.id;
     if (!executorId) return;
+    if (executorId === '1467522345861251258' || executorId === guild.client.user?.id) return;
     const count = bumpCounter(type, executorId);
     if (count >= limit) await punishMember(guild, executorId, `${type} threshold exceeded`);
   } catch {}

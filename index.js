@@ -1565,10 +1565,10 @@ async function syncNickname(member) {
   if (!member || !member.guild || !member.user || member.user.bot) return false;
   const me = member.guild.members.me || await member.guild.members.fetchMe().catch(() => null);
   if (!me?.permissions?.has(PermissionsBitField.Flags.ManageNicknames)) {
-    throw new Error('Missing Manage Nicknames permission');
+    return false; // Silently ignore permission limits
   }
-  if (member.id !== member.guild.ownerId && me.roles.highest.comparePositionTo(member.roles.highest) <= 0) {
-    throw new Error('Bot role must be above target member');
+  if (member.id === member.guild.ownerId || me.roles.highest.comparePositionTo(member.roles.highest) <= 0) {
+    return false; // Silently ignore members that are too high to be modified
   }
 
   const afk = await isAfk(member);
@@ -1686,7 +1686,9 @@ async function syncLevelRoles(member, currentLevel) {
 
     if (lvl === highestLevel) {
       if (!member.roles.cache.has(config.id)) {
-        await member.roles.add(role).catch(e => console.error(`Failed to add role ${role.name}:`, e.message));
+        await member.roles.add(role).catch(e => {
+          if (!e.message?.includes('Connect Timeout')) console.error(`Failed to add role ${role?.name}:`, e.message);
+        });
       }
     } else {
       if (member.roles.cache.has(config.id)) {
@@ -1776,19 +1778,37 @@ function renderStaffStatsEmbed(rows, page, totalPages) {
   const fmtMs = (ms) => { if (ms == null) return '—'; const sec = Math.max(0, Math.round(ms / 1000)); const m = Math.floor(sec / 60); const s = sec % 60; return `${m}m ${String(s).padStart(2,'0')}s`; };
   const desc = pageRows.length ? pageRows.map((r, i) => {
     const n = page * 10 + i + 1;
-    return `**${n}.** <@${r.staffId}>\nClosed: **${r.closed}** · Renamed: **${r.renamed}**\nMessages: **${r.messages}** · Avg response: **${fmtMs(r.avgMs)}**`;
+    let badge = '';
+    if (n === 1) badge = ' 🥇';
+    else if (n === 2) badge = ' 🥈';
+    else if (n === 3) badge = ' 🥉';
+    return `**${n}.** <@${r.staffId}>${badge}\n> 🔒 **Closed:** \`${r.closed}\` | ✍️ **Renamed:** \`${r.renamed}\`\n> 💬 **Messages:** \`${r.messages}\` | ⏱️ **Avg Response:** \`${fmtMs(r.avgMs)}\``;
   }).join('\n\n') : 'No stats yet.';
-  return new EmbedBuilder().setColor(0x2b2d31).setTitle('Staff Stats').setDescription(desc).setFooter({ text: `Page ${page + 1}/${totalPages} • Sorted by closed, then renamed, then messages` }).setTimestamp();
+  return new EmbedBuilder()
+    .setColor(0x00A8FF)
+    .setTitle('🛡️ Staff Performance Leaderboard')
+    .setDescription(desc)
+    .setFooter({ text: `Page ${page + 1}/${totalPages} • Staff Stats` })
+    .setTimestamp();
 }
 
 function renderBuilderStatsEmbed(rows, page, totalPages) {
   const pageRows = chunkItems(rows, 10)[page] || [];
   const desc = pageRows.length ? pageRows.map((r, i) => {
     const n = page * 10 + i + 1;
-    const ignPart = r.builderIgn ? ` · IGN: ${'`' + r.builderIgn + '`'}` : '';
-    return `**${n}.** <@${r.discordId}>\nFinished: **${r.finished}** · Price: **${money(r.earned)}**\nPending: **${r.pending}**${ignPart}`;
+    let badge = '';
+    if (n === 1) badge = ' 👑';
+    else if (n === 2) badge = ' 🥈';
+    else if (n === 3) badge = ' 🥉';
+    const ignPart = r.builderIgn ? ` \`[${r.builderIgn}]\`` : '';
+    return `**${n}.** <@${r.discordId}>${badge}${ignPart}\n> 🛠️ **Finished:** \`${r.finished}\` | 💎 **Earned:** \`${money(r.earned)}\`\n> ⏳ **Pending:** \`${r.pending}\``;
   }).join('\n\n') : 'No builder stats yet.';
-  return new EmbedBuilder().setColor(0x2b2d31).setTitle('Builder Stats').setDescription(desc).setFooter({ text: `Page ${page + 1}/${totalPages}` }).setTimestamp();
+  return new EmbedBuilder()
+    .setColor(0xFFB300)
+    .setTitle('🏗️ Builder Leaderboard')
+    .setDescription(desc)
+    .setFooter({ text: `Page ${page + 1}/${totalPages} • Top Builders` })
+    .setTimestamp();
 }
 
 function buildRemoveConfirmRow(sessionId, buildId) {
@@ -2171,7 +2191,7 @@ client.once('clientReady', async () => {
     await guild.members.fetch().catch(() => null);
     for (const m of guild.members.cache.values()) {
       if (m.user.bot) continue;
-      await syncNickname(m).catch(err => console.error('startup nickname sync error:', m.user?.tag, err?.message || err));
+      await syncNickname(m).catch(() => {});
     }
   }
 });
@@ -5708,7 +5728,6 @@ ${E_TIME} Created ${created}`)
           ok += 1;
         } catch (e) {
           fail += 1;
-          console.error(`sync command nickname error for ${member.user?.tag || member.id}:`, e?.message || e);
         }
       }
       return interaction.editReply(`✅ Synced nicknames for ${ok} member(s)${fail ? ` — ${fail} failed.` : '.'}`);
@@ -6084,8 +6103,10 @@ async function pollOnce(watchId) {
     const prev = retryState.get(watchId) || { count: 0 };
     const next = { count: prev.count + 1, lastError: msg, lastAt: Date.now(), code };
     retryState.set(watchId, next);
-    console.error(`[Paywatch Poll] ${watchId} attempt ${next.count} failed:`, msg);
     const transient = msg.includes('fetch failed') || msg.includes('API error 524') || msg.includes('Connect Timeout') || code === 'UND_ERR_CONNECT_TIMEOUT' || code === 524;
+    if (!transient) {
+      console.error(`[Paywatch Poll] ${watchId} attempt ${next.count} failed:`, msg);
+    }
     if (!transient && next.count >= 3) {
       await store.updateWatch(watchId, { last_check_at: Date.now() }).catch(() => {});
     }

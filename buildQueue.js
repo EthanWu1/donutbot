@@ -155,7 +155,17 @@ async function getQueueBoardMessage(guild, store, queueCh) {
   return created;
 }
 
+const refreshTimeouts = new Map();
+
 async function refreshQueueBoard(guild, store) {
+  if (refreshTimeouts.has(guild.id)) return;
+  refreshTimeouts.set(guild.id, setTimeout(() => {
+    refreshTimeouts.delete(guild.id);
+    _doRefreshQueueBoard(guild, store).catch(() => {});
+  }, 2500));
+}
+
+async function _doRefreshQueueBoard(guild, store) {
   const queueChId = C.CHANNEL_BUILD_QUEUE;
   if (!queueChId) return;
   const queueCh = await guild.channels.fetch(queueChId).catch(() => null);
@@ -298,7 +308,7 @@ async function showBuildRequestModal(interaction, buildType) {
 
 // ── Modal submit ─────────────────────────────────────────────────────────────
 async function handleModalSubmit(interaction, buildType, store) {
-  await interaction.deferReply({ flags: 64 });
+  await interaction.deferReply({ flags: 64 }).catch(() => {});
 
   const ign     = interaction.fields.getTextInputValue('ign').trim();
   const details = interaction.fields.getTextInputValue('details').trim();
@@ -350,7 +360,7 @@ async function handleModalSubmit(interaction, buildType, store) {
 
 // ── Claim ────────────────────────────────────────────────────────────────────
 async function handleClaim(interaction, reqId, store) {
-  await interaction.deferUpdate();
+  await interaction.deferUpdate().catch(() => {});
   const req = await store.getBuildRequest(reqId);
   if (!req) return interaction.followUp({ content: '❌ Request not found.', flags: 64 });
   if (req.status !== STATUS.QUEUED) return interaction.followUp({ content: '❌ Already claimed.', flags: 64 });
@@ -459,9 +469,6 @@ async function handleClaim(interaction, reqId, store) {
     await store.recordTicketOpened(guild.id, interaction.user.id).catch(() => {});
   } catch {}
 
-  // Build builder ping string
-  const builderPing = builderRoleIds.map(r => `<@&${r}>`).join(' ') || `<@${interaction.user.id}>`;
-
   try {
     await sendClaimedTicketIntro(ticketCh, req, interaction.user.toString(), reqId);
   } catch (e) {
@@ -512,7 +519,7 @@ async function handleClaim(interaction, reqId, store) {
 
 // ── Unclaim ──────────────────────────────────────────────────────────────────
 async function handleUnclaim(interaction, reqId, store) {
-  await interaction.deferReply({ flags: 64 });
+  await interaction.deferReply({ flags: 64 }).catch(() => {});
   const req = await store.getBuildRequest(reqId);
   if (!req) return interaction.editReply('❌ Request not found.');
   if (req.status !== STATUS.ACTIVE) return interaction.editReply('❌ Not active.');

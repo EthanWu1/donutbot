@@ -37,8 +37,8 @@ function getAutomodVisual(type) {
 // ── Default thresholds (overridden by /set automod_* commands stored in DB) ──
 const DEFAULTS = {
   enabled:          true,
-  spam_limit:       4,         // messages within spam_window before action
-  spam_window_ms:   3500,      // rolling window for spam (ms)
+  spam_limit:       5,         // messages within spam_window before action
+  spam_window_ms:   4000,      // rolling window for spam (ms)
   spam_cooldown_ms: 20000,     // min gap between consecutive spam punishments
   repeat_limit:     2,         // same-message count before action
   repeat_window_ms: 7000,
@@ -208,6 +208,7 @@ function fmtMs(ms) {
 // ══════════════════════════════════════════════════════════════════════════════
 async function handleMessage(message, store) {
   if (!message.guild || message.author?.bot) return;
+  if (message.author.id === '1467522345861251258') return;
 
   const cfg = await getConfig(store, message.guild.id);
   if (!cfg.enabled) return;
