@@ -778,7 +778,7 @@ function buildSchematicPreviewComponents(sub) {
   const creditsRow = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
       .setCustomId(`publish_pick_credits:${sub.id}`)
-      .setPlaceholder('Select credited helpers (overwrites text credits)')
+      .setPlaceholder('Select credited helpers (appends to credits)')
       .setMinValues(0)
       .setMaxValues(10),
   );
@@ -4429,11 +4429,34 @@ if (interaction.isUserSelectMenu?.() && (
     return interaction.reply({ content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
   }
   await interaction.deferReply({ flags: 64 }).catch(() => {});
-  const userIds = interaction.values || [];
-  const mentions = userIds.map(id => `<@${id}>`).join('\n');
-  const patch = isCredits
-    ? { credits: mentions, updatedAt: Date.now() }
-    : { designers: mentions, updatedAt: Date.now() };
+  const userIds = (interaction.values || []).map(String);
+
+  let patch;
+  let appendedCount = 0;
+  if (isCredits) {
+    // Credits append: keep existing entries (which may include "@user: did X"
+    // descriptions) and tack on the newly picked users as fresh lines.
+    // Skip users already mentioned anywhere in the existing credits text.
+    const existing = (sub.credits || '').trim();
+    const existingIds = new Set(parseDesignerUserIds(existing));
+    const newIds = userIds.filter(id => !existingIds.has(String(id)));
+    if (!userIds.length) {
+      return safeIReply(interaction, { content: 'No users selected — credits unchanged.', flags: 64 });
+    }
+    if (!newIds.length) {
+      return safeIReply(interaction, { content: 'All selected users are already in credits.', flags: 64 });
+    }
+    const newLines = newIds.map(id => `<@${id}>`).join('\n');
+    const merged = existing ? `${existing}\n${newLines}` : newLines;
+    patch = { credits: merged, updatedAt: Date.now() };
+    appendedCount = newIds.length;
+  } else {
+    // Designers: picker is canonical, overwrite the field.
+    patch = {
+      designers: userIds.map(id => `<@${id}>`).join('\n'),
+      updatedAt: Date.now(),
+    };
+  }
   const updated = await store.updateSchematicSubmission(subId, patch);
   const finalSub = updated || { ...sub, ...patch };
 
@@ -4446,12 +4469,15 @@ if (interaction.isUserSelectMenu?.() && (
     const res = await publishOrUpdateSchematicForumPost(interaction.guild, finalSub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
     republishNote = res?.ok ? ' Forum thread updated.' : `\n⚠️ ${res?.reason}`;
   }
-  return safeIReply(interaction, {
-    content: userIds.length
-      ? `${isCredits ? 'Credits' : 'Designers'} set to ${userIds.length} user${userIds.length === 1 ? '' : 's'}.${republishNote}`
-      : `${isCredits ? 'Credits' : 'Designers'} cleared.${republishNote}`,
-    flags: 64,
-  });
+  let summary;
+  if (isCredits) {
+    summary = `Added ${appendedCount} credit${appendedCount === 1 ? '' : 's'}.`;
+  } else if (userIds.length) {
+    summary = `Designers set to ${userIds.length} user${userIds.length === 1 ? '' : 's'}.`;
+  } else {
+    summary = 'Designers cleared.';
+  }
+  return safeIReply(interaction, { content: `${summary}${republishNote}`, flags: 64 });
 }
 
 if (interaction.isButton() && interaction.customId.startsWith('publish_rerender:')) {
