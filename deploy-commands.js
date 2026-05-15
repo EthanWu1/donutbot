@@ -271,6 +271,72 @@ new SlashCommandBuilder()
   .addRoleOption(o => o.setName('role').setDescription('Role to list members of').setRequired(true))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 
+// --- SPAWNER PRICES ---
+new SlashCommandBuilder()
+  .setName('spawner')
+  .setDescription('Manage spawner buy/sell prices and panel')
+  .addSubcommand(s => s.setName('buy').setDescription('Set the BUY price for a spawner type')
+    .addStringOption(o => o.setName('type').setDescription('Spawner type').setRequired(true)
+      .addChoices(
+        { name: 'Skeleton', value: 'skeleton' },
+        { name: 'Creeper', value: 'creeper' },
+        { name: 'Zombified Piglin', value: 'zombified_piglin' },
+        { name: 'Cow', value: 'cow' },
+        { name: 'Pig', value: 'pig' },
+        { name: 'Spider', value: 'spider' },
+        { name: 'Zombie', value: 'zombie' },
+        { name: 'Iron Golem', value: 'iron_golem' },
+        { name: 'Blaze', value: 'blaze' },
+      ))
+    .addStringOption(o => o.setName('price').setDescription('Price each (e.g. 4.1m, 530000, 5.3m)').setRequired(true)))
+  .addSubcommand(s => s.setName('sell').setDescription('Set the SELL price for a spawner type')
+    .addStringOption(o => o.setName('type').setDescription('Spawner type').setRequired(true)
+      .addChoices(
+        { name: 'Skeleton', value: 'skeleton' },
+        { name: 'Creeper', value: 'creeper' },
+        { name: 'Zombified Piglin', value: 'zombified_piglin' },
+        { name: 'Cow', value: 'cow' },
+        { name: 'Pig', value: 'pig' },
+        { name: 'Spider', value: 'spider' },
+        { name: 'Zombie', value: 'zombie' },
+        { name: 'Iron Golem', value: 'iron_golem' },
+        { name: 'Blaze', value: 'blaze' },
+      ))
+    .addStringOption(o => o.setName('price').setDescription('Price each').setRequired(true)))
+  .addSubcommand(s => s.setName('remove').setDescription('Remove a spawner price (mark as not buying/selling)')
+    .addStringOption(o => o.setName('action').setDescription('Buy or Sell').setRequired(true)
+      .addChoices({ name: 'Buy', value: 'buy' }, { name: 'Sell', value: 'sell' }))
+    .addStringOption(o => o.setName('type').setDescription('Spawner type').setRequired(true)
+      .addChoices(
+        { name: 'Skeleton', value: 'skeleton' },
+        { name: 'Creeper', value: 'creeper' },
+        { name: 'Zombified Piglin', value: 'zombified_piglin' },
+        { name: 'Cow', value: 'cow' },
+        { name: 'Pig', value: 'pig' },
+        { name: 'Spider', value: 'spider' },
+        { name: 'Zombie', value: 'zombie' },
+        { name: 'Iron Golem', value: 'iron_golem' },
+        { name: 'Blaze', value: 'blaze' },
+      )))
+  .addSubcommand(s => s.setName('panel').setDescription('Publish or refresh the spawner prices panel'))
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+// --- APPLICATION OPEN/CLOSE ---
+new SlashCommandBuilder()
+  .setName('application')
+  .setDescription('Open or close application buttons')
+  .addStringOption(o => o.setName('type').setDescription('Application type').setRequired(true)
+    .addChoices(
+      { name: 'Builder', value: 'builder' },
+      { name: 'Staff', value: 'staff' },
+    ))
+  .addStringOption(o => o.setName('state').setDescription('Open or close').setRequired(true)
+    .addChoices(
+      { name: 'Open', value: 'open' },
+      { name: 'Close', value: 'close' },
+    ))
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
 // --- KELP FARM CATALOG ---
 new SlashCommandBuilder()
   .setName('kelp')

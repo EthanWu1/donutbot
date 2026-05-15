@@ -1226,6 +1226,85 @@ async function setAutomodConfig(guildId, patch) {
   return dataStore().automodConfig[guildId];
 }
 
+// ─── SPAWNER PRICES (panel + per-type-per-direction price) ───────────────────
+//   spawnerPrices = { [type]: { buy: number|null, sell: number|null } }
+//   spawnerPanel  = { channelId, messageId }
+//   spawnerCounters = { [type]: number }  (per-type ticket counter)
+//   appClosed = { [appTypeId]: boolean }
+//   ticketPanelRefs = { [panelId]: { channelId, messageId } }
+async function getSpawnerPrices() {
+  await ensureDb();
+  dataStore().spawnerPrices ||= {};
+  return dataStore().spawnerPrices;
+}
+async function setSpawnerPrice(type, direction, price) {
+  await ensureDb();
+  dataStore().spawnerPrices ||= {};
+  dataStore().spawnerPrices[type] ||= { buy: null, sell: null };
+  dataStore().spawnerPrices[type][direction] = price;
+  scheduleDbWrite();
+  return dataStore().spawnerPrices[type];
+}
+async function clearSpawnerPrice(type, direction) {
+  await ensureDb();
+  dataStore().spawnerPrices ||= {};
+  if (!dataStore().spawnerPrices[type]) return null;
+  dataStore().spawnerPrices[type][direction] = null;
+  scheduleDbWrite();
+  return dataStore().spawnerPrices[type];
+}
+async function getSpawnerPanelRef() {
+  await ensureDb();
+  return dataStore().spawnerPanelRef || null;
+}
+async function setSpawnerPanelRef(ref) {
+  await ensureDb();
+  dataStore().spawnerPanelRef = ref;
+  scheduleDbWrite();
+  return ref;
+}
+async function nextSpawnerTicketNumber(type) {
+  await ensureDb();
+  dataStore().spawnerCounters ||= {};
+  const cur = Number(dataStore().spawnerCounters[type] || 0);
+  const next = cur + 1;
+  dataStore().spawnerCounters[type] = next;
+  scheduleDbWrite();
+  return next;
+}
+
+// ─── APPLICATION CLOSED STATE ────────────────────────────────────────────────
+async function getAppClosed(typeId) {
+  await ensureDb();
+  dataStore().appClosed ||= {};
+  return !!dataStore().appClosed[typeId];
+}
+async function setAppClosed(typeId, closed) {
+  await ensureDb();
+  dataStore().appClosed ||= {};
+  dataStore().appClosed[typeId] = !!closed;
+  scheduleDbWrite();
+  return !!closed;
+}
+async function listAppClosed() {
+  await ensureDb();
+  return { ...(dataStore().appClosed || {}) };
+}
+
+// ─── TICKET PANEL PUBLISHED MESSAGE REFS ─────────────────────────────────────
+async function getTicketPanelRef(panelId) {
+  await ensureDb();
+  dataStore().ticketPanelRefs ||= {};
+  return dataStore().ticketPanelRefs[panelId] || null;
+}
+async function setTicketPanelRef(panelId, ref) {
+  await ensureDb();
+  dataStore().ticketPanelRefs ||= {};
+  dataStore().ticketPanelRefs[panelId] = ref;
+  scheduleDbWrite();
+  return ref;
+}
+
 // ─── BUILD QUEUE ──────────────────────────────────────────────────────────────
 async function setBuildRequest(id, data) {
   await ensureDb();
@@ -1287,5 +1366,8 @@ getLoaConfig, setLoaConfig,
 getConfigValue, setConfigValue, getServerConfig,
 getAutomodConfig, setAutomodConfig,
 setBuildRequest, getBuildRequest, listBuildRequests, deleteBuildRequest,
+getSpawnerPrices, setSpawnerPrice, clearSpawnerPrice, getSpawnerPanelRef, setSpawnerPanelRef, nextSpawnerTicketNumber,
+getAppClosed, setAppClosed, listAppClosed,
+getTicketPanelRef, setTicketPanelRef,
 addTimedRole, getActiveTimedRole, revokeTimedRole, listTimedRoles, listExpiredTimedRoles,
 };
