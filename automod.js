@@ -101,6 +101,13 @@ function isMentionLikeBlockedWord(word) {
   return /^<@[!&]?\d+>$/.test(w) || /^\d{16,20}$/.test(w) || /^@(?:everyone|here)$/i.test(w);
 }
 
+// ── Hard-coded channel exemptions ─────────────────────────────────────────────
+// Market channel — spam filter intentionally disabled because users post
+// repeated buy/sell offers that would otherwise trip the spam/repeat detectors.
+const SPAM_EXEMPT_CHANNEL_IDS = new Set([
+  '1483225252044734808', // market
+]);
+
 // ── Per-server in-memory state ─────────────────────────────────────────────────
 const spamTracker   = new Map();
 const spamCooldown  = new Map();
@@ -221,13 +228,14 @@ async function handleMessage(message, store) {
   const content = message.content || '';
   const now = Date.now();
   const userId = message.author.id;
+  const isSpamExempt = SPAM_EXEMPT_CHANNEL_IDS.has(message.channel?.id || '');
 
   // 1 ── Spam detection ───────────────────────────────────────────────────────
   const spamBuf = (spamTracker.get(userId) || []).filter(t => now - t < cfg.spam_window_ms);
   spamBuf.push(now);
   spamTracker.set(userId, spamBuf);
 
-  if (spamBuf.length > cfg.spam_limit) {
+  if (!isSpamExempt && spamBuf.length > cfg.spam_limit) {
     const lastPunish = spamCooldown.get(userId) || 0;
     if (now - lastPunish > cfg.spam_cooldown_ms) {
       spamCooldown.set(userId, now);
@@ -245,7 +253,7 @@ async function handleMessage(message, store) {
   // 2 ── Repeated message detection ──────────────────────────────────────────
   const repeatKey = `${userId}:${message.channelId}`;
   const norm = normaliseText(content);
-  if (norm.length > 4) {
+  if (!isSpamExempt && norm.length > 4) {
     const prev = repeatTracker.get(repeatKey);
     if (prev && prev.text === norm && now - prev.firstSeen < cfg.repeat_window_ms) {
       prev.count++;
@@ -263,7 +271,7 @@ async function handleMessage(message, store) {
   // 3 ── Mentions are allowed; only tracked below for ghost-ping logging.
 
   // 3.5 ── Flood / wall-of-text / emoji burst detection ─────────────────────
-  if (hasFloodContent(content)) {
+  if (!isSpamExempt && hasFloodContent(content)) {
     await enforce(message, 'Spam', 'stop flooding the chat', cfg, store);
     return;
   }
