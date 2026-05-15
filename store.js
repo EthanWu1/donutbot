@@ -47,8 +47,7 @@ const DEFAULT_DATA = {
   buildJobs: {},
   // Weekly staff pay tracking: { weekStart: number, boardMessageId: string|null, members: { [userId]: { paid: bool, streak: number } } }
   staffPay: { weekStart: 0, boardMessageId: null, members: {} },
-  // Auto-recurring giveaways: { [id]: { id, channelId, guildId, prize, hostId, intervalMs, durationMs, winnersCount, claimLabel, pingRoleId } }
-  autoGiveaways: {},
+  staffList: { support: {}, builders: {}, supportMessageId: null, buildersMessageId: null },
   serverConfig: {},
   automodConfig: {},
   buildRequests: {},
@@ -193,7 +192,11 @@ function normalizeData(d) {
   out.staffPay ||= { weekStart: 0, boardMessageId: null, members: {} };
   out.staffPay.members ||= {};
   out.staffPay.boardMessageId ??= null;
-  out.autoGiveaways ||= {};
+  out.staffList ||= { support: {}, builders: {}, supportMessageId: null, buildersMessageId: null };
+  out.staffList.support ||= {};
+  out.staffList.builders ||= {};
+  out.staffList.supportMessageId ??= null;
+  out.staffList.buildersMessageId ??= null;
   out.serverConfig ||= {};
   out.automodConfig ||= {};
   out.buildRequests ||= {};
@@ -886,7 +889,7 @@ async function listBuilderBoards() {
 }
 
 // --- BUILD COMPLETIONS (proof) ---
-// buildHistory[guildId] = [ { id, status, amount, builderIgn, customerIgn, receiverIgn, builderDiscordId, proofUrl, proofName, moderatorId, at } ]
+// buildHistory[guildId] = [ { id, status, amount, builderIgn, customerIgn, receiverIgn, builderDiscordId, customerDiscordId, proofUrl, proofName, moderatorId, at } ]
 // builderFinishedCounts[guildId][builderIgn] = number
 // builderFinishedCountsById[guildId][discordId] = number
 async function addBuildRecord(guildId, rec) {
@@ -903,6 +906,7 @@ async function addBuildRecord(guildId, rec) {
     customerIgn: rec?.customerIgn ? String(rec.customerIgn) : null,
     receiverIgn: rec?.receiverIgn ? String(rec.receiverIgn) : null,
     builderDiscordId: rec?.builderDiscordId ? String(rec.builderDiscordId) : null,
+    customerDiscordId: rec?.customerDiscordId ? String(rec.customerDiscordId) : null,
     proofUrl: rec?.proofUrl ? String(rec.proofUrl) : null,
     proofName: rec?.proofName ? String(rec.proofName) : null,
     moderatorId: rec?.moderatorId ? String(rec.moderatorId) : null,
@@ -1151,25 +1155,40 @@ async function resetStaffPayWeek(newWeekStart) {
   scheduleDbWrite();
 }
 
-// ─── AUTO GIVEAWAYS ──────────────────────────────────────────────────────────
-async function getAutoGiveaways() {
+// --- ACCEPTED STAFF LIST ---
+async function getAcceptedStaffList() {
   await ensureDb();
-  dataStore().autoGiveaways ||= {};
-  return dataStore().autoGiveaways;
+  dataStore().staffList ||= { support: {}, builders: {}, supportMessageId: null, buildersMessageId: null };
+  dataStore().staffList.support ||= {};
+  dataStore().staffList.builders ||= {};
+  dataStore().staffList.supportMessageId ??= null;
+  dataStore().staffList.buildersMessageId ??= null;
+  return dataStore().staffList;
 }
-async function setAutoGiveaway(id, data) {
+
+async function setAcceptedStaffListEntry(kind, userId, entry) {
   await ensureDb();
-  dataStore().autoGiveaways ||= {};
-  dataStore().autoGiveaways[id] = data;
+  const key = kind === 'builder' ? 'builders' : 'support';
+  const list = await getAcceptedStaffList();
+  list[key][String(userId)] = { ...(list[key][String(userId)] || {}), ...(entry || {}), updatedAt: Date.now() };
+  scheduleDbWrite();
+  return list[key][String(userId)];
+}
+
+async function deleteAcceptedStaffListEntry(kind, userId) {
+  await ensureDb();
+  const key = kind === 'builder' ? 'builders' : 'support';
+  const list = await getAcceptedStaffList();
+  delete list[key][String(userId)];
   scheduleDbWrite();
 }
-async function deleteAutoGiveaway(id) {
+
+async function setAcceptedStaffListMessageId(kind, messageId) {
   await ensureDb();
-  dataStore().autoGiveaways ||= {};
-  if (!dataStore().autoGiveaways[id]) return false;
-  delete dataStore().autoGiveaways[id];
+  const list = await getAcceptedStaffList();
+  if (kind === 'builder') list.buildersMessageId = messageId || null;
+  else list.supportMessageId = messageId || null;
   scheduleDbWrite();
-  return true;
 }
 
 
@@ -1361,7 +1380,7 @@ addCatalogFarm, listCatalogFarms, getCatalogFarm, removeCatalogFarm,
 getCatalogPrices, setCatalogPrice, getCatalogPanel, setCatalogPanel, updateCatalogFarm,
 getStaffPayData, setStaffPayWeekStart, getStaffPayMember, setStaffPayMember, resetStaffPayWeek,
 getStaffPayBoardMessageId, setStaffPayBoardMessageId,
-getAutoGiveaways, setAutoGiveaway, deleteAutoGiveaway,
+getAcceptedStaffList, setAcceptedStaffListEntry, deleteAcceptedStaffListEntry, setAcceptedStaffListMessageId,
 getLoaConfig, setLoaConfig,
 getConfigValue, setConfigValue, getServerConfig,
 getAutomodConfig, setAutomodConfig,
