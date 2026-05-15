@@ -1167,22 +1167,32 @@ async function importSchematicFromThread(guild, threadIdOrUrl, currentSub) {
   return { ok: true, partial: false };
 }
 
+const SCHEMATIC_GUIDELINES_TITLE = '📌 How to Submit a Schematic';
+
 async function ensureSchematicGuidelinesPost(guild) {
   try {
     const forum = await guild.channels.fetch(SCHEMATIC_FORUM_CHANNEL_ID).catch(() => null);
     if (!forum || forum.type !== ChannelType.GuildForum) return;
     const ref = await store.getSchematicGuidelinesRef().catch(() => null);
+
+    // If the tracked thread exists, make sure its title matches the canonical
+    // SCHEMATIC_GUIDELINES_TITLE. If it doesn't, delete the stale thread and
+    // fall through to create a fresh one.
     if (ref?.guildId === guild.id && ref?.threadId) {
       const existing = await forum.threads.fetch(ref.threadId).catch(() => null);
-      if (existing) return; // already created
+      if (existing) {
+        if (existing.name === SCHEMATIC_GUIDELINES_TITLE) return;
+        try { await existing.delete('Schematic guidelines post being remade'); } catch (e) { console.error('[schematic guidelines] delete stale error:', e?.message); }
+      }
     }
+
     const thread = await forum.threads.create({
-      name: '📌 How to submit a schematic',
+      name: SCHEMATIC_GUIDELINES_TITLE,
       autoArchiveDuration: SCHEMATIC_FORUM_AUTO_ARCHIVE_MIN,
       message: {
         embeds: [new EmbedBuilder()
           .setColor(0x08a4a7)
-          .setTitle('How to submit a schematic')
+          .setTitle('How to Submit a Schematic')
           .setDescription([
             `Open a ticket in <#${SCHEMATIC_SUBMISSION_LINK_CHANNEL_ID}> using the **Publish Schematic** button.`,
             '',
