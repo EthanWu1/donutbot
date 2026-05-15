@@ -1,0 +1,1496 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<script src="./assets/deepslate-bundle.js"></script>
+<script>
+(() => {
+  const _origErr = console.error;
+  console.error = (...args) => {
+    const flat = args.map(a => a instanceof Error ? `${a.message}\n${a.stack || ''}` : a);
+    _origErr.apply(console, flat);
+  };
+})();
+(async () => {
+  const D = window.DS;
+  const {
+    Structure, BlockState, Identifier,
+    BlockDefinition, BlockModel, TextureAtlas, upperPowerOfTwo,
+    StructureRenderer, mat4,
+  } = D;
+  // patch deepslate's chest renderer for double-chest support (defined below after helpers)
+
+  const ASSET_BASE = './assets';
+  const WATER_TINT_RGB = [63, 118, 228];
+  const WATER_TEXTURE_ALPHA = 230;
+  const WATER_SIDE_TEXTURE_ALPHA = 230;
+  const WATER_TEXTURE_SHADE = 1;
+
+  async function loadJson(path) {
+    const r = await fetch(path);
+    if (!r.ok) throw new Error(`fetch ${path}: ${r.status}`);
+    return r.json();
+  }
+
+  async function loadImage(path) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error(`failed to load ${path}`));
+      img.src = path;
+    });
+  }
+
+  let resources = null;
+
+  async function initResources() {
+    const [blockstatesJson, modelsJson, atlasIdx, atlasImg] = await Promise.all([
+      loadJson(`${ASSET_BASE}/blockstates.json`),
+      loadJson(`${ASSET_BASE}/models.json`),
+      loadJson(`${ASSET_BASE}/atlas_index.json`),
+      loadImage(`${ASSET_BASE}/atlas.png`),
+    ]);
+
+    const blockDefinitions = {};
+    for (const [k, v] of Object.entries(blockstatesJson)) {
+      const id = Identifier.parse(k);
+      blockDefinitions[id.toString()] = BlockDefinition.fromJson(v);
+    }
+
+    function flattenTextures(model) {
+      if (!model || !model.textures) return model;
+      const out = { ...model, textures: { ...model.textures } };
+      for (const [k, v] of Object.entries(out.textures)) {
+        if (v && typeof v === 'object' && typeof v.sprite === 'string') {
+          out.textures[k] = v.sprite;
+        }
+      }
+      return out;
+    }
+
+    const glassPaneTextureDiagnostics = {};
+
+    function recordPaneTexture(modelId, json) {
+      const path = modelId.replace(/^minecraft:block\//, '');
+      if (!/(^|_)glass_pane(_|$)/.test(path)) return json;
+      if (!json?.textures?.edge || !json?.textures?.pane) return json;
+      const pane = json.textures.pane;
+      const edge = json.textures.edge;
+      const paneSprite = typeof pane === 'object' && typeof pane.sprite === 'string' ? pane.sprite : pane;
+      const edgeSprite = typeof edge === 'object' && typeof edge.sprite === 'string' ? edge.sprite : edge;
+      const key = path.replace(/_(post|side|side_alt|noside|noside_alt)$/, '');
+      glassPaneTextureDiagnostics[key] = {
+        edge: edgeSprite,
+        pane: paneSprite,
+      };
+      return json;
+    }
+
+    // Kept for reference, but not applied: the user wants default pane model
+    // geometry/textures, not extra connected-pane culling.
+    function patchPaneCullfaces(modelId, json) {
+      if (!json?.elements) return json;
+      const patched = { ...json, elements: json.elements.map(e => {
+        if (!e.faces) return e;
+        const newFaces = { ...e.faces };
+        for (const dir of ['up', 'down', 'north', 'south', 'east', 'west']) {
+          if (newFaces[dir] && !newFaces[dir].cullface) {
+            newFaces[dir] = { ...newFaces[dir], cullface: dir };
+          }
+        }
+        return { ...e, faces: newFaces };
+      }) };
+      return patched;
+    }
+    const PANE_TEMPLATE_IDS = new Set([
+      'minecraft:block/template_glass_pane_post',
+      'minecraft:block/template_glass_pane_side',
+      'minecraft:block/template_glass_pane_side_alt',
+      'minecraft:block/template_glass_pane_noside',
+      'minecraft:block/template_glass_pane_noside_alt',
+    ]);
+
+    const blockModels = {};
+    const rawModels = {};
+    for (const [k, v] of Object.entries(modelsJson)) {
+      const id = Identifier.parse(k);
+      rawModels[id.toString()] = v;
+      let processed = recordPaneTexture(id.toString(), v);
+      processed = flattenTextures(processed);
+      if (false && PANE_TEMPLATE_IDS.has(id.toString())) {
+        processed = patchPaneCullfaces(id.toString(), processed);
+      }
+      blockModels[id.toString()] = BlockModel.fromJson(processed);
+    }
+    window.__glassPaneTextureDiagnostics = glassPaneTextureDiagnostics;
+    for (const m of Object.values(blockModels)) {
+      m.flatten({ getBlockModel: (id) => blockModels[id.toString()] });
+    }
+
+    // Build opaque-block set: any block whose blockstate model chain has a
+    // full-cube parent (block/cube, cube_all, cube_column, cube_directional, cube_mirrored).
+    // These blocks fully occlude their neighbors and should be marked opaque so
+    // deepslate's culling logic skips interior faces.
+    const FULL_CUBE_PARENTS = new Set([
+      'minecraft:block/cube',
+      'minecraft:block/cube_all',
+      'minecraft:block/cube_column',
+      'minecraft:block/cube_column_horizontal',
+      'minecraft:block/cube_directional',
+      'minecraft:block/cube_mirrored',
+      'minecraft:block/cube_mirrored_all',
+      'minecraft:block/cube_bottom_top',
+      'minecraft:block/orientable',
+      'minecraft:block/orientable_with_bottom',
+      'minecraft:block/orientable_vertical',
+    ]);
+    function resolveModelChain(modelId, depth = 0) {
+      if (depth > 16) return null;
+      const m = rawModels[modelId];
+      if (!m) return null;
+      if (FULL_CUBE_PARENTS.has(modelId)) return modelId;
+      if (m.parent) {
+        const parentId = Identifier.parse(m.parent).toString();
+        if (FULL_CUBE_PARENTS.has(parentId)) return parentId;
+        return resolveModelChain(parentId, depth + 1);
+      }
+      return null;
+    }
+    const OPAQUE_BLOCKS = new Set();
+    for (const [blockName, def] of Object.entries(blockstatesJson)) {
+      let firstModel = null;
+      if (def.variants) {
+        for (const variant of Object.values(def.variants)) {
+          const v = Array.isArray(variant) ? variant[0] : variant;
+          if (v?.model) { firstModel = v.model; break; }
+        }
+      } else if (def.multipart && def.multipart.length) {
+        firstModel = def.multipart[0].apply?.model;
+      }
+      if (!firstModel) continue;
+      const modelId = Identifier.parse(firstModel).toString();
+      if (resolveModelChain(modelId)) {
+        OPAQUE_BLOCKS.add(blockName);
+      }
+    }
+    // Explicit additions for blocks deepslate special-renders or that read as opaque
+    // but don't match a cube parent heuristically.
+    // NOTE: soul_sand intentionally excluded — user wants bubble columns visible
+    // through it. We mark it semi-transparent below so blocks behind show subtly.
+    for (const n of [
+      'packed_ice', 'blue_ice', 'soul_soil',
+      'redstone_block', 'crafter', 'smoker', 'blast_furnace', 'furnace',
+      'dispenser', 'dropper', 'observer', 'piston', 'sticky_piston',
+      'note_block', 'jukebox',
+    ]) OPAQUE_BLOCKS.add(n);
+    const SOLID_NON_OPAQUE = new Set(['honey_block', 'soul_sand']);
+    window.__opaqueBlocks = OPAQUE_BLOCKS;
+    window.__blockDefinitions = blockDefinitions;
+    window.__blockstatesJson = blockstatesJson;
+
+    const MISSING_REPORTED = new Set();
+
+    const padW = upperPowerOfTwo(atlasImg.width);
+    const padH = upperPowerOfTwo(atlasImg.height);
+    const atlasSize = Math.max(padW, padH);
+    const padded = document.createElement('canvas');
+    padded.width = atlasSize;
+    padded.height = atlasSize;
+    const pctx = padded.getContext('2d', { willReadFrequently: true });
+    pctx.drawImage(atlasImg, 0, 0);
+
+    // Paint a magenta 16x16 region at the bottom-left of the atlas for the missing-block fallback.
+    pctx.fillStyle = '#ff00ff';
+    pctx.fillRect(0, atlasSize - 16, 16, 16);
+
+    // soul_sand kept fully opaque (vanilla 255) — user wants normal soul_sand
+    // appearance, not see-through. Bubble columns are rendered separately via
+    // the IMPLICIT_WATER_BLOCKS path so don't need soul_sand transparency.
+
+    // Smooth water_still highlight pixels — the 8 brightest pixels (alpha-blended
+    // against the dark navy bg) read as white speckle dots on water surfaces.
+    // Clamp R/G/B max to the texture's avg so contrast is reduced.
+    // Blur the first frame of a fluid texture with a 3×3 box filter to wipe
+    // the bright highlight pixels that read as speckle dots across pools.
+    // Also bump alpha to a higher target so the dark backdrop doesn't bleed
+    // through and amplify per-pixel brightness variation.
+    // Soften fluid texture: opaque alpha + multi-pass 3x3 box blur on the
+    // first frame only. Vanilla water_still has 8 bright highlight pixels per
+    // 16x16 frame. With NEAREST minification, those pixels render as visible
+    // speckles at iso zoom. Multiple blur passes preserve overall pattern
+    // (subtle wave variation) while flattening the speckle peaks.
+    function smoothFluidTexture(textureKey, passes) {
+      const region = atlasIdx[textureKey];
+      if (!region) return;
+      const [x, y, w, h] = region;
+      const size = Math.min(w, h);
+      let src = pctx.getImageData(x, y, size, size);
+      const isWaterTexture = textureKey === 'block/water_still' || textureKey === 'block/water_flow';
+      const targetAlpha = isWaterTexture ? WATER_TEXTURE_ALPHA : 255;
+      const shade = isWaterTexture ? WATER_TEXTURE_SHADE : 1;
+      for (let pass = 0; pass < passes; pass++) {
+        const out = pctx.createImageData(size, size);
+        const sd = src.data, od = out.data;
+        for (let py = 0; py < size; py++) {
+          for (let px = 0; px < size; px++) {
+            let r = 0, g = 0, b = 0, n = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+              for (let dx = -1; dx <= 1; dx++) {
+                const qx = (px + dx + size) % size;
+                const qy = (py + dy + size) % size;
+                const j = (qy * size + qx) * 4;
+                r += sd[j]; g += sd[j + 1]; b += sd[j + 2]; n++;
+              }
+            }
+            const i = (py * size + px) * 4;
+            od[i] = Math.round((r / n) * shade);
+            od[i + 1] = Math.round((g / n) * shade);
+            od[i + 2] = Math.round((b / n) * shade);
+            od[i + 3] = targetAlpha;
+          }
+        }
+        src = out;
+      }
+      pctx.putImageData(src, x, y);
+    }
+    smoothFluidTexture('block/water_still', 3);
+    smoothFluidTexture('block/water_flow', 3);
+    smoothFluidTexture('block/lava_still', 3);
+    smoothFluidTexture('block/lava_flow', 3);
+
+    function setAlpha(textureKey, target) {
+      const region = atlasIdx[textureKey];
+      if (!region) return;
+      const [x, y, w, h] = region;
+      const imgData = pctx.getImageData(x, y, w, h);
+      const d = imgData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] > 0) d[i + 3] = target;
+      }
+      pctx.putImageData(imgData, x, y);
+    }
+    for (const key of ['block/honey_block_top', 'block/honey_block_bottom', 'block/honey_block_side']) {
+      setAlpha(key, 255);
+    }
+
+    function textureAlphaStats(textureKey) {
+      const region = atlasIdx[textureKey];
+      if (!region) return null;
+      const [x, y, w, h] = region;
+      const imgData = pctx.getImageData(x, y, w, h);
+      const d = imgData.data;
+      let min = 255, max = 0, count = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        min = Math.min(min, d[i + 3]);
+        max = Math.max(max, d[i + 3]);
+        count++;
+      }
+      return { min, max, count };
+    }
+    window.__textureAlphaDiagnostics = {
+      'block/honey_block_top': textureAlphaStats('block/honey_block_top'),
+      'block/honey_block_bottom': textureAlphaStats('block/honey_block_bottom'),
+      'block/honey_block_side': textureAlphaStats('block/honey_block_side'),
+      'block/light_gray_stained_glass': textureAlphaStats('block/light_gray_stained_glass'),
+      'block/light_gray_stained_glass_pane_top': textureAlphaStats('block/light_gray_stained_glass_pane_top'),
+    };
+
+    function paintFlatTexture(textureKey, targetKey, x, y, alpha) {
+      const region = atlasIdx[textureKey];
+      if (!region) return null;
+      const [sx, sy, sw, sh] = region;
+      const size = Math.min(sw, sh);
+      const imgData = pctx.getImageData(sx, sy, size, size);
+      const d = imgData.data;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] === 0) continue;
+        r += d[i]; g += d[i + 1]; b += d[i + 2]; n++;
+      }
+      if (n === 0) return null;
+      pctx.fillStyle = `rgba(${Math.round(r / n)}, ${Math.round(g / n)}, ${Math.round(b / n)}, ${alpha / 255})`;
+      pctx.fillRect(x, y, 16, 16);
+      return [targetKey, [x, y, 16, 16]];
+    }
+
+    const flatWaterSideRegion = paintFlatTexture(
+      'block/water_still',
+      'block/water_side_flat',
+      32,
+      atlasSize - 16,
+      WATER_SIDE_TEXTURE_ALPHA
+    );
+
+    const atlasData = pctx.getImageData(0, 0, atlasSize, atlasSize);
+
+    const uvMap = {};
+    for (const [k, region] of Object.entries(atlasIdx)) {
+      const [x, y, w, h] = region;
+      const size = Math.min(w, h);
+      uvMap[Identifier.parse(k).toString()] = [
+        x / atlasSize, y / atlasSize,
+        (x + size) / atlasSize, (y + size) / atlasSize,
+      ];
+    }
+    uvMap['minecraft:block/missingno'] = [
+      0 / atlasSize, (atlasSize - 16) / atlasSize,
+      16 / atlasSize, atlasSize / atlasSize,
+    ];
+    if (flatWaterSideRegion) {
+      const [key, region] = flatWaterSideRegion;
+      const [x, y, w, h] = region;
+      uvMap[Identifier.parse(key).toString()] = [
+        x / atlasSize, y / atlasSize,
+        (x + w) / atlasSize, (y + h) / atlasSize,
+      ];
+    }
+    const atlas = new TextureAtlas(atlasData, uvMap);
+
+    const fallbackModel = BlockModel.fromJson({
+      textures: { all: 'block/missingno' },
+      elements: [{
+        from: [0, 0, 0], to: [16, 16, 16],
+        faces: {
+          down:  { uv: [0, 0, 16, 16], texture: '#all' },
+          up:    { uv: [0, 0, 16, 16], texture: '#all' },
+          north: { uv: [0, 0, 16, 16], texture: '#all' },
+          south: { uv: [0, 0, 16, 16], texture: '#all' },
+          east:  { uv: [0, 0, 16, 16], texture: '#all' },
+          west:  { uv: [0, 0, 16, 16], texture: '#all' },
+        },
+      }],
+    });
+    fallbackModel.flatten({ getBlockModel: () => fallbackModel });
+    blockModels['minecraft:block/missingno'] = fallbackModel;
+    const fallbackDefinition = BlockDefinition.fromJson({
+      variants: { '': { model: 'minecraft:block/missingno' } },
+    });
+
+    // Bubble-column overlay: vanilla bubble_column has no visible model (its blockstate
+    // points to block/water which has no elements). Paint a near-white blue-tinted
+    // swatch into the atlas and render bubble_column as a wider vertical column
+    // (8w × 16h × 8d) so it reads clearly as foam against surrounding water.
+    pctx.fillStyle = '#e8f4ff';
+    pctx.fillRect(16, atlasSize - 16, 8, 8);
+    uvMap['minecraft:block/bubble_overlay'] = [
+      16 / atlasSize, (atlasSize - 16) / atlasSize,
+      24 / atlasSize, (atlasSize - 8) / atlasSize,
+    ];
+    const bubbleModel = BlockModel.fromJson({
+      textures: { all: 'block/bubble_overlay' },
+      elements: [{
+        // Full-height column; geometry touches block boundaries at y=0 and y=16
+        // so vertically-stacked bubble_column blocks form one continuous pillar.
+        // cullface up/down lets self_culling hide the shared faces between stacks.
+        from: [4, 0, 4], to: [12, 16, 12],
+        faces: {
+          down:  { uv: [0, 0, 16, 16], texture: '#all', cullface: 'down' },
+          up:    { uv: [0, 0, 16, 16], texture: '#all', cullface: 'up' },
+          north: { uv: [0, 0, 16, 16], texture: '#all' },
+          south: { uv: [0, 0, 16, 16], texture: '#all' },
+          east:  { uv: [0, 0, 16, 16], texture: '#all' },
+          west:  { uv: [0, 0, 16, 16], texture: '#all' },
+        },
+      }],
+    });
+    bubbleModel.flatten({ getBlockModel: () => bubbleModel });
+    blockModels['minecraft:block/bubble_overlay'] = bubbleModel;
+    const bubbleDefinition = BlockDefinition.fromJson({
+      variants: { '': { model: 'minecraft:block/bubble_overlay' } },
+    });
+    // Do NOT override bubble_column's blockDefinition — leave vanilla's
+    // empty model. bubble_column blocks are tagged __implicitWater in
+    // preprocessing, and the SpecialRenderer overlays a water mesh on
+    // each cell. Net effect: bubble column reads as plain water.
+    // (Old bubbleOverlay approach left visible cyan pillars that didn't
+    // match vanilla MC's bubble-particle look in a static render.)
+
+    const SEMI_TRANSPARENT = new Set([
+      'glass', 'tinted_glass',
+      'ice', 'frosted_ice',  // packed_ice / blue_ice are opaque in vanilla
+      'slime_block',  // honey_block intentionally NOT here — user wants it more visible
+      'iron_bars',
+      'bubble_column',
+      'glass_pane',
+      'water',  // slight alpha (245) — proper blend path. Ice-top z-fight handled by __waterAbove tag.
+      // lava NOT here — fully opaque
+      // soul_sand NOT here — user wants it rendered as normal opaque-ish soul_sand,
+      // not see-through. Bubble columns are handled separately via IMPLICIT_WATER.
+      // honey_block NOT here — vanilla translucent rendering is sufficient.
+    ]);
+    for (const c of ['white','orange','magenta','light_blue','yellow','lime','pink','gray','light_gray','cyan','purple','blue','brown','green','red','black']) {
+      SEMI_TRANSPARENT.add(`${c}_stained_glass`);
+      SEMI_TRANSPARENT.add(`${c}_stained_glass_pane`);
+    }
+    const SELF_CULLING = new Set(['glass', 'iron_bars', 'bubble_column']);
+    for (const c of ['white','orange','magenta','light_blue','yellow','lime','pink','gray','light_gray','cyan','purple','blue','brown','green','red','black']) {
+      SELF_CULLING.add(`${c}_stained_glass`);
+    }
+
+    resources = {
+      getBlockDefinition(id) {
+        const def = blockDefinitions[id.toString()];
+        if (def) return def;
+        const name = id.path || id.toString().replace(/^minecraft:/, '');
+        if (!MISSING_REPORTED.has(name)) {
+          MISSING_REPORTED.add(name);
+          console.warn('[litematicRender] missing block definition for', id.toString(), '— rendering fallback');
+        }
+        return fallbackDefinition;
+      },
+      getBlockModel(id) { return blockModels[id.toString()] || fallbackModel; },
+      getTextureUV(id) { return atlas.getTextureUV(id); },
+      getTextureAtlas() { return atlas.getTextureAtlas(); },
+      getBlockFlags(id) {
+        const name = id.path || id.toString().replace(/^minecraft:/, '');
+        const isSemi = SEMI_TRANSPARENT.has(name);
+        const flags = {
+          // semi-transparent blocks (glass, ice, water, leaves) must NOT be opaque,
+          // otherwise neighbor faces get culled and you can't see through them.
+          // Water + lava also stay non-opaque so they don't cull adjacent glass /
+          // iron_bars / etc; the ice-top z-fight is handled surgically via
+          // __waterAbove tagging in buildStructure (force cull.up only).
+          opaque: !isSemi && !SOLID_NON_OPAQUE.has(name) && OPAQUE_BLOCKS.has(name),
+        };
+        if (isSemi) flags.semi_transparent = true;
+        if (SELF_CULLING.has(name)) flags.self_culling = true;
+        return flags;
+      },
+      getBlockProperties(_id) { return null; },
+      getDefaultBlockProperties(_id) { return null; },
+    };
+  }
+
+  function normalizeProps(_name, props) {
+    // Preserve original fluid level — vanilla slanted/flowing tops.
+    // Shared corner heights are reconciled in preprocessFluid so adjacent
+    // slanted surfaces meet without fabricating extra internal faces.
+    return props;
+  }
+
+  // === Double-chest renderer ===
+  // deepslate@0.25 has no double-chest support — renders each chest as a single small chest.
+  // We detect chest pairs in preprocessChests and patch SpecialRenderers.getBlockMesh
+  // to render the appropriate half-chest model (chest_left.png / chest_right.png with vanilla UVs).
+  const CHEST_NAMES = new Set([
+    'minecraft:chest', 'minecraft:trapped_chest',
+    'minecraft:copper_chest', 'minecraft:exposed_copper_chest',
+    'minecraft:weathered_copper_chest', 'minecraft:oxidized_copper_chest',
+    'minecraft:waxed_copper_chest', 'minecraft:waxed_exposed_copper_chest',
+    'minecraft:waxed_weathered_copper_chest', 'minecraft:waxed_oxidized_copper_chest',
+  ]);
+  function chestVariantTexture(name) {
+    if (name === 'minecraft:chest') return 'normal';
+    if (name === 'minecraft:trapped_chest') return 'trapped';
+    if (name.includes('oxidized')) return 'copper_oxidized';
+    if (name.includes('weathered')) return 'copper_weathered';
+    if (name.includes('exposed')) return 'copper_exposed';
+    if (name.includes('copper')) return 'copper';
+    return 'normal';
+  }
+  // Paired-chest model: render the whole pair as ONE wide chest at the LEFT
+  // half's block position. Right partner returns an empty mesh (handled in patch).
+  // Uses chest_normal.png with vanilla single-chest UVs, stretched horizontally
+  // across 30 units (extends into +X partner's block). One continuous mesh →
+  // zero seam between halves.
+  function wideChestModel(variant) {
+    const tex = `entity/chest/${variant}`;
+    // Geometry spans this block AND the partner block (in canonical orientation
+    // where partner is at +X, before the per-block facing rotation).
+    // Single chest is 14w × 10h × 14d at (1, 0, 1) → (15, 10, 15).
+    // Wide pair: 30w × 10h × 14d at (1, 0, 1) → (31, 10, 15).
+    const body = {
+      from: [1, 0, 1], to: [31, 10, 15],
+      faces: {
+        down:  { uv: [3.5, 4.75, 7, 8.25], texture: '#0' },
+        up:    { uv: [7, 4.75, 10.5, 8.25], texture: '#0' },
+        west:  { uv: [0, 8.25, 3.5, 10.75], texture: '#0', rotation: 180 },
+        east:  { uv: [7, 8.25, 10.5, 10.75], texture: '#0', rotation: 180 },
+        south: { uv: [3.5, 8.25, 7, 10.75], texture: '#0', rotation: 180 },
+        north: { uv: [10.5, 8.25, 14, 10.75], texture: '#0', rotation: 180 },
+      },
+    };
+    const lid = {
+      from: [1, 10, 1], to: [31, 14, 15],
+      faces: {
+        down:  { uv: [3.5, 0, 7, 3.5], texture: '#0' },
+        up:    { uv: [7, 0, 10.5, 3.5], texture: '#0' },
+        west:  { uv: [0, 3.5, 3.5, 4.5], texture: '#0', rotation: 180 },
+        east:  { uv: [7, 3.5, 10.5, 4.5], texture: '#0', rotation: 180 },
+        south: { uv: [3.5, 3.5, 7, 4.5], texture: '#0', rotation: 180 },
+        north: { uv: [10.5, 3.5, 14, 4.5], texture: '#0', rotation: 180 },
+      },
+    };
+    // Centered lock at the seam (world midpoint between two blocks)
+    const lock = {
+      from: [15, 7, 0], to: [17, 11, 2],
+      faces: {
+        west:  { uv: [0, 0.25, 0.25, 1.25], texture: '#0', rotation: 180 },
+        east:  { uv: [0.75, 0.25, 1, 1.25], texture: '#0', rotation: 180 },
+        north: { uv: [0.25, 0.25, 0.75, 1.25], texture: '#0', rotation: 180 },
+        south: { uv: [0.25, 0.25, 0.75, 1.25], texture: '#0', rotation: 180 },
+        up:    { uv: [0.25, 0, 0.75, 0.25], texture: '#0' },
+        down:  { uv: [0.25, 0, 0.75, 0.25], texture: '#0' },
+      },
+    };
+    return new D.BlockModel(undefined, { 0: tex }, [body, lid, lock]);
+  }
+
+  // === Slanted fluid mesh (water + lava) ===
+  // Per-corner heights from preprocessFluid create a vanilla-style slanted
+  // top surface. FULL UV on every face so the texture pattern stays
+  // consistent regardless of face height (no V-compression stretching).
+  // Vertex winding matches deepslate's BlockModel.getElementMesh (CCW from
+  // each face's outward normal) so nothing gets back-face culled.
+  const WATER_TINT = WATER_TINT_RGB.map((c) => c / 255);
+  const LAVA_TINT  = [1, 1, 1];              // lava texture already colored
+  function emptyFluidFaceStats() {
+    return { topStill: 0, verticalStill: 0, verticalFlat: 0, bottom: 0 };
+  }
+  function createFluidFaceStats() {
+    return {
+      water: { ...emptyFluidFaceStats(), bySource: {} },
+      lava: { ...emptyFluidFaceStats(), bySource: {} },
+    };
+  }
+  function sourceKey(source, kind) {
+    return String(source || kind).replace(/^minecraft:/, '');
+  }
+  function ensureFluidSourceStats(kind, source) {
+    const stats = window.__fluidFaceStats;
+    if (!stats || !stats[kind]) return null;
+    const key = sourceKey(source, kind);
+    if (!stats[kind].bySource[key]) stats[kind].bySource[key] = emptyFluidFaceStats();
+    return stats[kind].bySource[key];
+  }
+  function incrementFluidFaceStats(stats, faceDir, textureRole) {
+    if (faceDir === 'up' && textureRole === 'still') stats.topStill += 1;
+    else if (faceDir === 'down') stats.bottom += 1;
+    else if (textureRole === 'flat') stats.verticalFlat += 1;
+    else if (textureRole === 'still') stats.verticalStill += 1;
+  }
+  function recordFluidFace(kind, faceDir, textureRole, source) {
+    const stats = window.__fluidFaceStats;
+    if (!stats || !stats[kind]) return;
+    incrementFluidFaceStats(stats[kind], faceDir, textureRole);
+    const sourceStats = ensureFluidSourceStats(kind, source);
+    if (sourceStats) incrementFluidFaceStats(sourceStats, faceDir, textureRole);
+  }
+  function buildSlantedFluidMesh(corners, cull, atlas, kind, source, sideRuns = {}) {
+    const { Mesh, Quad, Vector, Identifier } = D;
+    const mesh = new Mesh();
+    ensureFluidSourceStats(kind, source);
+    const [nw, ne, se, sw] = corners;
+    const topTex = kind === 'lava' ? 'block/lava_still' : 'block/water_still';
+    const sideTex = kind === 'lava' ? 'block/lava_flow' : 'block/water_side_flat';
+    const topUv = atlas.getTextureUV(Identifier.parse(topTex));
+    const sideUv = atlas.getTextureUV(Identifier.parse(sideTex)) || topUv;
+    if (!topUv || !sideUv) return mesh;
+    const TINT = kind === 'lava' ? LAVA_TINT : WATER_TINT;
+
+    function addQuad(p, faceDir, textureRole) {
+      const uv = textureRole === 'still' ? topUv : sideUv;
+      const [u0, v0, u1, v1] = uv;
+      const uvc = [u0, v0, u1, v0, u1, v1, u0, v1];
+      const q = Quad.fromPoints(
+        new Vector(p[0][0], p[0][1], p[0][2]),
+        new Vector(p[1][0], p[1][1], p[1][2]),
+        new Vector(p[2][0], p[2][1], p[2][2]),
+        new Vector(p[3][0], p[3][1], p[3][2])
+      );
+      q.setTexture(uvc, [u0, v0, u1, v1]);
+      q.setColor(TINT);
+      // Tag with the fluid's face direction so finishChunkMesh patch can pin
+      // the per-vertex normal to a uniform value (so per-quad lighting doesn't
+      // vary across the pool from slanted-top normal differences).
+      q.__fluidFaceDir = faceDir;
+      mesh.quads.push(q);
+      recordFluidFace(kind, faceDir, textureRole, source);
+    }
+
+    // BUG 1/2: the old center fan was back-facing and seam-prone; emit one correctly wound top quad only when not buried.
+    if (!cull.up) {
+      addQuad([[0, sw, 16], [16, se, 16], [16, ne, 0], [0, nw, 0]], 'up', 'still');
+    }
+    if (!cull.down) {
+      addQuad([[0, 0, 0], [16, 0, 0], [16, 0, 16], [0, 0, 16]], 'down', 'flat');
+    }
+    function sidePoints(faceDir) {
+      const run = sideRuns && sideRuns[faceDir];
+      if (run?.axis === 'x') {
+        const x1 = 16 * run.length;
+        const h0 = run.startHeight;
+        const h1 = run.endHeight;
+        if (faceDir === 'south') return [[0, 0, 16], [x1, 0, 16], [x1, h1, 16], [0, h0, 16]];
+        if (faceDir === 'north') return [[x1, 0, 0], [0, 0, 0], [0, h0, 0], [x1, h1, 0]];
+      }
+      if (run?.axis === 'z') {
+        const z1 = 16 * run.length;
+        const h0 = run.startHeight;
+        const h1 = run.endHeight;
+        if (faceDir === 'east') return [[16, 0, z1], [16, 0, 0], [16, h0, 0], [16, h1, z1]];
+        if (faceDir === 'west') return [[0, 0, 0], [0, 0, z1], [0, h1, z1], [0, h0, 0]];
+      }
+      const sideCorners = run?.axis === 'y' && Array.isArray(run.corners) ? run.corners : corners;
+      const [rnw, rne, rse, rsw] = sideCorners;
+      if (faceDir === 'south') return [[0, 0, 16], [16, 0, 16], [16, rse, 16], [0, rsw, 16]];
+      if (faceDir === 'north') return [[16, 0, 0], [0, 0, 0], [0, rnw, 0], [16, rne, 0]];
+      if (faceDir === 'east') return [[16, 0, 16], [16, 0, 0], [16, rne, 0], [16, rse, 16]];
+      return [[0, 0, 0], [0, 0, 16], [0, rsw, 16], [0, rnw, 0]];
+    }
+    if (!cull.south) addQuad(sidePoints('south'), 'south', 'flat');
+    if (!cull.north) addQuad(sidePoints('north'), 'north', 'flat');
+    if (!cull.east) addQuad(sidePoints('east'), 'east', 'flat');
+    if (!cull.west) addQuad(sidePoints('west'), 'west', 'flat');
+    return mesh;
+  }
+
+  function withoutWaterloggedProperty(block) {
+    const props = { ...(block.getProperties?.() || {}) };
+    if (props.waterlogged === 'true' || props.waterlogged === true) props.waterlogged = 'false';
+    return new BlockState(block.getName(), props);
+  }
+
+  function fluidCullFromNeighbors(cull, nbt) {
+    const neighbors = nbt.__fluidNeighbors || {};
+    const sideCulls = nbt.__fluidSideCulls || {};
+    // ALWAYS cull bottom: in iso top-down rendering the water bottom face is
+    // never usefully visible, and against partial-block neighbors (hopper,
+    // soul_sand, glass_pane) deepslate's needsCull returns false → bottom
+    // face renders + semi-transparent blend over the dark mechanism below →
+    // visible dark band at every water-on-non-opaque-floor boundary. Same
+    // root cause for bubble-column "brighter floor" — bottom face on
+    // soul_sand alpha-blends into a different tone than surrounding water.
+    // Top: cull when fluid above (buried) or another fluid cell shares the
+    // top plane. Sides: cull against fluid neighbors only — non-fluid sides
+    // (air, glass, walls) keep their faces so the water column has walls.
+    return {
+      up:    nbt.__topBuried || !!neighbors.up ? true : cull.up,
+      down:  true,
+      north: !!neighbors.north || !!sideCulls.north,
+      south: !!neighbors.south || !!sideCulls.south,
+      east:  !!neighbors.east || !!sideCulls.east,
+      west:  !!neighbors.west || !!sideCulls.west,
+    };
+  }
+
+  function patchChestRenderer() {
+    const orig = D.SpecialRenderers && D.SpecialRenderers.getBlockMesh;
+    if (!orig) return;
+    D.SpecialRenderers.getBlockMesh = function(block, nbt, atlas, cull) {
+      const name = block.getName().toString();
+      // Surgical top-face cull: a block has fluid directly above. Force
+      // cull.up=true so its top quad doesn't z-fight with the fluid's bottom.
+      // No water-opaque flag needed → glass / iron_bars next to water still
+      // render correctly.
+      if (nbt && nbt.__waterAbove) {
+        cull = { ...cull, up: true };
+      }
+      // Slanted water surface (geometry only — vanilla tint + texture preserved).
+      // Deepslate's cull still removes internal water faces; the shared corner
+      // cache in preprocessFluid keeps adjacent top surfaces aligned.
+      if (name === 'minecraft:water' && nbt && nbt.__waterCorners) {
+        const mesh = buildSlantedFluidMesh(nbt.__waterCorners, fluidCullFromNeighbors(cull, nbt), atlas, 'water', 'minecraft:water', nbt.__fluidSideRuns);
+        const scaleM = mat4.create();
+        mat4.scale(scaleM, scaleM, [0.0625, 0.0625, 0.0625]);
+        return mesh.transform(scaleM);
+      }
+      if (name === 'minecraft:lava' && nbt && nbt.__lavaCorners) {
+        const mesh = buildSlantedFluidMesh(nbt.__lavaCorners, fluidCullFromNeighbors(cull, nbt), atlas, 'lava', 'minecraft:lava', nbt.__fluidSideRuns);
+        const scaleM = mat4.create();
+        mat4.scale(scaleM, scaleM, [0.0625, 0.0625, 0.0625]);
+        return mesh.transform(scaleM);
+      }
+      const paired = nbt && nbt.__pair;
+      if (CHEST_NAMES.has(name) && paired === 'right') {
+        // Right partner: render nothing — the left half draws the entire pair.
+        return new D.Mesh();
+      }
+      if (CHEST_NAMES.has(name) && paired === 'left') {
+        const mesh = new D.Mesh();
+        const variant = chestVariantTexture(name);
+        const model = wideChestModel(variant);
+        // wideChestModel is built in canonical orientation where the partner is at +X.
+        // We translate so the rotation pivot sits between the two block centers,
+        // then rotate by facing so the pair aligns with the world's facing direction.
+        const facing = block.getProperties()?.facing || 'south';
+        const angle = facing === 'west' ? Math.PI / 2
+                    : facing === 'south' ? Math.PI
+                    : facing === 'east' ? Math.PI * 3 / 2
+                    : 0;
+        const t = mat4.create();
+        // Rotate about LEFT block's own center (8, 8, 8). Canonical wide-chest
+        // (partner at +X) rotates to other facings such that geometry extends
+        // into the actual partner direction relative to this block.
+        mat4.translate(t, t, [8, 8, 8]);
+        mat4.rotateY(t, t, angle);
+        mat4.translate(t, t, [-8, -8, -8]);
+        mesh.merge(model.getMesh(atlas, D.Cull.none()).transform(t));
+        const scaleM = mat4.create();
+        mat4.scale(scaleM, scaleM, [0.0625, 0.0625, 0.0625]);
+        return mesh.transform(scaleM);
+      }
+      // Implicit-water cell (bubble_column, kelp, waterlogged blocks etc).
+      // deepslate's mesh builder ADDS our return on top of the BlockModel
+      // mesh — so kelp_plant gets both its plant geometry AND a water cell.
+      // For bubble_column, blockDefinition has no model → only water shows.
+      if (nbt && nbt.__implicitWaterCorners) {
+        const source = nbt.__implicitWaterSource || 'minecraft:water';
+        const waterCull = fluidCullFromNeighbors(cull, nbt);
+        const waterMesh = buildSlantedFluidMesh(
+          nbt.__implicitWaterCorners,
+          waterCull,
+          atlas,
+          'water',
+          source,
+          nbt.__fluidSideRuns
+        );
+        const scaleM = mat4.create();
+        mat4.scale(scaleM, scaleM, [0.0625, 0.0625, 0.0625]);
+        return waterMesh.transform(scaleM);
+      }
+      return orig.call(this, block, nbt, atlas, cull);
+    };
+  }
+
+  // === Fluid normal fix ===
+  // Slanted fluid geometry keeps vanilla-like shape, but normals are pinned so
+  // lighting stays uniform across adjacent top quads.
+  function patchWaterCull() {
+    // Patch finishChunkMesh so fluid quads
+    // (tagged with __fluidFaceDir in buildSlantedFluidMesh) get a fixed,
+    // axis-aligned normal regardless of their slanted geometry.
+    // deepslate's vsSource computes vLighting from the vertex normal:
+    //   vLighting = normal.y*0.2 + abs(normal.z)*0.1 + 0.8
+    // For slanted tops, q.normal() returns a slightly tilted vector that
+    // varies per block (every quad's slope is different) → vLighting differs
+    // per quad → visible speckle pattern across the pool. By forcing all
+    // top quads to normal=(0,1,0), all share vLighting=1.0 — uniform pool
+    // appearance while keeping the actual slanted geometry for flow shape.
+    const proto = D.ChunkBuilder && D.ChunkBuilder.prototype;
+    if (!proto || proto.__fluidNormalPatched) return;
+    const V = D.Vector;
+    const FACE_NORMALS = {
+      up:    new V(0,  1,  0),
+      down:  new V(0, -1,  0),
+      north: new V(0,  0, -1),
+      south: new V(0,  0,  1),
+      east:  new V(1,  0,  0),
+      west:  new V(-1, 0,  0),
+    };
+    const origFinish = proto.finishChunkMesh;
+    let __fluidPatchHits = 0;
+    let __fluidPatchTotal = 0;
+    proto.finishChunkMesh = function(mesh, pos) {
+      origFinish.call(this, mesh, pos);
+      for (const q of mesh.quads) {
+        __fluidPatchTotal++;
+        const dir = q.__fluidFaceDir;
+        if (!dir) continue;
+        const n = FACE_NORMALS[dir];
+        q.v1.normal = n; q.v2.normal = n; q.v3.normal = n; q.v4.normal = n;
+        __fluidPatchHits++;
+      }
+    };
+    setTimeout(() => {
+      console.log('[fluid-normal-patch] total quads seen:', __fluidPatchTotal, 'fluid quads patched:', __fluidPatchHits);
+    }, 1000);
+    proto.__fluidNormalPatched = true;
+  }
+
+  const CHEST_TYPES = new Set([
+    'minecraft:chest', 'minecraft:trapped_chest',
+    'minecraft:copper_chest', 'minecraft:exposed_copper_chest',
+    'minecraft:weathered_copper_chest', 'minecraft:oxidized_copper_chest',
+    'minecraft:waxed_copper_chest', 'minecraft:waxed_exposed_copper_chest',
+    'minecraft:waxed_weathered_copper_chest', 'minecraft:waxed_oxidized_copper_chest',
+  ]);
+
+  // Detect chest pairs based on vanilla MC's ChestBlock.getConnectedDirection():
+  //   type=LEFT  → partner in facing.clockwise() direction
+  //   type=RIGHT → partner in facing.counterclockwise() direction
+  //   Compass clockwise sequence (viewed from above): N → E → S → W → N
+  function chestPairOffset(facing, type) {
+    if (type !== 'left' && type !== 'right') return null;
+    const cw = { north: 'east', east: 'south', south: 'west', west: 'north' };
+    const ccw = { north: 'west', east: 'north', south: 'east', west: 'south' };
+    const dir = type === 'left' ? cw[facing] : ccw[facing];
+    switch (dir) {
+      case 'north': return [0, -1];
+      case 'south': return [0,  1];
+      case 'east':  return [ 1, 0];
+      case 'west':  return [-1, 0];
+    }
+    return null;
+  }
+
+  // Pre-compute per-corner top heights for fluid (water/lava) blocks.
+  // Each world grid corner samples the 2x2 cells touching that corner and is
+  // cached once, so all cells sharing that corner get the same exact height.
+  // Source (level=0) clamped to 16 so still pools render perfectly flat
+  // (vanilla 14.2 produces visible micro-slants at every block boundary).
+  // Flowing levels 1..7 keep their vanilla descending heights so streams
+  // still show slope.
+  const FLUID_LEVEL_HEIGHTS = [16, 12.5, 10.5, 9, 7, 5.3, 3.7, 1.9, 16, 16, 16, 16, 16, 16, 16, 16];
+  function preprocessFluid(blocks, fluidName, cornersKey) {
+    const atPos = new Map();
+    const isWater = fluidName === 'minecraft:water';
+    for (const b of blocks) {
+      // Real fluid blocks AND implicit-water cells (only for water — lava
+      // never has waterlogged equivalent).
+      if (b.name === fluidName || (isWater && b.__implicitWater)) {
+        atPos.set(`${b.x},${b.y},${b.z}`, b);
+      }
+    }
+    function hasFluid(x, y, z) {
+      return atPos.has(`${x},${y},${z}`);
+    }
+    function fluidNeighborsFor(b) {
+      return {
+        north: hasFluid(b.x, b.y, b.z - 1),
+        south: hasFluid(b.x, b.y, b.z + 1),
+        east:  hasFluid(b.x + 1, b.y, b.z),
+        west:  hasFluid(b.x - 1, b.y, b.z),
+        up:    hasFluid(b.x, b.y + 1, b.z),
+        down:  hasFluid(b.x, b.y - 1, b.z),
+      };
+    }
+    const SIDE_DELTAS = {
+      north: [0, 0, -1],
+      south: [0, 0, 1],
+      east: [1, 0, 0],
+      west: [-1, 0, 0],
+    };
+    function fluidBlockAt(x, y, z) {
+      return atPos.get(`${x},${y},${z}`);
+    }
+    function sideExposed(b, dir) {
+      const [dx, dy, dz] = SIDE_DELTAS[dir];
+      return !hasFluid(b.x + dx, b.y + dy, b.z + dz);
+    }
+    function edgeFlatHeight(b, dir) {
+      const c = b[cornersKey];
+      if (!c) return null;
+      const pairs = {
+        north: [0, 1],
+        south: [3, 2],
+        east: [1, 2],
+        west: [0, 3],
+      };
+      const [a, d] = pairs[dir];
+      return Math.abs(c[a] - c[d]) < 0.001 ? c[a] : null;
+    }
+    function edgeEndpointHeights(b, dir) {
+      const c = b[cornersKey];
+      if (!c) return null;
+      const pairs = {
+        north: [0, 1],
+        south: [3, 2],
+        east: [1, 2],
+        west: [0, 3],
+      };
+      const [start, end] = pairs[dir];
+      return [c[start], c[end]];
+    }
+    function verticallyConnected(b) {
+      return hasFluid(b.x, b.y + 1, b.z) || hasFluid(b.x, b.y - 1, b.z);
+    }
+    function heightAt(x, y, z) {
+      const b = atPos.get(`${x},${y},${z}`);
+      if (!b) return null;
+      if (hasFluid(x, y + 1, z)) return 16;
+      // Implicit-water cells count as full source (level 0).
+      if (b.__implicitWater) return 16;
+      const lvl = parseInt(b.properties?.level || '0', 10);
+      return FLUID_LEVEL_HEIGHTS[lvl] ?? 16;
+    }
+    const cornerCache = new Map();
+    function cornerHeight(gx, y, gz, fallback) {
+      const key = `${gx},${y},${gz}`;
+      if (cornerCache.has(key)) return cornerCache.get(key);
+      // 4 cells around the world corner (gx, gz):
+      //   c00 = (gx,   gz)
+      //   cW0 = (gx-1, gz)
+      //   c0N = (gx,   gz-1)
+      //   cWN = (gx-1, gz-1)
+      // Orthogonal pairs: (c00, cW0), (c00, c0N), (cWN, cW0), (cWN, c0N).
+      // If NO pair has both cells = fluid, the only connection is diagonal
+      // (c00 ↔ cWN or cW0 ↔ c0N). User: diagonals must NOT pull corners up.
+      const h00 = heightAt(gx,     y, gz);
+      const hW0 = heightAt(gx - 1, y, gz);
+      const h0N = heightAt(gx,     y, gz - 1);
+      const hWN = heightAt(gx - 1, y, gz - 1);
+      const hasOrtho = (h00 !== null && hW0 !== null)
+                    || (h00 !== null && h0N !== null)
+                    || (hWN !== null && hW0 !== null)
+                    || (hWN !== null && h0N !== null);
+      if (!hasOrtho) {
+        cornerCache.set(key, null);
+        return null;
+      }
+      // Sum only the cells that are part of an orthogonal connection.
+      // Diagonal-only cell (no orthogonal neighbor in this 2x2) is excluded.
+      let sum = 0, count = 0;
+      const hasOrthoNeighbor = (h, hOrthoA, hOrthoB) =>
+        h !== null && (hOrthoA !== null || hOrthoB !== null);
+      if (hasOrthoNeighbor(h00, hW0, h0N)) { sum += h00; count++; }
+      if (hasOrthoNeighbor(hW0, h00, hWN)) { sum += hW0; count++; }
+      if (hasOrthoNeighbor(h0N, h00, hWN)) { sum += h0N; count++; }
+      if (hasOrthoNeighbor(hWN, hW0, h0N)) { sum += hWN; count++; }
+      const value = count > 0 ? sum / count : fallback;
+      cornerCache.set(key, value);
+      return value;
+    }
+    for (const b of blocks) {
+      const isReal = (b.name === fluidName);
+      const isImplicit = isWater && b.__implicitWater;
+      if (!isReal && !isImplicit) continue;
+      if (hasFluid(b.x, b.y + 1, b.z)) {
+        b[cornersKey] = [16, 16, 16, 16];
+        b.__fluidNeighbors = fluidNeighborsFor(b);
+        // Top is buried: water above means our top sits at the cell-above's
+        // bottom plane → z-fight / double-blend → SpecialRenderer skips top quad.
+        b.__fluidTopBuried = true;
+        continue;
+      }
+      const own = isImplicit ? 16 : (FLUID_LEVEL_HEIGHTS[parseInt(b.properties?.level || '0', 10)] ?? 16);
+      // cornerHeight returns null when the corner has no orthogonal-pair
+      // connection — caller uses own height so a diagonal-only neighbor
+      // does NOT pull the corner up across the empty intermediate cell.
+      const corners = [
+        cornerHeight(b.x,     b.y, b.z,     own) ?? own,
+        cornerHeight(b.x + 1, b.y, b.z,     own) ?? own,
+        cornerHeight(b.x + 1, b.y, b.z + 1, own) ?? own,
+        cornerHeight(b.x,     b.y, b.z + 1, own) ?? own,
+      ];
+      b[cornersKey] = corners;
+      b.__fluidNeighbors = fluidNeighborsFor(b);
+    }
+    for (const b of blocks) {
+      const isReal = (b.name === fluidName);
+      const isImplicit = isWater && b.__implicitWater;
+      if (!isReal && !isImplicit) continue;
+      b.__fluidSideRuns = {};
+      b.__fluidSideCulls = {};
+    }
+    for (const b of blocks) {
+      const isReal = (b.name === fluidName);
+      const isImplicit = isWater && b.__implicitWater;
+      if (!isReal && !isImplicit) continue;
+      for (const dir of ['north', 'south', 'east', 'west']) {
+        if (!sideExposed(b, dir)) {
+          b.__fluidSideCulls[dir] = true;
+          continue;
+        }
+        const below = fluidBlockAt(b.x, b.y - 1, b.z);
+        if (below && sideExposed(below, dir)) {
+          b.__fluidSideCulls[dir] = true;
+          continue;
+        }
+        let verticalLength = 1;
+        let top = b;
+        while (true) {
+          const above = fluidBlockAt(b.x, b.y + verticalLength, b.z);
+          if (!above || !sideExposed(above, dir)) break;
+          top = above;
+          verticalLength += 1;
+        }
+        if (verticalLength > 1) {
+          const offset = (verticalLength - 1) * 16;
+          b.__fluidSideRuns[dir] = {
+            axis: 'y',
+            corners: top[cornersKey].map((h) => h + offset),
+          };
+          continue;
+        }
+        if (verticallyConnected(b)) continue;
+        const edgeHeights = edgeEndpointHeights(b, dir);
+        if (!edgeHeights) continue;
+        const horizontalAxis = dir === 'north' || dir === 'south' ? 'x' : 'z';
+        const prev = horizontalAxis === 'x'
+          ? fluidBlockAt(b.x - 1, b.y, b.z)
+          : fluidBlockAt(b.x, b.y, b.z - 1);
+        if (prev && !verticallyConnected(prev) && sideExposed(prev, dir)) {
+          b.__fluidSideCulls[dir] = true;
+          continue;
+        }
+        let endBlock = b;
+        let length = 1;
+        while (true) {
+          const next = horizontalAxis === 'x'
+            ? fluidBlockAt(b.x + length, b.y, b.z)
+            : fluidBlockAt(b.x, b.y, b.z + length);
+          if (!next || verticallyConnected(next) || !sideExposed(next, dir)) break;
+          endBlock = next;
+          length += 1;
+        }
+        if (length > 1) {
+          const endHeights = edgeEndpointHeights(endBlock, dir);
+          b.__fluidSideRuns[dir] = {
+            axis: horizontalAxis,
+            length,
+            startHeight: edgeHeights[0],
+            endHeight: endHeights ? endHeights[1] : edgeHeights[1],
+          };
+        }
+      }
+    }
+  }
+  function preprocessWater(blocks) { preprocessFluid(blocks, 'minecraft:water', '__waterCorners'); }
+  function preprocessLava(blocks)  { preprocessFluid(blocks, 'minecraft:lava',  '__lavaCorners');  }
+
+  function preprocessChests(blocks) {
+    // Build position index
+    const at = {};
+    for (const b of blocks) {
+      if (CHEST_TYPES.has(b.name)) at[`${b.x},${b.y},${b.z}`] = b;
+    }
+    // Mark each chest with paired partner info
+    for (const b of blocks) {
+      if (!CHEST_TYPES.has(b.name)) continue;
+      const type = b.properties?.type;
+      if (type !== 'left' && type !== 'right') continue;
+      const offset = chestPairOffset(b.properties?.facing, type);
+      if (!offset) continue;
+      const partnerKey = `${b.x + offset[0]},${b.y},${b.z + offset[1]}`;
+      const partner = at[partnerKey];
+      if (!partner || partner.name !== b.name) continue;
+      const ptype = partner.properties?.type;
+      if ((type === 'left' && ptype !== 'right') || (type === 'right' && ptype !== 'left')) continue;
+      // Tag this block with its confirmed pair side ('left' or 'right')
+      b.__chestPair = type;
+    }
+  }
+
+  // Blocks that imply water in their cell even though they aren't water itself.
+  // In vanilla MC, kelp/seagrass/sea_pickle blocks are always placed inside a
+  // water cell — Litematic stores only the plant block, but the visual must
+  // include water around it.
+  // Waterlogged blocks also imply a water cell, but their renderer path below
+  // adds only a surface overlay so the block texture remains dominant.
+  const IMPLICIT_WATER_BLOCKS = new Set([
+    'minecraft:kelp', 'minecraft:kelp_plant',
+    'minecraft:seagrass', 'minecraft:tall_seagrass',
+    'minecraft:sea_pickle',
+    'minecraft:bubble_column',
+  ]);
+  function blockImpliesWater(b) {
+    // ANY block whose cell logically contains water (kelp / bubble_column /
+    // waterlogged glass pane / waterlogged fence etc.) returns true so
+    // preprocessFluid's neighbor map sees them as "fluid here". This is
+    // critical for water-vs-waterlogged adjacency: a real water cell above
+    // a waterlogged stained_glass_pane needs to know there's fluid in the
+    // pane's cell so its top stays buried and its side toward the pane is
+    // culled (otherwise zigzag bands appear at every cell boundary).
+    if (IMPLICIT_WATER_BLOCKS.has(b.name)) return true;
+    if (b.properties && (b.properties.waterlogged === true || b.properties.waterlogged === 'true')) return true;
+    return false;
+  }
+  function blockRendersWaterOverlay(b) {
+    // SUBSET of blockImpliesWater: only these render a water mesh on top of
+    // the cell. Waterlogged blocks DO NOT — the user wants mangrove / glass /
+    // fences to read as the block, with no blue tint overlay.
+    return IMPLICIT_WATER_BLOCKS.has(b.name);
+  }
+
+  const WATER_COVERED_TOP_CULL_BLOCKS = new Set([
+    'minecraft:ice', 'minecraft:packed_ice', 'minecraft:blue_ice', 'minecraft:frosted_ice',
+    'minecraft:glass', 'minecraft:tinted_glass',
+    'minecraft:white_stained_glass', 'minecraft:orange_stained_glass',
+    'minecraft:magenta_stained_glass', 'minecraft:light_blue_stained_glass',
+    'minecraft:yellow_stained_glass', 'minecraft:lime_stained_glass',
+    'minecraft:pink_stained_glass', 'minecraft:gray_stained_glass',
+    'minecraft:light_gray_stained_glass', 'minecraft:cyan_stained_glass',
+    'minecraft:purple_stained_glass', 'minecraft:blue_stained_glass',
+    'minecraft:brown_stained_glass', 'minecraft:green_stained_glass',
+    'minecraft:red_stained_glass', 'minecraft:black_stained_glass',
+  ]);
+  function shouldCullWaterCoveredTop(name) {
+    if (WATER_COVERED_TOP_CULL_BLOCKS.has(name)) return true;
+    return window.__opaqueBlocks.has(name.replace(/^minecraft:/, ''));
+  }
+
+  function buildStructure(payload) {
+    const { blocks, size } = payload;
+    const waterCoveredTopCulledBlocks = new Set();
+    let waterCoveredTopCullCount = 0;
+    preprocessChests(blocks);
+    // Inject phantom water-block entries for all cells that imply water
+    // (bubble_column, kelp, waterlogged glass panes etc). The phantoms ride
+    // alongside the real block so preprocessFluid sees them as water and the
+    // SpecialRenderer can also generate a water mesh at the cell.
+    for (const b of blocks) {
+      if (blockImpliesWater(b)) {
+        b.__implicitWater = true;
+      }
+    }
+    preprocessWater(blocks);
+    preprocessLava(blocks);
+    // Build position index of all fluid blocks so we can tag any block with
+    // water/lava DIRECTLY ABOVE it for surgical top-face culling. This is
+    // narrower than marking water opaque (which culled glass/iron_bars too).
+    const fluidAt = new Set();
+    for (const b of blocks) {
+      if (b.name === 'minecraft:water' || b.name === 'minecraft:lava'
+          || (b.__implicitWater && blockRendersWaterOverlay(b))) {
+        fluidAt.add(`${b.x},${b.y},${b.z}`);
+      }
+    }
+    const structure = new Structure([size.x, size.y, size.z]);
+    const skipReasons = {};
+    let added = 0, skipped = 0;
+    for (const b of blocks) {
+      const raw = {};
+      for (const [k, v] of Object.entries(b.properties || {})) raw[k] = String(v);
+      const name = b.name;
+      const props = normalizeProps(name, raw);
+      const nbt = {};
+      if (b.__chestPair) nbt.__pair = b.__chestPair;
+      if (name === 'minecraft:water' && b.__waterCorners) {
+        Object.assign(nbt, {
+          __waterCorners: b.__waterCorners,
+          __fluidNeighbors: b.__fluidNeighbors,
+          __fluidSideRuns: b.__fluidSideRuns,
+          __fluidSideCulls: b.__fluidSideCulls,
+          __topBuried: !!b.__fluidTopBuried,
+        });
+      } else if (name === 'minecraft:lava' && b.__lavaCorners) {
+        Object.assign(nbt, {
+          __lavaCorners: b.__lavaCorners,
+          __fluidNeighbors: b.__fluidNeighbors,
+          __fluidSideRuns: b.__fluidSideRuns,
+          __fluidSideCulls: b.__fluidSideCulls,
+          __topBuried: !!b.__fluidTopBuried,
+        });
+      } else if (b.__implicitWater && b.__waterCorners && blockRendersWaterOverlay(b)) {
+        // Implicit-water cell that ALSO renders a water mesh (kelp / bubble_column / sea_pickle / seagrass).
+        Object.assign(nbt, {
+          __implicitWaterCorners: b.__waterCorners,
+          __implicitWaterSource: name,
+          __fluidNeighbors: b.__fluidNeighbors,
+          __fluidSideRuns: b.__fluidSideRuns,
+          __fluidSideCulls: b.__fluidSideCulls,
+          __topBuried: !!b.__fluidTopBuried,
+        });
+      }
+      if (name !== 'minecraft:water' && name !== 'minecraft:lava'
+          && !blockRendersWaterOverlay(b)
+          && fluidAt.has(`${b.x},${b.y + 1},${b.z}`)
+          && shouldCullWaterCoveredTop(name)) {
+        nbt.__waterAbove = true;
+        waterCoveredTopCullCount += 1;
+        waterCoveredTopCulledBlocks.add(name);
+      }
+      // Waterlogged blocks (mangrove_roots, glass_pane, etc.) hit no nbt
+      // branch — they render only their own block model, with NO water
+      // overlay. preprocessFluid still saw them as fluid cells so adjacent
+      // real water culls correctly against them.
+      try {
+        structure.addBlock([b.x, b.y, b.z], Identifier.parse(name), props, Object.keys(nbt).length ? nbt : undefined);
+        added++;
+      } catch (e) {
+        skipped++;
+        const key = `${b.name}: ${String(e.message || e).slice(0, 60)}`;
+        skipReasons[key] = (skipReasons[key] || 0) + 1;
+      }
+    }
+    return {
+      structure,
+      added,
+      skipped,
+      skipReasons,
+      waterCoveredTopCullCount,
+      waterCoveredTopCulledBlocks: [...waterCoveredTopCulledBlocks].sort(),
+    };
+  }
+
+  const ISO_X = Math.atan(1 / Math.sqrt(2));
+  const ISO_Y = Math.PI / 4;  // view from northwest — chest fronts (north-facing) visible
+
+  function isoView(size) {
+    const m = mat4.create();
+    const dist = (size.x + size.y + size.z) * 2;
+    mat4.translate(m, m, [0, 0, -dist]);
+    mat4.rotateX(m, m, ISO_X);
+    mat4.rotateY(m, m, ISO_Y);
+    mat4.translate(m, m, [-size.x / 2, -size.y / 2, -size.z / 2]);
+    return m;
+  }
+
+  function projectIso(x, y, z) {
+    const c = Math.cos(ISO_Y), s = Math.sin(ISO_Y);
+    const cx = Math.cos(ISO_X), sx = Math.sin(ISO_X);
+    const x1 = c * x - s * z;
+    const z1 = s * x + c * z;
+    const y1 = cx * y - sx * z1;
+    return { sx: x1, sy: y1 };
+  }
+
+  function isoProj(size, width, height, padding = 1.18) {
+    // 1.18 = ~15% margin so the build "floats" with breathing room like
+    // SchematicPreview's framing, instead of edge-to-edge.
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const cx of [-size.x / 2, size.x / 2])
+    for (const cy of [-size.y / 2, size.y / 2])
+    for (const cz of [-size.z / 2, size.z / 2]) {
+      const { sx, sy } = projectIso(cx, cy, cz);
+      if (sx < minX) minX = sx;
+      if (sx > maxX) maxX = sx;
+      if (sy < minY) minY = sy;
+      if (sy > maxY) maxY = sy;
+    }
+    const bboxW = (maxX - minX) * padding;
+    const bboxH = (maxY - minY) * padding;
+    const scale = Math.min(width / bboxW, height / bboxH);
+    const halfW = width / (2 * scale);
+    const halfH = height / (2 * scale);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const p = mat4.create();
+    mat4.ortho(p, -halfW + cx, halfW + cx, -halfH + cy, halfH + cy, 0.01, 100000);
+    return p;
+  }
+
+  function decodeChunkIndex(i) {
+    return i % 2 === 0 ? i / 2 : -((i + 1) / 2);
+  }
+
+  function collectRenderChunks(renderer) {
+    const builder = renderer.chunkBuilder;
+    const chunkSize = Array.isArray(builder.chunkSize) ? builder.chunkSize : [builder.chunkSize, builder.chunkSize, builder.chunkSize];
+    const out = [];
+    const chunks = builder.chunks || [];
+    for (let xi = 0; xi < chunks.length; xi += 1) {
+      const ys = chunks[xi];
+      if (!ys) continue;
+      for (let yi = 0; yi < ys.length; yi += 1) {
+        const zs = ys[yi];
+        if (!zs) continue;
+        for (let zi = 0; zi < zs.length; zi += 1) {
+          const chunk = zs[zi];
+          if (!chunk) continue;
+          const pos = [decodeChunkIndex(xi), decodeChunkIndex(yi), decodeChunkIndex(zi)];
+          const center = [
+            (pos[0] + 0.5) * chunkSize[0],
+            (pos[1] + 0.5) * chunkSize[1],
+            (pos[2] + 0.5) * chunkSize[2],
+          ];
+          out.push({ chunk, center });
+        }
+      }
+    }
+    return out;
+  }
+
+  function viewDepth(matrix, point) {
+    return matrix[2] * point[0] + matrix[6] * point[1] + matrix[10] * point[2] + matrix[14];
+  }
+
+  function meshBufferStats(renderChunks) {
+    let maxMeshQuadVertices = 0;
+    let oversizedMeshCount = 0;
+    for (const { chunk } of renderChunks) {
+      for (const mesh of [chunk.mesh, chunk.transparentMesh]) {
+        if (!mesh || mesh.isEmpty()) continue;
+        const vertices = mesh.quadVertices();
+        maxMeshQuadVertices = Math.max(maxMeshQuadVertices, vertices);
+        if (vertices >= 65536) oversizedMeshCount += 1;
+      }
+    }
+    return { maxMeshQuadVertices, oversizedMeshCount };
+  }
+
+  function splitTransparentLayers(gl, transparentChunks) {
+    const { Mesh } = D;
+    const rebuildOptions = { pos: true, color: true, texture: true, normal: true };
+    let fluidQuads = 0;
+    let detailQuads = 0;
+    const layers = transparentChunks.map(({ chunk, center }) => {
+      const fluid = [];
+      const detail = [];
+      for (const q of chunk.transparentMesh.quads) {
+        if (q.__fluidFaceDir) fluid.push(q);
+        else detail.push(q);
+      }
+      fluidQuads += fluid.length;
+      detailQuads += detail.length;
+      const fluidMesh = new Mesh(fluid, []);
+      const detailMesh = new Mesh(detail, chunk.transparentMesh.lines || []);
+      if (!fluidMesh.isEmpty()) fluidMesh.rebuild(gl, rebuildOptions);
+      if (!detailMesh.isEmpty()) detailMesh.rebuild(gl, rebuildOptions);
+      return { center, fluidMesh, detailMesh };
+    });
+    return {
+      layers,
+      diag: {
+        order: 'opaque,fluid-color,fluid-depth,transparent-detail',
+        fluidQuads,
+        detailQuads,
+      },
+    };
+  }
+
+  async function render(payload, opts = {}) {
+    const width = opts.width || 1024;
+    const height = opts.height || 1024;
+    const transparentBackground = !!opts.transparentBackground;
+
+    const canvas = document.getElementById('gl');
+    canvas.width = width;
+    canvas.height = height;
+
+    const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, alpha: true, antialias: false })
+            || canvas.getContext('webgl', { preserveDrawingBuffer: true, alpha: true, antialias: false });
+    if (!gl) throw new Error('no webgl/webgl2');
+
+    if (!resources) {
+      await initResources();
+      patchChestRenderer();
+      patchWaterCull();
+    }
+
+    window.__fluidFaceStats = createFluidFaceStats();
+    const buildRes = buildStructure(payload);
+    const { structure, added, skipped, skipReasons } = buildRes;
+    // Diagnostic dump: which blocks landed in the structure, which were skipped,
+    // which fell back to magenta. Visible in renderer.js when LITEMATIC_DEBUG is set,
+    // and ALWAYS dumped into the result so the Node side can log on demand.
+    const blockNameCounts = {};
+    const fallbackNames = new Set();
+    const _defs = window.__blockDefinitions || {};
+    const _states = window.__blockstatesJson || {};
+    for (const b of payload.blocks) {
+      blockNameCounts[b.name] = (blockNameCounts[b.name] || 0) + 1;
+      const id = Identifier.parse(b.name).toString();
+      const path = id.replace(/^minecraft:/, '');
+      if (!_defs[id] && !_states[path]) {
+        fallbackNames.add(b.name);
+      }
+    }
+    const blockFlags = {};
+    for (const name of Object.keys(blockNameCounts)) {
+      const id = Identifier.parse(name);
+      const key = id.path || name.replace(/^minecraft:/, '');
+      const flags = resources.getBlockFlags(id) || {};
+      blockFlags[key] = {
+        opaque: !!flags.opaque,
+        semi_transparent: !!flags.semi_transparent,
+        self_culling: !!flags.self_culling,
+      };
+    }
+    window.__renderDiagnostics = {
+      added, skipped, skipReasons,
+      waterCoveredTopCullCount: buildRes.waterCoveredTopCullCount,
+      waterCoveredTopCulledBlocks: buildRes.waterCoveredTopCulledBlocks,
+      uniqueBlockTypes: Object.keys(blockNameCounts).length,
+      missingDefinitionsCount: fallbackNames.size,
+      missingDefinitions: [...fallbackNames].slice(0, 50),
+      topBlockTypes: Object.entries(blockNameCounts).sort((a,b)=>b[1]-a[1]).slice(0, 15),
+      blockFlags,
+      glassPaneTextures: window.__glassPaneTextureDiagnostics || {},
+      textureAlpha: window.__textureAlphaDiagnostics || {},
+      waterTintRgb: WATER_TINT_RGB,
+      waterTextureAlpha: WATER_TEXTURE_ALPHA,
+      waterSideTextureAlpha: WATER_SIDE_TEXTURE_ALPHA,
+      waterTextureShade: WATER_TEXTURE_SHADE,
+      transparentBackground,
+    };
+    const view = isoView(payload.size);
+    const proj = isoProj(payload.size, width, height);
+
+    gl.viewport(0, 0, width, height);
+    // Dark navy backdrop (matches Discord dark theme + SchematicPreview's framing).
+    // Solid background reads better than transparent in embeds — semi-transparent
+    // blocks (glass, water) tint against a consistent color instead of the
+    // surrounding embed.
+    if (transparentBackground) {
+      gl.clearColor(0, 0, 0, 0);
+    } else {
+      gl.clearColor(0.06, 0.08, 0.11, 1.0);
+    }
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    const renderer = new StructureRenderer(gl, structure, resources, { chunkSize: 4 });
+    const renderChunks = collectRenderChunks(renderer);
+    const transparentChunks = [...renderChunks].sort((a, b) => viewDepth(view, a.center) - viewDepth(view, b.center));
+    const transparentLayers = splitTransparentLayers(gl, transparentChunks);
+    Object.assign(window.__renderDiagnostics, meshBufferStats(renderChunks), {
+      fluidFaces: window.__fluidFaceStats,
+      transparentLayering: transparentLayers.diag,
+    });
+    console.log('[render-diag]', JSON.stringify(window.__renderDiagnostics, null, 2));
+    // deepslate generates mipmaps but only sets MAG_FILTER=NEAREST and leaves
+    // MIN_FILTER at default (NEAREST_MIPMAP_LINEAR). That mipmap-level blend
+    // produces visible boundary "lines" at every block edge in large flat
+    // surfaces (pools). Force NEAREST minification too — no mipmap blending.
+    gl.bindTexture(gl.TEXTURE_2D, renderer.atlasTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    renderer.setViewport(0, 0, width, height);
+    renderer.projMatrix = proj;
+    // Two-pass draw: opaque chunks with depth write ON, transparent chunks with
+    // depth write OFF. deepslate's default drawStructure leaves depthMask=true
+    // for both passes, so the first transparent quad drawn writes depth and
+    // any later transparent quad at greater depth (or coplanar quad processed
+    // later in chunk order) gets z-killed. That produces asymmetric glass
+    // corners: one face shows backing, the perpendicular face shows dark
+    // backdrop depending on chunk traversal order.
+    renderer.setShader(renderer.shaderProgram);
+    renderer.setTexture(renderer.atlasTexture, renderer.resources.getPixelSize?.());
+    renderer.prepareDraw(view);
+    // Pass 1: opaque
+    gl.depthMask(true);
+    for (const { chunk: ch } of renderChunks) {
+      if (!ch.mesh.isEmpty()) {
+        renderer.drawMesh(ch.mesh, { pos: true, color: true, texture: true, normal: true });
+      }
+    }
+    // Pass 2: transparent — depth test ON (still occluded by opaque), depth WRITE OFF
+    gl.depthMask(false);
+    for (const { fluidMesh } of transparentLayers.layers) {
+      if (!fluidMesh.isEmpty()) {
+        renderer.drawMesh(fluidMesh, { pos: true, color: true, texture: true, normal: true });
+      }
+    }
+    gl.colorMask(false, false, false, false);
+    gl.depthMask(true);
+    for (const { fluidMesh } of transparentLayers.layers) {
+      if (!fluidMesh.isEmpty()) {
+        renderer.drawMesh(fluidMesh, { pos: true, color: true, texture: true, normal: true });
+      }
+    }
+    gl.colorMask(true, true, true, true);
+    gl.depthMask(false);
+    for (const { detailMesh } of transparentLayers.layers) {
+      if (!detailMesh.isEmpty()) {
+        renderer.drawMesh(detailMesh, { pos: true, color: true, texture: true, normal: true });
+      }
+    }
+    gl.depthMask(true);
+
+    gl.flush();
+    gl.finish();
+
+    return { dataUrl: canvas.toDataURL('image/png'), added, skipped, diag: window.__renderDiagnostics };
+  }
+
+  window.__renderLitematic = async (payload, opts) => {
+    try {
+      const result = await render(payload, opts);
+      return { ok: true, ...result };
+    } catch (e) {
+      return { ok: false, error: String(e && e.stack || e) };
+    }
+  };
+
+  window.__ready = true;
+})().catch(e => { window.__bootError = String(e && e.stack || e); });
+</script>
+</body>
+</html>
