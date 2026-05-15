@@ -74,18 +74,6 @@ const commands = [
     .setDescription('Submit a suggestion')
     .addStringOption(o => o.setName('suggestion').setDescription('Your suggestion').setRequired(true)),
 
-  // --- EDIT (existing sticky/embed editor) ---
-  new SlashCommandBuilder()
-    .setName('edit')
-    .setDescription('Edit a sticky or an embed message (legacy)')
-    .addSubcommand(s => s
-      .setName('sticky')
-      .setDescription('Edit a sticky message configuration in this channel (dropdown)'))
-    .addSubcommand(s => s
-      .setName('embed')
-      .setDescription('Edit an existing embed message in this channel (dropdown)'))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
   // --- STICKY MESSAGES ---
   new SlashCommandBuilder()
     .setName('sticky')
@@ -105,8 +93,9 @@ const commands = [
   // --- EMBED BUILDER ---
   new SlashCommandBuilder()
     .setName('embed')
-    .setDescription('Create a simple embed in the current channel')
+    .setDescription('Create or edit an embed in the current channel')
     .addSubcommand(s => s.setName('create').setDescription('Create an embed'))
+    .addSubcommand(s => s.setName('edit').setDescription('Edit an existing embed in this channel (dropdown)'))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
   // --- ROLE MANAGEMENT ---
@@ -158,17 +147,18 @@ const commands = [
 
 
 
-  // --- TICKETS ---
+  // --- PANELS (consolidated) ---
   new SlashCommandBuilder()
-    .setName('ticketpanel')
-    .setDescription('Send ticket/application panels')
+    .setName('panel')
+    .setDescription('Publish or list configurable panels')
     .addSubcommand(s => s.setName('list').setDescription('List available panels'))
-    .addSubcommand(s => s.setName('send').setDescription('Send a panel in this channel')
-      .addStringOption(o => o.setName('panel').setDescription('Panel to send').setRequired(true)
+    .addSubcommand(s => s.setName('send').setDescription('Send / refresh a panel')
+      .addStringOption(o => o.setName('type').setDescription('Panel to publish').setRequired(true)
         .addChoices(
           { name: 'Ticket Center', value: 'ticket_center' },
           { name: 'Building Services', value: 'building_services' },
           { name: 'Applications', value: 'applications' },
+          { name: 'Spawner Prices', value: 'spawner_prices' },
         )))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
@@ -188,11 +178,15 @@ const commands = [
     .addSubcommand(s => s.setName('claim').setDescription('Claim this ticket (locks it to you)'))
     .addSubcommand(s => s.setName('unclaim').setDescription('Unclaim this ticket (allows another staff to claim)')),
 
-  // --- MOD UTIL ---
+  // --- LEADERBOARDS (consolidated) ---
   new SlashCommandBuilder()
-    .setName('mod')
-    .setDescription('Moderation utilities')
-    .addSubcommand(s => s.setName('lb').setDescription('Staff stats leaderboard (tickets)')),
+    .setName('leaderboard')
+    .setDescription('Show staff or builder leaderboard')
+    .addStringOption(o => o.setName('type').setDescription('Which leaderboard').setRequired(true)
+      .addChoices(
+        { name: 'Staff', value: 'staff' },
+        { name: 'Builder', value: 'builder' },
+      )),
 
   new SlashCommandBuilder()
     .setName('stats')
@@ -239,18 +233,11 @@ const commands = [
       .addStringOption(o => o.setName('builder_ign').setDescription('New builder IGN').setRequired(false))
       .addStringOption(o => o.setName('customer_ign').setDescription('New customer IGN').setRequired(false))
       .addStringOption(o => o.setName('build_name').setDescription('New build/farm name').setRequired(false)))
-    .addSubcommand(s => s.setName('lb').setDescription('Show the builder stats panel'))
     .addSubcommand(s => s.setName('remove').setDescription('Remove an open build from tracking'))
     .addSubcommand(s => s.setName('history').setDescription('Show completed build history for a builder')
       .addUserOption(o => o.setName('person').setDescription('The builder to view history for').setRequired(true))),
 
   
-  // --- CREATE EMBED (Premium) ---
-  new SlashCommandBuilder()
-    .setName('create')
-    .setDescription('Creation tools')
-    .addSubcommand(s => s.setName('embed').setDescription('Create a clean embed with a builder UI'))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 // --- PAYWATCH ---
   new SlashCommandBuilder()
     .setName('pay')
@@ -321,7 +308,6 @@ new SlashCommandBuilder()
         { name: 'Iron Golem', value: 'iron_golem' },
         { name: 'Blaze', value: 'blaze' },
       )))
-  .addSubcommand(s => s.setName('panel').setDescription('Publish or refresh the spawner prices panel'))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
 // --- APPLICATION OPEN/CLOSE ---

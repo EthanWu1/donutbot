@@ -5763,64 +5763,10 @@ Only the ticket creator can continue.`);
     }
 
 
-    if (commandName === 'receiver') {
-      const sub = options.getSubcommand();
-      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return interaction.reply({ content: 'Admin only.', flags: 64 });
-      }
-      if (sub === 'set') {
-        await interaction.deferReply({ flags: 64 });
-        const ignRaw = options.getString('ign', true);
-        const ign = sanitizeDisplayName(ignRaw.trim(), { maxLen: 16 });
-        await store.setChannelReceiverIgn(interaction.channelId, ign);
-        return interaction.editReply(`✅ Receiver IGN for this channel set to \`${ign}\``);
-      }
-      if (sub === 'clear') {
-        await interaction.deferReply({ flags: 64 });
-        await store.clearChannelReceiverIgn(interaction.channelId);
-        const globalIgn = sanitizeDisplayName(await store.getReceiverIgnGlobal(), { maxLen: 16 });
-        return interaction.editReply(`✅ Cleared channel override. Now using global receiver \`${globalIgn}\``);
-      }
-      if (sub === 'setglobal') {
-        await interaction.deferReply({ flags: 64 });
-        const ignRaw = options.getString('ign', true);
-        const ign = sanitizeDisplayName(ignRaw.trim(), { maxLen: 16 });
-        await store.setReceiverIgnGlobal(ign);
-        await refreshAllSchematicPanels(interaction.guild);
-        return interaction.editReply(`✅ Global receiver IGN set to \`${ign}\``);
-      }
-    }
+    // /receiver handler removed — was never registered as a slash command.
 
     
-    if (commandName === 'xpmultiplier') {
-      const sub = options.getSubcommand();
-      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return interaction.reply({ content: 'Admin only.', flags: 64 });
-      }
-
-      const clamp = (v) => Math.max(0.1, Math.min(10, v));
-
-      if (sub === 'set') {
-        const value = clamp(options.getNumber('value'));
-        await store.setXpMultiplierGlobal(value);
-        await interaction.reply({ content: `XP multiplier set to **${value}x** (global).` });
-        return;
-      }
-
-      if (sub === 'setchannel') {
-        const value = clamp(options.getNumber('value'));
-        await store.setChannelXpMultiplier(interaction.channelId, value);
-        await interaction.reply({ content: `XP multiplier set to **${value}x** (this channel).` });
-        return;
-      }
-
-      if (sub === 'clear') {
-        await store.clearChannelXpMultiplier(interaction.channelId);
-        const g = await store.getXpMultiplierGlobal();
-        await interaction.reply({ content: `Channel XP multiplier cleared. Using global **${g}x**.` });
-        return;
-      }
-    }
+    // /xpmultiplier handler removed — duplicated by /level multiplier.
 
 
 
@@ -6190,24 +6136,7 @@ Only the ticket creator can continue.`);
           .setDescription('Select one queued build below. You will get a confirmation step before anything is removed.');
         return interaction.editReply({ embeds: [eb], components: [row] });
       }
-      if (sub === 'lb') {
-        await interaction.deferReply().catch(() => {});
-        const countsById = await store.getBuilderFinishedCountsById(interaction.guildId).catch(() => ({}));
-        const records = await store.listBuildRecords(interaction.guildId).catch(() => []);
-        const totals = (await Promise.all(Object.entries(countsById).map(async ([discordId, finished]) => {
-          const member = await interaction.guild.members.fetch(discordId).catch(() => null);
-          if (!member || !isBuilderMember(member)) return null;
-          const mineRecords = records.filter(r => String(r.builderDiscordId || '') === String(discordId));
-          const earned = mineRecords.reduce((a, r) => a + Number(r.price ?? r.amount ?? 0), 0);
-          const displayName = member.displayName || member.user?.username || await resolveGuildDisplayName(interaction.guild, discordId);
-          return { discordId, displayName, finished: Number(finished || 0), earned };
-        }))).filter(Boolean).sort((a, b) => (b.finished - a.finished) || (b.earned - a.earned));
-        const sessionId = generateId();
-        const totalPages = Math.max(1, Math.ceil(totals.length / 10));
-        statsPanelSessions.set(sessionId, { kind: 'builder', userId: interaction.user.id, page: 0, rows: totals, createdAt: Date.now() });
-        const eb = renderBuilderStatsEmbed(totals, 0, totalPages);
-        return safeIReply(interaction, { embeds: [eb], components: statsNavRow('builder', sessionId, 0, totalPages) });
-      }
+      // /build lb has been folded into /leaderboard builder.
 
       // --- /build history ---
       if (sub === 'history') {
@@ -6234,225 +6163,6 @@ Only the ticket creator can continue.`);
 
     // --- PAYWATCH ---
   
-  // ─── /staffpay ────────────────────────────────────────────────────────────
-  // ─── /set — configure everything ─────────────────────────────────────────
-  if (commandName === 'set') {
-    if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: '❌ Administrator permission required.', flags: 64 });
-    }
-    await interaction.deferReply({ flags: 64 });
-    const group = options.getSubcommandGroup(false);
-    const sub   = options.getSubcommand(false);
-    const gid   = interaction.guildId;
-
-    // ── view ─────────────────────────────────────────────────────────────
-    if (!group && sub === 'view') {
-      const cfg = await store.getServerConfig(gid);
-      const amCfg = await store.getAutomodConfig(gid) || {};
-      const LABELS = {
-        CHANNEL_VOUCH:          'Vouch channel',
-        CHANNEL_LOG:            'Log channel',
-        CHANNEL_TICKET_LOG:     'Ticket log channel',
-        CHANNEL_SUGGESTIONS:    'Suggestions channel',
-        CHANNEL_BUILDER_PAY:    'Builder payments channel',
-        CHANNEL_BUILD_QUEUE:    'Build queue channel',
-        CAT_BUILDING:           'Category: Building',
-        CAT_SPAWNER_SELL:       'Category: Spawner Sell',
-        CAT_SPAWNER_BUY:        'Category: Spawner Buy',
-        CAT_SUPPORT:            'Category: Support',
-        CAT_GW_CLAIM:           'Category: Giveaway Claim',
-        ROLE_STAFF:             'Role: Staff',
-        ROLE_TRAINEE_BUILDER:   'Role: Trainee Builder',
-        ROLE_TRAINED_BUILDER:   'Role: Trained Builder',
-        ROLE_CHIEF_BUILDER:     'Role: Chief Builder',
-        VOUCH_CHANNEL_ID:       'Vouch detection channel',
-        VOUCH_SCAM_ALERT_USER:  'Scam alert user ID',
-        PREFIX_STAFF:           'Prefix: Staff',
-        PREFIX_CHIEF_BUILDER:   'Prefix: Chief Builder',
-        PREFIX_TRAINED_BUILDER: 'Prefix: Trained Builder',
-        PREFIX_TRAINEE_BUILDER: 'Prefix: Trainee Builder',
-      };
-      const keys = Object.keys(LABELS);
-      const lines = [];
-      for (const k of keys) {
-        const v = cfg[k];
-        if (!v) continue;
-        const isChannel = k.startsWith('CHANNEL_') || k.startsWith('CAT_') || k === 'VOUCH_CHANNEL_ID';
-        const isRole    = k.startsWith('ROLE_');
-        lines.push(`**${LABELS[k]}:** ${isChannel ? `<#${v}>` : isRole ? `<@&${v}>` : `\`${v}\``}`);
-      }
-      const amLines = [
-        amCfg.enabled === false ? '**AutoMod:** Disabled' : '**AutoMod:** Enabled',
-        amCfg.spam_limit ? `**Spam limit:** ${amCfg.spam_limit} msgs` : null,
-        amCfg.mention_limit ? `**Mention limit:** ${amCfg.mention_limit}` : null,
-        amCfg.blocked_words?.length ? `**Blocked words:** ${amCfg.blocked_words.join(', ')}` : null,
-        amCfg.exempt_role_ids?.length ? `**Exempt roles:** ${amCfg.exempt_role_ids.map(r => `<@&${r}>`).join(' ')}` : null,
-        amCfg.exempt_channel_ids?.length ? `**Exempt channels:** ${amCfg.exempt_channel_ids.map(c => `<#${c}>`).join(' ')}` : null,
-      ].filter(Boolean);
-      const eb = new EmbedBuilder()
-        .setColor(0x5865f2)
-        .setTitle('⚙️ Bot Configuration')
-        .setDescription(lines.length ? lines.join('\n') : '*(nothing configured yet — use /set to set up)*')
-        .setTimestamp();
-      if (amLines.length) eb.addFields({ name: 'AutoMod', value: amLines.join('\n'), inline: false });
-      return safeIReply(interaction, { embeds: [eb], flags: 64 });
-    }
-
-    // ── channel group ─────────────────────────────────────────────────────
-    if (group === 'channel') {
-      const ch = options.getChannel('channel', true);
-      const keyMap = {
-        vouch:           'CHANNEL_VOUCH',
-        log:             'CHANNEL_LOG',
-        ticket_log:      'CHANNEL_TICKET_LOG',
-        suggestions:     'CHANNEL_SUGGESTIONS',
-        builder_payments:'CHANNEL_BUILDER_PAY',
-        build_queue:     'CHANNEL_BUILD_QUEUE',
-      };
-      const key = keyMap[sub];
-      if (!key) return interaction.editReply('❌ Unknown channel.');
-      await store.setConfigValue(gid, key, ch.id);
-      // Keep legacy keys in sync for code that still reads them
-      if (sub === 'log')        await store.setConfigValue(gid, 'CHANNEL_MOD_LOG', ch.id);
-      if (sub === 'ticket_log') await store.setConfigValue(gid, 'CHANNEL_TICKET_LOG', ch.id);
-      if (sub === 'vouch')      await store.setConfigValue(gid, 'VOUCH_CHANNEL_ID', ch.id);
-      return interaction.editReply(`✅ **${sub}** channel set to <#${ch.id}>`);
-    }
-
-    // ── category group ─────────────────────────────────────────────────────
-    if (group === 'category') {
-      const id = options.getString('id', true).trim();
-      if (!/^\d{17,20}$/.test(id)) return interaction.editReply('❌ That does not look like a valid category ID. Right-click the category \u2192 Copy ID.');
-      const keyMap = {
-        building:     'CAT_BUILDING',
-        spawner_sell: 'CAT_SPAWNER_SELL',
-        spawner_buy:  'CAT_SPAWNER_BUY',
-        support:      'CAT_SUPPORT',
-        gw_claim:     'CAT_GW_CLAIM',
-      };
-      const key = keyMap[sub];
-      if (!key) return interaction.editReply('❌ Unknown category.');
-      await store.setConfigValue(gid, key, id);
-      // Keep legacy keys in sync
-      if (sub === 'building') await store.setConfigValue(gid, 'TICKET_CATEGORIES_BUILDING', id);
-      if (sub === 'spawner_sell' || sub === 'spawner_buy') await store.setConfigValue(gid, 'TICKET_CATEGORIES_SCHEMATICS', id);
-      return interaction.editReply(`✅ **${sub}** category set to \`${id}\``);
-    }
-
-    // ── role group ─────────────────────────────────────────────────────────
-    if (group === 'role') {
-      const role = options.getRole('role', true);
-      const keyMap = {
-        staff:           'ROLE_STAFF',
-        trainee_builder: 'ROLE_TRAINEE_BUILDER',
-        trained_builder: 'ROLE_TRAINED_BUILDER',
-        chief_builder:   'ROLE_CHIEF_BUILDER',
-      };
-      const key = keyMap[sub];
-      if (!key) return interaction.editReply('❌ Unknown role.');
-      await store.setConfigValue(gid, key, role.id);
-      // Rebuild combined staff IDs (used for ticket permission overwrites)
-      const staffId   = await store.getConfigValue(gid, 'ROLE_STAFF').catch(() => null);
-      const allStaff  = [staffId].filter(Boolean).join(',');
-      await store.setConfigValue(gid, 'ROLES_STAFF_IDS', allStaff);
-      const b1 = await store.getConfigValue(gid, 'ROLE_CHIEF_BUILDER').catch(() => null);
-      const b2 = await store.getConfigValue(gid, 'ROLE_TRAINED_BUILDER').catch(() => null);
-      const b3 = await store.getConfigValue(gid, 'ROLE_TRAINEE_BUILDER').catch(() => null);
-      const allBuilders = [b1, b2, b3].filter(Boolean).join(',');
-      await store.setConfigValue(gid, 'ROLES_BUILDER_IDS', allBuilders);
-      // Keep legacy role keys in sync
-      if (sub === 'chief_builder')   { await store.setConfigValue(gid, 'ROLE_BUILDER_1', role.id); }
-      if (sub === 'trained_builder') { await store.setConfigValue(gid, 'ROLE_BUILDER_2', role.id); }
-      if (sub === 'trainee_builder') { await store.setConfigValue(gid, 'ROLE_BUILDER_3', role.id); }
-      return interaction.editReply(`✅ **${sub}** role set to <@&${role.id}>`);
-    }
-
-    // ── automod group ──────────────────────────────────────────────────────
-    if (group === 'automod') {
-      if (sub === 'toggle') {
-        const val = options.getBoolean('enabled', true);
-        await store.setAutomodConfig(gid, { enabled: val });
-        return interaction.editReply(`✅ AutoMod **${val ? 'enabled ✅' : 'disabled ❌'}**.`);
-      }
-      if (sub === 'spam_limit') {
-        const val = options.getInteger('limit', true);
-        await store.setAutomodConfig(gid, { spam_limit: val });
-        return interaction.editReply(`✅ Spam limit: **${val}** messages in 5s.`);
-      }
-      if (sub === 'mention_limit') {
-        const val = options.getInteger('limit', true);
-        await store.setAutomodConfig(gid, { mention_limit: val });
-        return interaction.editReply(`✅ Mention limit: **${val}** per message.`);
-      }
-      if (sub === 'word_add') {
-        const word = options.getString('word', true).trim().toLowerCase();
-        const cur = await store.getAutomodConfig(gid) || {};
-        const words = Array.from(new Set([...(cur.blocked_words || []), word]));
-        await store.setAutomodConfig(gid, { blocked_words: words });
-        return interaction.editReply(`✅ Added **"${word}"** to word filter. (${words.length} total)`);
-      }
-      if (sub === 'word_remove') {
-        const word = options.getString('word', true).trim().toLowerCase();
-        const cur = await store.getAutomodConfig(gid) || {};
-        const words = (cur.blocked_words || []).filter(w => w !== word);
-        await store.setAutomodConfig(gid, { blocked_words: words });
-        return interaction.editReply(`✅ Removed **"${word}"**. (${words.length} remaining)`);
-      }
-      if (sub === 'word_list') {
-        const cur = await store.getAutomodConfig(gid) || {};
-        const words = cur.blocked_words || [];
-        return interaction.editReply(words.length ? `**Filtered words:** ${words.map(w => `\`${w}\``).join(', ')}` : '*(no words filtered)*');
-      }
-      if (sub === 'exempt_role') {
-        const role = options.getRole('role', true);
-        const cur = await store.getAutomodConfig(gid) || {};
-        const s = new Set(cur.exempt_role_ids || []);
-        s.has(role.id) ? s.delete(role.id) : s.add(role.id);
-        await store.setAutomodConfig(gid, { exempt_role_ids: [...s] });
-        return interaction.editReply(`✅ <@&${role.id}> is now **${s.has(role.id) ? 'exempt' : 'no longer exempt'}** from automod.`);
-      }
-      if (sub === 'exempt_channel') {
-        const ch = options.getChannel('channel', true);
-        const cur = await store.getAutomodConfig(gid) || {};
-        const s = new Set(cur.exempt_channel_ids || []);
-        s.has(ch.id) ? s.delete(ch.id) : s.add(ch.id);
-        await store.setAutomodConfig(gid, { exempt_channel_ids: [...s] });
-        return interaction.editReply(`✅ <#${ch.id}> is now **${s.has(ch.id) ? 'exempt' : 'no longer exempt'}** from automod.`);
-      }
-      if (sub === 'ghost_ping') {
-        const val = options.getBoolean('enabled', true);
-        await store.setAutomodConfig(gid, { ghost_ping_enabled: val });
-        return interaction.editReply(`✅ Ghost ping detection **${val ? 'enabled' : 'disabled'}**.`);
-      }
-    }
-
-    // ── vouch group ────────────────────────────────────────────────────────
-    if (group === 'vouch') {
-      if (sub === 'scam_alert') {
-        const uid = options.getString('user_id', true).trim();
-        await store.setConfigValue(gid, 'VOUCH_SCAM_ALERT_USER', uid);
-        return interaction.editReply(`✅ Scam vouch alerts → DM to \`${uid}\`.`);
-      }
-    }
-
-    // ── prefix group ──────────────────────────────────────────────────────
-    if (group === 'prefix') {
-      const prefix = options.getString('prefix', true);
-      const keyMap = {
-        staff:           'PREFIX_STAFF',
-        chief_builder:   'PREFIX_CHIEF_BUILDER',
-        trained_builder: 'PREFIX_TRAINED_BUILDER',
-        trainee_builder: 'PREFIX_TRAINEE_BUILDER',
-      };
-      const key = keyMap[sub];
-      if (!key) return interaction.editReply('❌ Unknown prefix key.');
-      await store.setConfigValue(gid, key, prefix);
-      return interaction.editReply(`✅ Prefix for **${sub}** set to \`${prefix}\``);
-    }
-
-    return interaction.editReply('❌ Unknown /set subcommand.');
-  }
-
 // staffpay command removed
 
   // ─── /list ────────────────────────────────────────────────────────────────
@@ -6997,19 +6707,19 @@ if (commandName === 'giveaway') {
     }
 
 
-    if (commandName === 'staffstats') {
-      return interaction.reply({ content: 'Use `/mod lb`.', flags: 64 }).catch(() => {});
-    }
+    // /staffstats handler removed — use /leaderboard staff.
 
-    // --- MOD: STAFF LEADERBOARD ---
-    if (commandName === 'mod') {
-      const sub = options.getSubcommand(false);
-      if (sub === 'lb') {
-        await interaction.deferReply().catch(() => {});
-        const cfg = await store.getTicketConfig().catch(() => ({}));
-        if (!isStaffMember(interaction.member, cfg) && !interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
-          return safeIReply(interaction, { content: 'Staff only.', flags: 64 });
-        }
+    // --- LEADERBOARD ---
+    // --- LEADERBOARD (consolidated; replaces /mod lb and /build lb) ---
+    if (commandName === 'leaderboard') {
+      const type = options.getString('type', true);
+      await interaction.deferReply().catch(() => {});
+      const cfg = await store.getTicketConfig().catch(() => ({}));
+      if (!isStaffMember(interaction.member, cfg) && !interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
+        return safeIReply(interaction, { content: 'Staff only.', flags: 64 });
+      }
+
+      if (type === 'staff') {
         const stats = await store.getTicketStats(interaction.guildId).catch(() => ({}));
         const rows = [];
         for (const [staffId, s] of Object.entries(stats || {})) {
@@ -7030,6 +6740,26 @@ if (commandName === 'giveaway') {
         const eb = renderStaffStatsEmbed(rows, 0, totalPages);
         return safeIReply(interaction, { embeds: [eb], components: statsNavRow('staff', sessionId, 0, totalPages) });
       }
+
+      if (type === 'builder') {
+        const countsById = await store.getBuilderFinishedCountsById(interaction.guildId).catch(() => ({}));
+        const records = await store.listBuildRecords(interaction.guildId).catch(() => []);
+        const totals = (await Promise.all(Object.entries(countsById).map(async ([discordId, finished]) => {
+          const member = await interaction.guild.members.fetch(discordId).catch(() => null);
+          if (!member || !isBuilderMember(member)) return null;
+          const mineRecords = records.filter(r => String(r.builderDiscordId || '') === String(discordId));
+          const earned = mineRecords.reduce((a, r) => a + Number(r.price ?? r.amount ?? 0), 0);
+          const displayName = member.displayName || member.user?.username || await resolveGuildDisplayName(interaction.guild, discordId);
+          return { discordId, displayName, finished: Number(finished || 0), earned };
+        }))).filter(Boolean).sort((a, b) => (b.finished - a.finished) || (b.earned - a.earned));
+        const sessionId = generateId();
+        const totalPages = Math.max(1, Math.ceil(totals.length / 10));
+        statsPanelSessions.set(sessionId, { kind: 'builder', userId: interaction.user.id, page: 0, rows: totals, createdAt: Date.now() });
+        const eb = renderBuilderStatsEmbed(totals, 0, totalPages);
+        return safeIReply(interaction, { embeds: [eb], components: statsNavRow('builder', sessionId, 0, totalPages) });
+      }
+
+      return safeIReply(interaction, { content: '❌ Unknown leaderboard type.', flags: 64 });
     }
 
     if (commandName === 'stats') {
@@ -7195,18 +6925,6 @@ ${E_TIME} Created ${created}`)
       return interaction.editReply({ embeds: [eb] });
     }
 
-    if (commandName === 'edit') {
-      const sub = options.getSubcommand();
-      if (sub === 'sticky') {
-        await promptStickyEditDropdown(interaction);
-        return;
-      }
-      if (sub === 'embed') {
-        await promptEmbedEditDropdown(interaction);
-        return;
-      }
-    }
-
     if (commandName === 'sticky') {
       const sub = options.getSubcommand();
       if (sub === 'create') {
@@ -7240,22 +6958,35 @@ ${E_TIME} Created ${created}`)
         await interaction.reply({ content: 'Choose an embed color:', components: [new ActionRowBuilder().addComponents(select)], flags: 64 });
         return;
       }
+      if (sub === 'edit') {
+        await promptEmbedEditDropdown(interaction);
+        return;
+      }
     }
 
     
 
     // --- TICKET PANELS ---
-    if (commandName === "ticketpanel") {
+    if (commandName === "panel") {
       const sub = interaction.options.getSubcommand();
       if (sub === "list") {
         await interaction.deferReply({ flags: 64 });
         const panels = await store.listTicketPanels();
-        const ids = Object.keys(panels || {});
+        const ids = [...Object.keys(panels || {}), 'spawner_prices'];
         return interaction.editReply(ids.length ? `Panels: ${ids.map(x=>`\`${x}\``).join(", ")}` : "No panels configured.");
       }
       if (sub === "send") {
         await interaction.deferReply({ flags: 64 });
-        const panelId = interaction.options.getString("panel", true);
+        const panelId = interaction.options.getString("type", true);
+
+        // Spawner prices panel is published through its own helper so the
+        // panel-ref + price embed both update consistently.
+        if (panelId === 'spawner_prices') {
+          const res = await refreshSpawnerPricesPanel(interaction.guild);
+          if (!res) return interaction.editReply(`❌ Could not publish panel in <#${SPAWNER_PRICES_CHANNEL_ID}>.`);
+          return interaction.editReply(`✅ Spawner prices panel refreshed in <#${res.channel.id}>.`);
+        }
+
         const panel = await store.getTicketPanel(panelId);
         if (!panel) return interaction.editReply("Panel not found. Run the bot and try again — panels are loaded from data.json.");
 
@@ -7339,12 +7070,7 @@ ${E_TIME} Created ${created}`)
         return safeIReply(interaction, { content: 'Admin or Manager only.', flags: 64 });
       }
       const sub = options.getSubcommand();
-
-      if (sub === 'panel') {
-        const res = await refreshSpawnerPricesPanel(interaction.guild);
-        if (!res) return interaction.editReply(`❌ Could not publish panel in <#${SPAWNER_PRICES_CHANNEL_ID}>.`);
-        return interaction.editReply(`✅ Spawner prices panel refreshed in <#${res.channel.id}>.`);
-      }
+      // /spawner panel has been folded into /panel send spawner_prices.
 
       if (sub === 'buy' || sub === 'sell') {
         const typeKey = options.getString('type', true);
@@ -7547,58 +7273,12 @@ ${E_TIME} Created ${created}`)
         }
       } catch (e) { console.error('[application] re-render error:', e?.message); }
 
-      const note = panelEdited ? '' : '\n⚠️ Applications panel has not been published yet (or its message is gone). Run `/ticketpanel send applications` to publish the updated buttons.';
+      const note = panelEdited ? '' : '\n⚠️ Applications panel has not been published yet (or its message is gone). Run `/panel send applications` to publish the updated buttons.';
       return interaction.editReply(`✅ **${typeId}** application is now **${closed ? 'CLOSED' : 'OPEN'}**.${note}`);
     }
 
 
-// --- CREATE COMMANDS ---
-if (commandName === "create") {
-  const sub = interaction.options.getSubcommand();
-  if (sub === "embed") {
-    // Premium builder UI: color dropdown -> modal
-    const row = new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId("create_embed_color")
-        .setPlaceholder("Select a color")
-        .addOptions(
-          new StringSelectMenuOptionBuilder().setLabel("Default").setValue("Default"),
-          new StringSelectMenuOptionBuilder().setLabel("Blue").setValue("Blue"),
-          new StringSelectMenuOptionBuilder().setLabel("Aqua").setValue("Aqua"),
-          new StringSelectMenuOptionBuilder().setLabel("Green").setValue("Green"),
-          new StringSelectMenuOptionBuilder().setLabel("Red").setValue("Red"),
-          new StringSelectMenuOptionBuilder().setLabel("Yellow").setValue("Yellow"),
-          new StringSelectMenuOptionBuilder().setLabel("Purple").setValue("Purple"),
-          new StringSelectMenuOptionBuilder().setLabel("Orange").setValue("Orange"),
-          new StringSelectMenuOptionBuilder().setLabel("Grey").setValue("Grey")
-        )
-    );
-    await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription("Choose a color for your embed.")], components: [row], flags: 64 });
-    return;
-  }
-}
-
-if (commandName === 'create') {
-  const sub = interaction.options.getSubcommand(false);
-  if (sub === 'embed') {
-    const select = new StringSelectMenuBuilder()
-      .setCustomId('create_embed_color')
-      .setPlaceholder('Select a Color')
-      .addOptions(
-        { label: 'Red', value: 'Red', emoji: '🔴' },
-        { label: 'Blue', value: 'Blue', emoji: '🔵' },
-        { label: 'Green', value: 'Green', emoji: '🟢' },
-        { label: 'Yellow', value: 'Yellow', emoji: '🟡' },
-        { label: 'Purple', value: 'Purple', emoji: '🟣' },
-        { label: 'Orange', value: 'Orange', emoji: '🟠' },
-        { label: 'White', value: 'White', emoji: '⚪' },
-        { label: 'Black', value: '#000000', emoji: '⚫' },
-        { label: 'Dark Grey', value: '#2b2d31', emoji: '🌑' }
-      );
-    await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription('Choose a color for your embed.')], components: [new ActionRowBuilder().addComponents(select)], flags: 64 });
-    return;
-  }
-}
+// /create was a duplicate of /embed create — removed.
 
 if (commandName === 'role') {
   const sub = interaction.options.getSubcommand();
@@ -7634,16 +7314,7 @@ if (commandName === 'role') {
   }
 }
 
-// --- THEME COMMANDS ---
-if (commandName === "theme") {
-  const sub = interaction.options.getSubcommand();
-  if (sub === "set") {
-    const theme = interaction.options.getString("theme", true);
-    await store.setGuildTheme(interaction.guildId, theme).catch(() => {});
-    await interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription(`Theme set to **${theme.replace(/_/g,' ')}**.`)] });
-    return;
-  }
-}
+// /theme handler removed — was never registered as a slash command.
 
 
     // --- PRESTIGE COMMANDS ---
