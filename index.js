@@ -679,7 +679,9 @@ function parseDesignerLines(text) {
 function buildSchematicBody(sub) {
   const sections = [];
   const designers = parseDesignerLines(sub.designers || '');
-  if (designers.length) sections.push(`**Designers**\n${designers.map(d => `• ${d}`).join('\n')}`);
+  // Designers render WITHOUT bullets — each mention on its own line. This
+  // lets the @mentions ping users cleanly without bullet clutter.
+  if (designers.length) sections.push(`**Designers**\n${designers.join('\n')}`);
 
   if (sub.credits && bulletize(sub.credits).length) {
     sections.push(`**Credits**\n${bulletize(sub.credits).map(c => `• ${c}`).join('\n')}`);
@@ -760,6 +762,22 @@ function buildSchematicPreviewComponents(sub) {
     new ButtonBuilder().setCustomId(`publish_edit_details:${sub.id}`).setLabel('Details').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`publish_rerender:${sub.id}`).setLabel('Re-render').setStyle(ButtonStyle.Secondary),
   );
+  // UserSelectMenu rows let editors PICK actual Discord users — the picked
+  // users become real <@id> mentions in the post that ping on first publish.
+  const designersRow = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder()
+      .setCustomId(`publish_pick_designers:${sub.id}`)
+      .setPlaceholder('Select designers (pings them in the forum post)')
+      .setMinValues(0)
+      .setMaxValues(10),
+  );
+  const creditsRow = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder()
+      .setCustomId(`publish_pick_credits:${sub.id}`)
+      .setPlaceholder('Select credited helpers (overwrites text credits)')
+      .setMinValues(0)
+      .setMaxValues(10),
+  );
   const isPublished = sub.status === 'PUBLISHED';
   const publishRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -767,7 +785,7 @@ function buildSchematicPreviewComponents(sub) {
       .setLabel(isPublished ? 'Update Forum Post' : 'Publish to Forum')
       .setStyle(isPublished ? ButtonStyle.Secondary : ButtonStyle.Success),
   );
-  return [editRow, publishRow];
+  return [editRow, designersRow, creditsRow, publishRow];
 }
 
 // Build a modal with the given field config and prefill values.
@@ -798,7 +816,7 @@ function buildSchematicModal(sub) {
     { id: 'rates',     label: 'Rates (one per line)',   style: TextInputStyle.Paragraph, required: false, max: 800,  value: sub.rates,
       placeholder: 'Sweet Berries: 1.6m/h' },
     { id: 'howto',     label: 'Instructions',           style: TextInputStyle.Paragraph, required: true,  max: 1800, value: sub.howto,
-      placeholder: 'Build steps + how to use it.' },
+      placeholder: '1. Place the farm at y=64\n2. Hook up bone meal\n3. Press the wooden button to start' },
     { id: 'stats',     label: 'Stats (revenue / profit)', style: TextInputStyle.Paragraph, required: false, max: 600, value: sub.stats,
       placeholder: 'Revenue: $40m/h\nProfit: $12m/h' },
   ]);
@@ -959,13 +977,13 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     return { ok: false, reason: `Could not fetch source files: ${e?.message || e}` };
   }
 
-  // Build the starter as a plain message (heading + bulleted sections) with
-  // the render PNG attached inline and the .litematic last so the file chip
-  // sits at the bottom of the post.
+  // Build the starter as a plain message (bulleted sections) with the
+  // render PNG attached inline and the .litematic last so the file chip
+  // sits at the bottom of the post. No heading — the thread title is
+  // already the schem name.
   const body = buildSchematicBody(sub);
-  const heading = sub.name ? `# ${sub.name}\n\n` : '';
   // Discord message content limit is 2000 chars. Truncate hard.
-  let content = (heading + (body || '')).slice(0, 2000);
+  let content = (body || '').slice(0, 2000);
 
   // Edit + Details buttons on the starter — designers + managers can fix
   // typos / replace the .litematic long after the original ticket is closed.
@@ -1024,13 +1042,15 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     }
   }
 
-  // Fresh post.
+  // Fresh post. allowedMentions parses 'users' so designers actually get
+  // pinged the first time the post drops. (Edits don't re-ping in Discord.)
   try {
     thread = await forum.threads.create({
       name: (sub.name || sub.id).slice(0, 100),
       autoArchiveDuration: SCHEMATIC_FORUM_AUTO_ARCHIVE_MIN,
       message: {
-        content,
+        content: content || ' ',
+        allowedMentions: { parse: ['users'] },
         files: [
           new AttachmentBuilder(renderBuf, { name: 'render.png' }),
           new AttachmentBuilder(litematicBuf, { name: sub.litematicName || `${sub.id}.litematic` }),
@@ -3670,27 +3690,41 @@ client.on('messageCreate', async (message) => {
     if (message.guildId && message.attachments?.size) {
       const litematicAttachment = [...message.attachments.values()].find(a => /\.litematic$/i.test(a.name || a.url || ''));
       if (litematicAttachment) {
+        // Both branches share the same "auto-rerender, delete the user's
+        // message on success" flow. Branch decides whether to also auto-
+        // republish to the forum.
+        const handleLitematicDrop = async (sub, opts = {}) => {
+          const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+          if (!result?.ok) {
+            await message.channel.send({ content: `❌ Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+            return;
+          }
+          // Silent success — delete the user's upload message so the channel
+          // stays tidy. The render itself lives in the bot's render-upload
+          // message (created inside regenerateSchematicRender).
+          await message.delete().catch(() => {});
+
+          if (opts.republishWhenPublished) {
+            const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
+            if (fresh.status === 'PUBLISHED' && fresh.forumThreadId) {
+              const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+              if (!pubRes?.ok) {
+                await message.channel.send({ content: `⚠️ Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+              }
+            }
+          } else if (opts.alwaysRepublish) {
+            const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
+            const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+            if (!pubRes?.ok) {
+              await message.channel.send({ content: `⚠️ Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+            }
+          }
+        };
+
         // Case A: ticket-channel upload during the original submission flow.
         if (isPublishSchematicTicketChannel(message.channel)) {
           const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
-          if (sub) {
-            const fileName = litematicAttachment.name || 'schematic.litematic';
-            await message.channel.send({ content: `Rendering \`${fileName}\``, allowedMentions: { parse: [] } }).catch(() => {});
-            const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-            if (!result?.ok) {
-              await message.channel.send({ content: `❌ Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
-            } else {
-              // If already published, auto-republish so the forum post picks
-              // up the new .litematic + render without /publish post.
-              const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
-              if (fresh.status === 'PUBLISHED' && fresh.forumThreadId) {
-                const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-                if (!pubRes?.ok) {
-                  await message.channel.send({ content: `⚠️ Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
-                }
-              }
-            }
-          }
+          if (sub) await handleLitematicDrop(sub, { republishWhenPublished: true });
         }
         // Case B: replacement upload inside a forum thread we own. Used by
         // designers to swap a .litematic on an already-published schem
@@ -3698,18 +3732,7 @@ client.on('messageCreate', async (message) => {
         else if (message.channel.isThread?.() && message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID) {
           const sub = await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
           if (sub && message.member && isAuthorizedToEditSubmission(message.member, sub)) {
-            const fileName = litematicAttachment.name || 'schematic.litematic';
-            await message.channel.send({ content: `Rendering \`${fileName}\``, allowedMentions: { parse: [] } }).catch(() => {});
-            const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-            if (!result?.ok) {
-              await message.channel.send({ content: `❌ Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
-            } else {
-              const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
-              const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-              if (!pubRes?.ok) {
-                await message.channel.send({ content: `⚠️ Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
-              }
-            }
+            await handleLitematicDrop(sub, { alwaysRepublish: true });
           }
         }
       }
@@ -4352,6 +4375,44 @@ if (interaction.isButton() && (
 }
 
 // --- PUBLISH SCHEMATIC: Re-render button ---
+// --- PUBLISH SCHEMATIC: UserSelectMenu pickers for Designers / Credits ---
+if (interaction.isUserSelectMenu?.() && (
+  interaction.customId.startsWith('publish_pick_designers:') ||
+  interaction.customId.startsWith('publish_pick_credits:')
+)) {
+  const isCredits = interaction.customId.startsWith('publish_pick_credits:');
+  const subId = interaction.customId.split(':')[1];
+  const sub = await store.getSchematicSubmission(subId).catch(() => null);
+  if (!sub) return interaction.reply({ content: 'Submission record missing.', flags: 64 }).catch(() => {});
+  if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
+    return interaction.reply({ content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
+  }
+  await interaction.deferReply({ flags: 64 }).catch(() => {});
+  const userIds = interaction.values || [];
+  const mentions = userIds.map(id => `<@${id}>`).join('\n');
+  const patch = isCredits
+    ? { credits: mentions, updatedAt: Date.now() }
+    : { designers: mentions, updatedAt: Date.now() };
+  const updated = await store.updateSchematicSubmission(subId, patch);
+  const finalSub = updated || { ...sub, ...patch };
+
+  // Refresh preview + auto-republish if PUBLISHED
+  const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
+  if (channel) await postOrUpdateSchematicDraftPreview(channel, finalSub).catch(() => {});
+
+  let republishNote = '';
+  if (finalSub.status === 'PUBLISHED' && finalSub.forumThreadId) {
+    const res = await publishOrUpdateSchematicForumPost(interaction.guild, finalSub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+    republishNote = res?.ok ? ' Forum thread updated.' : `\n⚠️ ${res?.reason}`;
+  }
+  return safeIReply(interaction, {
+    content: userIds.length
+      ? `✅ ${isCredits ? 'Credits' : 'Designers'} set to ${userIds.length} user${userIds.length === 1 ? '' : 's'}.${republishNote}`
+      : `✅ ${isCredits ? 'Credits' : 'Designers'} cleared.${republishNote}`,
+    flags: 64,
+  });
+}
+
 if (interaction.isButton() && interaction.customId.startsWith('publish_rerender:')) {
   const subId = interaction.customId.split(':')[1];
   const sub = await store.getSchematicSubmission(subId).catch(() => null);
