@@ -2675,7 +2675,7 @@ client.once('clientReady', async () => {
         '• You meet activity expectations',
         '• You can commit time daily',
         '',
-        'Low-effort or troll applications will be denied automatically.',
+        '-# Low-effort or troll applications will be denied automatically.',
       ].join('\n');
       appPanel.embed.color = 0x08a4a7;
       const afterAppEmbed = JSON.stringify(appPanel.embed);
@@ -3840,22 +3840,18 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     const categoryId = direction === 'buy' ? C.TICKET_CATEGORIES.SPAWNER_BUY : C.TICKET_CATEGORIES.SPAWNER_SELL;
     const btnCfg = {
       key: buttonKey,
-      label: `${direction === 'buy' ? 'Spawner Buy' : 'Spawner Sell'} — ${type.label}`,
+      // Welcome embed shows just "Spawner Buy" / "Spawner Sell" — the type
+      // appears in the pinned price embed instead.
+      label: direction === 'buy' ? 'Spawner Buy' : 'Spawner Sell',
       categoryId,
       welcome: `Welcome {userMention}! A staff member will be with you shortly.`,
       questions: [],
     };
 
-    // Reserve a per-type ticket number BEFORE we create the channel so we can
-    // pass the final name to `channels.create` and avoid burning a rename slot
-    // (Discord throttles to 2 renames per channel per 10 minutes).
-    let num;
-    try {
-      num = await store.nextSpawnerTicketNumber(type.key);
-    } catch {
-      num = Date.now() % 1000; // best-effort fallback if store write fails
-    }
-    const desiredName = `${type.shortName}-${num}`.slice(0, 90);
+    // Channel name uses the quantity the user actually requested, not a
+    // per-type ticket counter. Staff sees "creeper-432" at a glance instead
+    // of an opaque sequential number.
+    const desiredName = `${type.shortName}-${qty}`.slice(0, 90);
 
     let channel;
     try {
