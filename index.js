@@ -690,6 +690,9 @@ function buildSchematicBody(sub) {
   if (sub.consumes && bulletize(sub.consumes).length) {
     sections.push(`**Consumes**\n${bulletize(sub.consumes).map(c => `• ${c}`).join('\n')}`);
   }
+  if (sub.stats && bulletize(sub.stats).length) {
+    sections.push(`**Stats**\n${bulletize(sub.stats).map(s => `• ${s}`).join('\n')}`);
+  }
   if (sub.positives && bulletize(sub.positives).length) {
     sections.push(`**Positives**\n${bulletize(sub.positives).map(p => `• ${p}`).join('\n')}`);
   }
@@ -697,10 +700,9 @@ function buildSchematicBody(sub) {
     sections.push(`**Negatives**\n${bulletize(sub.negatives).map(n => `• ${n}`).join('\n')}`);
   }
 
-  const instructions = [];
-  if (sub.build && String(sub.build).trim()) instructions.push(`**Build**\n${String(sub.build).trim()}`);
-  if (sub.howto && String(sub.howto).trim()) instructions.push(`**How to use**\n${String(sub.howto).trim()}`);
-  if (instructions.length) sections.push(`**Instructions**\n\n${instructions.join('\n\n')}`);
+  if (sub.howto && String(sub.howto).trim()) {
+    sections.push(`**Instructions**\n${String(sub.howto).trim()}`);
+  }
 
   let body = sections.join('\n\n');
   if (body.length > SCHEMATIC_MAX_BODY_CHARS) {
@@ -709,23 +711,35 @@ function buildSchematicBody(sub) {
   return body;
 }
 
+// Status-driven embed color for the in-ticket draft preview.
+//   DRAFT     → yellow
+//   PUBLISHED → green
+//   REJECTED  → red
+function schematicStatusColor(sub) {
+  const s = String(sub?.status || 'DRAFT').toUpperCase();
+  if (s === 'PUBLISHED') return 0x57f287;
+  if (s === 'REJECTED')  return 0xed4245;
+  return 0xfee75c; // DRAFT / anything else
+}
+
 function buildSchematicEmbed(sub, { forPreview = false } = {}) {
   const eb = new EmbedBuilder()
-    .setColor(0x08a4a7)
+    .setColor(forPreview ? schematicStatusColor(sub) : 0x08a4a7)
     .setTitle(sub.name || 'Untitled Schematic');
   const body = buildSchematicBody(sub);
 
   if (forPreview) {
-    // Prominent upload-status header so submitters can see at a glance
-    // whether they still need to drop a .litematic. Sits above the body
-    // because Discord renders embed description top-to-bottom.
-    const litematicLine = sub.litematicUrl
-      ? `📎 **Schematic File** ✅ \`${sub.litematicName || 'uploaded.litematic'}\``
-      : `📎 **Schematic File** ❌ Drop a \`.litematic\` in this channel to upload`;
-    const renderLine = sub.renderUrl
-      ? `🖼️ **Render** ✅ Ready`
-      : `🖼️ **Render** ⏳ Awaiting \`.litematic\` upload`;
-    const header = `${litematicLine}\n${renderLine}\n\n───\n\n`;
+    // Compact checklist of every required piece. Once everything is ✅,
+    // the submission is ready for /publish post.
+    const check = (ok) => ok ? '✅' : '❌';
+    const checklist = [
+      `${check(Boolean(sub.name && sub.name.trim()))} Name`,
+      `${check(parseDesignerLines(sub.designers || '').length > 0)} Designers`,
+      `${check(Boolean(sub.howto && sub.howto.trim()))} Instructions`,
+      `${check(Boolean(sub.litematicUrl))} Schematic`,
+      `${check(Boolean(sub.renderUrl))} Render`,
+    ].join('\n');
+    const header = `${checklist}\n\n───\n\n`;
     eb.setDescription((header + (body || '')).slice(0, 4000));
   } else if (body) {
     eb.setDescription(body);
@@ -734,115 +748,31 @@ function buildSchematicEmbed(sub, { forPreview = false } = {}) {
   if (sub.renderUrl) eb.setImage(sub.renderUrl);
   if (forPreview) {
     const charCount = (body || '').length;
-    eb.setFooter({ text: `Draft • body ${charCount}/${SCHEMATIC_MAX_BODY_CHARS} chars${sub.renderUrl ? ' • render ready' : ''}` });
+    const statusLabel = String(sub.status || 'DRAFT').toUpperCase();
+    eb.setFooter({ text: `${statusLabel} • body ${charCount}/${SCHEMATIC_MAX_BODY_CHARS} chars` });
   }
   return eb;
 }
 
 function buildSchematicPreviewComponents(sub) {
   const editRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`publish_edit:${sub.id}`).setLabel('Edit').setStyle(ButtonStyle.Secondary).setEmoji('✏️'),
-    new ButtonBuilder().setCustomId(`publish_rerender:${sub.id}`).setLabel('Re-render').setStyle(ButtonStyle.Secondary).setEmoji('🔄'),
+    new ButtonBuilder().setCustomId(`publish_edit:${sub.id}`).setLabel('Edit').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`publish_edit_details:${sub.id}`).setLabel('Details').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`publish_rerender:${sub.id}`).setLabel('Re-render').setStyle(ButtonStyle.Secondary),
   );
   const isPublished = sub.status === 'PUBLISHED';
   const publishRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`publish_post:${sub.id}`)
       .setLabel(isPublished ? 'Update Forum Post' : 'Publish to Forum')
-      .setStyle(isPublished ? ButtonStyle.Secondary : ButtonStyle.Success)
-      .setEmoji(isPublished ? '🔁' : '📤'),
+      .setStyle(isPublished ? ButtonStyle.Secondary : ButtonStyle.Success),
   );
   return [editRow, publishRow];
 }
 
-// Split a structured paragraph into a primary section and a named secondary
-// section. The secondary section starts where the user types `<Header>:` on
-// a line by itself. Used to pack two related fields into one modal input.
-function splitStructuredField(text, secondaryHeader) {
-  if (!text) return { primary: '', secondary: '' };
-  const headerRe = new RegExp(`^\\s*${secondaryHeader}\\s*:\\s*$`, 'i');
-  const primary = [];
-  const secondary = [];
-  let mode = 'primary';
-  for (const line of String(text).split(/\r?\n/)) {
-    if (headerRe.test(line)) { mode = 'secondary'; continue; }
-    (mode === 'primary' ? primary : secondary).push(line);
-  }
-  return {
-    primary: primary.join('\n').trim(),
-    secondary: secondary.join('\n').trim(),
-  };
-}
-
-// Recombine a primary + secondary pair into a single paragraph the modal can
-// prefill with. Skips the header if no secondary content.
-function joinStructuredField(primary, secondaryHeader, secondary) {
-  const a = (primary || '').trim();
-  const b = (secondary || '').trim();
-  if (!a && !b) return '';
-  if (!b) return a;
-  return `${a}\n\n${secondaryHeader}:\n${b}`;
-}
-
-// One unified modal for all schematic fields. Discord caps modals at 5
-// inputs, so related fields are packed into the same paragraph and parsed
-// out on submit using `Header:` markers.
-function buildSchematicModal(sub) {
-  const modal = new ModalBuilder()
-    .setCustomId(`publish_modal:${sub.id}`)
-    .setTitle('Edit Schematic');
-
-  const designersBlock = joinStructuredField(sub.designers, 'Credits', sub.credits);
-  const ratesBlock     = joinStructuredField(sub.rates, 'Consumes', sub.consumes);
-  const prosConsBlock  = joinStructuredField(sub.positives, 'Negatives', sub.negatives);
-
-  const fields = [
-    {
-      id: 'name',
-      label: 'Schematic Name',
-      style: TextInputStyle.Short,
-      required: true,
-      max: 80,
-      value: sub.name,
-    },
-    {
-      id: 'designers',
-      label: 'Designers + Credits (optional)',
-      style: TextInputStyle.Paragraph,
-      required: true,
-      max: 1000,
-      value: designersBlock,
-      placeholder: '@iEtZ\n@OtherDesigner\n\nCredits:\n@HelperUser: helped with X',
-    },
-    {
-      id: 'rates',
-      label: 'Rates + Consumes (optional)',
-      style: TextInputStyle.Paragraph,
-      required: false,
-      max: 1200,
-      value: ratesBlock,
-      placeholder: 'Kelp: 431.4k/h\n\nConsumes:\nBone Block: 48k/h',
-    },
-    {
-      id: 'howto',
-      label: 'Instructions (build + how to use)',
-      style: TextInputStyle.Paragraph,
-      required: true,
-      max: 1800,
-      value: sub.howto,
-      placeholder: 'Press the wooden button to toggle the farm.\nFor tiling, alternate activator-powered rails.',
-    },
-    {
-      id: 'proscons',
-      label: 'Positives + Negatives (optional)',
-      style: TextInputStyle.Paragraph,
-      required: false,
-      max: 1200,
-      value: prosConsBlock,
-      placeholder: 'Compact (8x19x8)\nAuto shutoff\n\nNegatives:\n0.14% item loss',
-    },
-  ];
-
+// Build a modal with the given field config and prefill values.
+function buildModalFromFields(customId, title, fields) {
+  const modal = new ModalBuilder().setCustomId(customId).setTitle(title);
   for (const f of fields) {
     const input = new TextInputBuilder()
       .setCustomId(f.id)
@@ -855,6 +785,37 @@ function buildSchematicModal(sub) {
     modal.addComponents(new ActionRowBuilder().addComponents(input));
   }
   return modal;
+}
+
+// Essentials modal — Schematic Name + Designers + Rates + Instructions + Stats.
+// Discord caps modals at 5 inputs; the remaining fields live in the Details
+// modal below.
+function buildSchematicModal(sub) {
+  return buildModalFromFields(`publish_modal:${sub.id}`, 'Edit Schematic', [
+    { id: 'name',      label: 'Schematic Name',         style: TextInputStyle.Short,     required: true,  max: 80,   value: sub.name },
+    { id: 'designers', label: 'Designers',              style: TextInputStyle.Paragraph, required: true,  max: 800,  value: sub.designers,
+      placeholder: '@iEtZ\n@OtherDesigner' },
+    { id: 'rates',     label: 'Rates (one per line)',   style: TextInputStyle.Paragraph, required: false, max: 800,  value: sub.rates,
+      placeholder: 'Sweet Berries: 1.6m/h' },
+    { id: 'howto',     label: 'Instructions',           style: TextInputStyle.Paragraph, required: true,  max: 1800, value: sub.howto,
+      placeholder: 'Build steps + how to use it.' },
+    { id: 'stats',     label: 'Stats (revenue / profit)', style: TextInputStyle.Paragraph, required: false, max: 600, value: sub.stats,
+      placeholder: 'Revenue: $40m/h\nProfit: $12m/h' },
+  ]);
+}
+
+// Details modal — credits / consumes / positives / negatives. All optional.
+function buildSchematicDetailsModal(sub) {
+  return buildModalFromFields(`publish_modal_details:${sub.id}`, 'Edit Schematic Details', [
+    { id: 'credits',   label: 'Credits',    style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.credits,
+      placeholder: '@HelperUser: On/off switch help' },
+    { id: 'consumes',  label: 'Consumes',   style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.consumes,
+      placeholder: 'Bone Blocks: 280k/h\nBlaze Rods: 220k/h' },
+    { id: 'positives', label: 'Positives',  style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.positives,
+      placeholder: 'Compact (8x19x8)' },
+    { id: 'negatives', label: 'Negatives',  style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.negatives,
+      placeholder: '0.14% item loss' },
+  ]);
 }
 
 async function postOrUpdateSchematicDraftPreview(channel, sub) {
@@ -902,7 +863,9 @@ async function downloadToBuffer(url) {
 // buffer. Throws on failure.
 async function renderLitematicToPng(buffer) {
   const renderer = getLitematicRender();
-  const { png } = await renderer.renderLitematic(buffer, {});
+  // Transparent PNG so the render blends into Discord's surface — looks
+  // cleaner in both the embed preview and the published forum post.
+  const { png } = await renderer.renderLitematic(buffer, { transparentBackground: true });
   return png;
 }
 
@@ -996,13 +959,19 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     return { ok: false, reason: `Could not fetch source files: ${e?.message || e}` };
   }
 
-  const embed = buildSchematicEmbed(sub, { forPreview: false });
-  embed.setImage('attachment://render.png');
+  // Build the starter as a plain message (heading + bulleted sections) with
+  // the render PNG attached inline and the .litematic last so the file chip
+  // sits at the bottom of the post.
+  const body = buildSchematicBody(sub);
+  const heading = sub.name ? `# ${sub.name}\n\n` : '';
+  // Discord message content limit is 2000 chars. Truncate hard.
+  let content = (heading + (body || '')).slice(0, 2000);
 
-  // Edit button on the starter message — gives designers a way to fix typos
-  // or replace the .litematic long after the original ticket is closed.
+  // Edit + Details buttons on the starter — designers + managers can fix
+  // typos / replace the .litematic long after the original ticket is closed.
   const editRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`publish_edit_forum:${sub.id}`).setLabel('Edit').setStyle(ButtonStyle.Secondary).setEmoji('✏️'),
+    new ButtonBuilder().setCustomId(`publish_edit_forum:${sub.id}`).setLabel('Edit').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`publish_edit_details_forum:${sub.id}`).setLabel('Details').setStyle(ButtonStyle.Secondary),
   );
 
   // If the submission already references a forum thread, try to edit that
@@ -1023,7 +992,8 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     if (starter) {
       try {
         await starter.edit({
-          embeds: [embed],
+          content,
+          embeds: [],
           files: [
             new AttachmentBuilder(renderBuf, { name: 'render.png' }),
             new AttachmentBuilder(litematicBuf, { name: sub.litematicName || `${sub.id}.litematic` }),
@@ -1060,7 +1030,7 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
       name: (sub.name || sub.id).slice(0, 100),
       autoArchiveDuration: SCHEMATIC_FORUM_AUTO_ARCHIVE_MIN,
       message: {
-        embeds: [embed],
+        content,
         files: [
           new AttachmentBuilder(renderBuf, { name: 'render.png' }),
           new AttachmentBuilder(litematicBuf, { name: sub.litematicName || `${sub.id}.litematic` }),
@@ -3214,12 +3184,21 @@ client.once('clientReady', async () => {
         'Welcome {userMention}! Describe what farm/build help you need and a helper will be with you shortly.',
         'What do you need help with?'
       );
-      const publishSchematicBtn = supportLikeButton(
-        'publish_schematic', 'Publish Schematic', '📦',
-        C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC,
-        'Welcome {userMention}! Share your schematic details and a reviewer will be with you shortly.',
-        'Describe the schematic you want to publish'
-      );
+      // Publish Schematic skips the support-style "describe your issue" modal —
+      // the ticket opens directly and the submitter clicks Start Submission
+      // inside it to fill the structured fields.
+      const publishExisting = findExisting('publish_schematic');
+      const publishSchematicBtn = {
+        type: 'button',
+        key: 'publish_schematic',
+        label: 'Publish Schematic',
+        emoji: '📦',
+        styleName: 'Secondary',
+        categoryId: publishExisting?.categoryId || C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC,
+        questions: [],
+        welcome: publishExisting?.welcome
+          || 'Welcome {userMention}! Share your schematic details and a reviewer will be with you shortly.',
+      };
       const scamReportBtn = supportLikeButton(
         'scam_report', 'Scam Report', '🔴',
         C.TICKET_CATEGORIES.SCAM_REPORT,
@@ -3695,14 +3674,21 @@ client.on('messageCreate', async (message) => {
         if (isPublishSchematicTicketChannel(message.channel)) {
           const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
           if (sub) {
-            await message.channel.send({
-              embeds: [new EmbedBuilder().setColor(0x08a4a7).setDescription(`🔧 Rendering \`${litematicAttachment.name || 'schematic.litematic'}\` — this may take a few seconds.`)]
-            }).catch(() => {});
+            const fileName = litematicAttachment.name || 'schematic.litematic';
+            await message.channel.send({ content: `Rendering \`${fileName}\``, allowedMentions: { parse: [] } }).catch(() => {});
             const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
             if (!result?.ok) {
-              await message.channel.send({
-                embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Render failed').setDescription(result?.reason || 'Unknown error.')]
-              }).catch(() => {});
+              await message.channel.send({ content: `❌ Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+            } else {
+              // If already published, auto-republish so the forum post picks
+              // up the new .litematic + render without /publish post.
+              const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
+              if (fresh.status === 'PUBLISHED' && fresh.forumThreadId) {
+                const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+                if (!pubRes?.ok) {
+                  await message.channel.send({ content: `⚠️ Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+                }
+              }
             }
           }
         }
@@ -3712,26 +3698,16 @@ client.on('messageCreate', async (message) => {
         else if (message.channel.isThread?.() && message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID) {
           const sub = await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
           if (sub && message.member && isAuthorizedToEditSubmission(message.member, sub)) {
-            await message.channel.send({
-              embeds: [new EmbedBuilder().setColor(0x08a4a7).setDescription(`🔧 New \`.litematic\` detected — re-rendering and updating the post.`)]
-            }).catch(() => {});
+            const fileName = litematicAttachment.name || 'schematic.litematic';
+            await message.channel.send({ content: `Rendering \`${fileName}\``, allowedMentions: { parse: [] } }).catch(() => {});
             const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
             if (!result?.ok) {
-              await message.channel.send({
-                embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Render failed').setDescription(result?.reason || 'Unknown error.')]
-              }).catch(() => {});
+              await message.channel.send({ content: `❌ Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
             } else {
-              // Re-publish to push the new render + new .litematic to the starter.
               const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
               const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
               if (!pubRes?.ok) {
-                await message.channel.send({
-                  embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Forum update failed').setDescription(pubRes?.reason || 'Unknown error.')]
-                }).catch(() => {});
-              } else {
-                await message.channel.send({
-                  embeds: [new EmbedBuilder().setColor(0x08a4a7).setDescription(`✅ Forum post updated by ${message.author}.`)]
-                }).catch(() => {});
+                await message.channel.send({ content: `⚠️ Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
               }
             }
           }
@@ -4353,12 +4329,13 @@ if (interaction.isStringSelectMenu() && interaction.customId.startsWith('spawner
   return;
 }
 
-// --- PUBLISH SCHEMATIC: Start, Edit (in-ticket), Edit (from forum) ---
-// All three customId prefixes resolve to the same unified modal.
+// --- PUBLISH SCHEMATIC: Start, Edit (in-ticket), Edit (from forum), Details ---
 if (interaction.isButton() && (
   interaction.customId.startsWith('publish_start:') ||
   interaction.customId.startsWith('publish_edit:') ||
-  interaction.customId.startsWith('publish_edit_forum:')
+  interaction.customId.startsWith('publish_edit_forum:') ||
+  interaction.customId.startsWith('publish_edit_details:') ||
+  interaction.customId.startsWith('publish_edit_details_forum:')
 )) {
   const subId = interaction.customId.split(':')[1];
   const sub = await store.getSchematicSubmission(subId).catch(() => null);
@@ -4366,7 +4343,11 @@ if (interaction.isButton() && (
   if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
     return interaction.reply({ content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
   }
-  await interaction.showModal(buildSchematicModal(sub)).catch(() => {});
+  const wantDetails =
+    interaction.customId.startsWith('publish_edit_details:') ||
+    interaction.customId.startsWith('publish_edit_details_forum:');
+  const modal = wantDetails ? buildSchematicDetailsModal(sub) : buildSchematicModal(sub);
+  await interaction.showModal(modal).catch(() => {});
   return;
 }
 
@@ -4454,6 +4435,62 @@ if (interaction.isButton() && interaction.customId.startsWith('tk_open:')) {
       } else {
         return interaction.reply({ content: `You already have an open **${btn.label}** ticket: <#${existing.channelId}>`, flags: 64 });
       }
+    }
+  }
+
+  // If the button has no questions configured, skip the modal entirely
+  // and create the ticket straight away (e.g. Publish Schematic, which has
+  // its own Start Submission flow inside the ticket).
+  if (!Array.isArray(btn.questions) || btn.questions.length === 0) {
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
+    try {
+      const ch = await createTicketChannel({
+        interaction, panelId, buttonKey, btnCfg: btn, answers: {},
+        skipPinControl: buttonKey === 'publish_schematic',
+      });
+      if (buttonKey === 'publish_schematic' && ch) {
+        try {
+          await store.setSchematicSubmission(ch.id, {
+            id: ch.id,
+            ticketChannelId: ch.id,
+            guildId: ch.guildId,
+            submitterId: interaction.user.id,
+            status: 'DRAFT',
+            name: null, designers: null, credits: null,
+            rates: null, consumes: null, stats: null,
+            positives: null, negatives: null,
+            build: null, howto: null,
+            litematicUrl: null, litematicName: null,
+            renderUrl: null, renderMessageId: null,
+            draftMessageId: null,
+            forumThreadId: null, forumStarterMessageId: null,
+            createdAt: Date.now(), updatedAt: Date.now(),
+          });
+          const startEmbed = new EmbedBuilder()
+            .setColor(schematicStatusColor({ status: 'DRAFT' }))
+            .setTitle('Ready to submit your schematic?')
+            .setDescription([
+              'Click **Start Submission** to fill in the basics (name, designers, rates, instructions).',
+              '',
+              'Then drop your `.litematic` file in this channel — the bot will render it automatically.',
+              '',
+              'A schematic manager will review and publish your post to the forum.',
+              '',
+              `**Already have a schematic published?** Go to your post in <#${SCHEMATIC_FORUM_CHANNEL_ID}> and click the **Edit** button on it.`,
+            ].join('\n'));
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`publish_start:${ch.id}`).setLabel('Start Submission').setStyle(ButtonStyle.Secondary),
+          );
+          await ch.send({ embeds: [startEmbed], components: [row] }).catch(() => {});
+        } catch (e) {
+          console.error('[publish_schematic fast-create] error:', e?.message);
+        }
+      }
+      const visible = !!(ch && ch.permissionsFor?.(interaction.user)?.has?.(PermissionsBitField.Flags.ViewChannel));
+      return safeIReply(interaction, { content: visible && ch ? `✅ Ticket created: <#${ch.id}>` : '✅ Ticket created.', flags: 64 });
+    } catch (e) {
+      console.error('ticket fast-create error:', e);
+      return safeIReply(interaction, { content: '❌ Failed to create ticket.', flags: 64 });
     }
   }
 
@@ -4655,9 +4692,13 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     return safeIReply(interaction, { content: visible ? `✅ Ticket created: <#${channel.id}>` : '✅ Ticket created.', flags: 64 });
   }
 
-  // --- PUBLISH SCHEMATIC: unified modal submit -> save all fields + refresh preview ---
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('publish_modal:')) {
+  // --- PUBLISH SCHEMATIC: modal submit (essentials or details) ---
+  if (interaction.isModalSubmit() && (
+    interaction.customId.startsWith('publish_modal:') ||
+    interaction.customId.startsWith('publish_modal_details:')
+  )) {
     await interaction.deferReply({ flags: 64 }).catch(() => {});
+    const isDetails = interaction.customId.startsWith('publish_modal_details:');
     const subId = interaction.customId.split(':')[1];
     const sub = await store.getSchematicSubmission(subId).catch(() => null);
     if (!sub) return safeIReply(interaction, { content: 'Submission record missing.', flags: 64 });
@@ -4666,25 +4707,23 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       return safeIReply(interaction, { content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 });
     }
 
-    const designersField = (interaction.fields.getTextInputValue('designers') || '').trim();
-    const ratesField     = (interaction.fields.getTextInputValue('rates')     || '').trim();
-    const prosConsField  = (interaction.fields.getTextInputValue('proscons')  || '').trim();
+    const patch = isDetails
+      ? {
+          credits:   (interaction.fields.getTextInputValue('credits')   || '').trim(),
+          consumes:  (interaction.fields.getTextInputValue('consumes')  || '').trim(),
+          positives: (interaction.fields.getTextInputValue('positives') || '').trim(),
+          negatives: (interaction.fields.getTextInputValue('negatives') || '').trim(),
+          updatedAt: Date.now(),
+        }
+      : {
+          name:      (interaction.fields.getTextInputValue('name')      || '').trim().slice(0, 256),
+          designers: (interaction.fields.getTextInputValue('designers') || '').trim(),
+          rates:     (interaction.fields.getTextInputValue('rates')     || '').trim(),
+          howto:     (interaction.fields.getTextInputValue('howto')     || '').trim(),
+          stats:     (interaction.fields.getTextInputValue('stats')     || '').trim(),
+          updatedAt: Date.now(),
+        };
 
-    const { primary: designers, secondary: credits } = splitStructuredField(designersField, 'Credits');
-    const { primary: rates,     secondary: consumes } = splitStructuredField(ratesField,    'Consumes');
-    const { primary: positives, secondary: negatives } = splitStructuredField(prosConsField, 'Negatives');
-
-    const patch = {
-      name:      (interaction.fields.getTextInputValue('name') || '').trim().slice(0, 256),
-      howto:     (interaction.fields.getTextInputValue('howto') || '').trim(),
-      designers,
-      credits,
-      rates,
-      consumes,
-      positives,
-      negatives,
-      updatedAt: Date.now(),
-    };
     const updated = await store.updateSchematicSubmission(subId, patch);
     const finalSub = updated || { ...sub, ...patch };
 
@@ -4692,8 +4731,7 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
     if (channel) await postOrUpdateSchematicDraftPreview(channel, finalSub).catch(() => {});
 
-    // If the schem is already published, auto-sync the forum thread starter
-    // so designer edits are immediately visible without manual /publish post.
+    // If the schem is already published, auto-sync the forum thread starter.
     let republishNote = '';
     if (finalSub.status === 'PUBLISHED' && finalSub.forumThreadId) {
       const res = await publishOrUpdateSchematicForumPost(interaction.guild, finalSub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
@@ -4782,7 +4820,7 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
               `**Already have a schematic published?** Go to your post in <#${SCHEMATIC_FORUM_CHANNEL_ID}> and click the **✏️ Edit** button on it instead of opening this ticket.`,
             ].join('\n'));
           const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`publish_start:${subId}`).setLabel('Start Submission').setStyle(ButtonStyle.Primary).setEmoji('📦'),
+            new ButtonBuilder().setCustomId(`publish_start:${subId}`).setLabel('Start Submission').setStyle(ButtonStyle.Secondary),
           );
           await ch.send({ embeds: [startEmbed], components: [row] }).catch(() => {});
         } catch (e) {
