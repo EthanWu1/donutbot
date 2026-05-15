@@ -681,6 +681,217 @@
     };
   }
 
+  // === Entity models ===
+  // Litematica schematics carry an Entities list with positions, rotations,
+  // and type-specific fields (item-frame Facing, painting Variant etc.).
+  // We render a small subset: minecarts (all variants), item_frame /
+  // glow_item_frame, armor_stand, boat / chest_boat (all wood types), and
+  // painting. Static-pose only; no animation. Models are intentionally
+  // approximate — recognizable silhouettes, not pixel-perfect MC entity meshes.
+
+  const CUBE_FACES_FULL = () => ({
+    down:  { uv: [0, 0, 16, 16], texture: '#0' },
+    up:    { uv: [0, 0, 16, 16], texture: '#0' },
+    north: { uv: [0, 0, 16, 16], texture: '#0' },
+    south: { uv: [0, 0, 16, 16], texture: '#0' },
+    east:  { uv: [0, 0, 16, 16], texture: '#0' },
+    west:  { uv: [0, 0, 16, 16], texture: '#0' },
+  });
+
+  // Minecart helpers. Body uses the entity/minecart sprite, top "cargo" box
+  // uses the variant-specific texture. Two-texture model — BlockModel maps
+  // textures by index, so body refers to #0 and top refers to #1.
+  function _minecartCommonElements(includeTop) {
+    const body = {
+      from: [1, 1, 0], to: [15, 9, 16],
+      faces: {
+        down:  { uv: [0, 0, 16, 16], texture: '#0' },
+        up:    { uv: [0, 0, 16, 16], texture: '#0' },
+        north: { uv: [0, 0, 16, 16], texture: '#0' },
+        south: { uv: [0, 0, 16, 16], texture: '#0' },
+        east:  { uv: [0, 0, 16, 16], texture: '#0' },
+        west:  { uv: [0, 0, 16, 16], texture: '#0' },
+      },
+    };
+    if (!includeTop) return [body];
+    const top = {
+      from: [2, 9, 2], to: [14, 15, 14],
+      faces: {
+        down:  { uv: [0, 0, 16, 16], texture: '#1' },
+        up:    { uv: [0, 0, 16, 16], texture: '#1' },
+        north: { uv: [0, 0, 16, 16], texture: '#1' },
+        south: { uv: [0, 0, 16, 16], texture: '#1' },
+        east:  { uv: [0, 0, 16, 16], texture: '#1' },
+        west:  { uv: [0, 0, 16, 16], texture: '#1' },
+      },
+    };
+    return [body, top];
+  }
+  const MINECART_TEX = 'entity/minecart/minecart';
+  function minecartModel() {
+    return new D.BlockModel(undefined, { 0: MINECART_TEX }, _minecartCommonElements(false));
+  }
+  function chestMinecartModel() {
+    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'entity/chest/normal' }, _minecartCommonElements(true));
+  }
+  function hopperMinecartModel() {
+    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/hopper_outside' }, _minecartCommonElements(true));
+  }
+  function furnaceMinecartModel() {
+    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/furnace_front' }, _minecartCommonElements(true));
+  }
+  function tntMinecartModel() {
+    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/tnt_side' }, _minecartCommonElements(true));
+  }
+  function commandBlockMinecartModel() {
+    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/command_block_side' }, _minecartCommonElements(true));
+  }
+  function spawnerMinecartModel() {
+    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/spawner' }, _minecartCommonElements(true));
+  }
+
+  function itemFrameModel(glow) {
+    // Thin plate 16w × 16h × 1d. Default oriented as if hung on the SOUTH
+    // face of a block (plate's back at z=15). The render-side transform
+    // re-orients per the entity's Facing enum.
+    const tex = glow ? 'block/glow_item_frame' : 'block/item_frame';
+    const plate = {
+      from: [0, 0, 15], to: [16, 16, 16],
+      faces: CUBE_FACES_FULL(),
+    };
+    return new D.BlockModel(undefined, { 0: tex }, [plate]);
+  }
+
+  function armorStandModel(small) {
+    // Approximation: oak-plank base + central post + crossbar arms + head box.
+    // Small armor stand scaled down vertically.
+    const tex = 'block/stripped_oak_log';
+    const s = small ? 0.5 : 1.0;
+    const baseY = 0;
+    const baseTop = baseY + 1;
+    const postTop = baseTop + Math.round(14 * s);
+    const armsBottom = baseTop + Math.round(10 * s);
+    const armsTop = armsBottom + 2;
+    const headTop = postTop + Math.round(4 * s);
+    const elems = [
+      { from: [4, baseY, 4], to: [12, baseTop, 12], faces: CUBE_FACES_FULL() },             // base
+      { from: [7, baseTop, 7], to: [9, postTop, 9], faces: CUBE_FACES_FULL() },             // post
+      { from: [2, armsBottom, 7], to: [14, armsTop, 9], faces: CUBE_FACES_FULL() },         // arms
+      { from: [6, postTop, 6], to: [10, headTop, 10], faces: CUBE_FACES_FULL() },           // head
+    ];
+    return new D.BlockModel(undefined, { 0: tex }, elems);
+  }
+
+  // Boat: ~24w × 6h × 12d hull, occupies more than one cell horizontally.
+  // Vanilla boat is 1.375 wide × 0.5625 tall × 0.5625 deep — close enough.
+  function boatModel(wood) {
+    const hull = {
+      from: [-4, 0, 2], to: [20, 6, 14],
+      faces: CUBE_FACES_FULL(),
+    };
+    return new D.BlockModel(undefined, { 0: `entity/boat/${wood}` }, [hull]);
+  }
+  function chestBoatModel(wood) {
+    const hull = {
+      from: [-4, 0, 2], to: [20, 6, 14],
+      faces: CUBE_FACES_FULL(),
+    };
+    const chest = {
+      from: [4, 6, 4], to: [12, 12, 12],
+      faces: CUBE_FACES_FULL(),
+    };
+    return new D.BlockModel(undefined, { 0: `entity/chest_boat/${wood}` }, [hull, chest]);
+  }
+
+  // Painting: variable-size flat plate. Default 1×1 — render-side reads
+  // entity.variant (or motive) and re-sizes; we don't bind individual
+  // painting art (not in the block atlas), so use oak_planks as a frame.
+  function paintingModel(widthBlocks, heightBlocks) {
+    const w = Math.max(1, widthBlocks | 0) * 16;
+    const h = Math.max(1, heightBlocks | 0) * 16;
+    const plate = {
+      from: [0, 0, 15], to: [w, h, 16],
+      faces: CUBE_FACES_FULL(),
+    };
+    return new D.BlockModel(undefined, { 0: 'block/oak_planks' }, [plate]);
+  }
+
+  const BOAT_WOODS = new Set(['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'bamboo', 'pale_oak']);
+
+  function entityModelFor(entity) {
+    const id = entity.id || '';
+    if (id === 'minecraft:minecart')              return minecartModel();
+    if (id === 'minecraft:chest_minecart')        return chestMinecartModel();
+    if (id === 'minecraft:hopper_minecart')       return hopperMinecartModel();
+    if (id === 'minecraft:furnace_minecart')      return furnaceMinecartModel();
+    if (id === 'minecraft:tnt_minecart')          return tntMinecartModel();
+    if (id === 'minecraft:command_block_minecart')return commandBlockMinecartModel();
+    if (id === 'minecraft:spawner_minecart')      return spawnerMinecartModel();
+    if (id === 'minecraft:item_frame')            return itemFrameModel(false);
+    if (id === 'minecraft:glow_item_frame')       return itemFrameModel(true);
+    if (id === 'minecraft:armor_stand')           return armorStandModel(entity.small);
+    if (id === 'minecraft:painting')              return paintingModel(1, 1);
+    // Boats: minecraft:<wood>_boat / minecraft:<wood>_chest_boat
+    let m = id.match(/^minecraft:(\w+)_chest_boat$/);
+    if (m && BOAT_WOODS.has(m[1])) return chestBoatModel(m[1]);
+    m = id.match(/^minecraft:(\w+)_boat$/);
+    if (m && BOAT_WOODS.has(m[1])) return boatModel(m[1]);
+    return null;
+  }
+
+  // Map Litematica `Facing` enum (0=down, 1=up, 2=north, 3=south, 4=west, 5=east)
+  // into a yaw + pitch suitable for our plate-on-south-face base orientation.
+  // For item_frame and painting (both default hung on SOUTH face).
+  const FACING_TO_ROTATION = {
+    0: { rotX: -Math.PI / 2, rotY: 0 },               // down: floor frame
+    1: { rotX:  Math.PI / 2, rotY: 0 },               // up: ceiling frame
+    2: { rotX: 0,            rotY: Math.PI },         // north
+    3: { rotX: 0,            rotY: 0 },               // south (default)
+    4: { rotX: 0,            rotY:  Math.PI / 2 },    // west
+    5: { rotX: 0,            rotY: -Math.PI / 2 },    // east
+  };
+
+  function buildEntityMesh(entities, atlasOrResources) {
+    const out = new D.Mesh();
+    if (!entities || entities.length === 0) return out;
+    for (const e of entities) {
+      const model = entityModelFor(e);
+      if (!model) continue;
+      try {
+        const m = model.getMesh(atlasOrResources, D.Cull.none());
+        // Local model coords are 0..16 (one block). Scale down to cell units (0..1).
+        const t = mat4.create();
+        // Translate to entity world position. Entity coords are continuous —
+        // subtract 0.5 in xz to compensate for block-center vs corner offset
+        // is NOT needed because models start at origin (0,0,0) which is
+        // already the "block min corner".
+        mat4.translate(t, t, [e.x, e.y, e.z]);
+        // Apply rotations. Item-frame / painting use Facing enum; minecart /
+        // boat / armor_stand use Yaw.
+        const rotByFacing = (e.id === 'minecraft:item_frame' || e.id === 'minecraft:glow_item_frame' || e.id === 'minecraft:painting');
+        if (rotByFacing && typeof e.facing === 'number' && FACING_TO_ROTATION[e.facing]) {
+          const r = FACING_TO_ROTATION[e.facing];
+          // Rotate about the cell center so the plate orbits the block
+          mat4.translate(t, t, [0.5, 0.5, 0.5]);
+          mat4.rotateY(t, t, r.rotY);
+          mat4.rotateX(t, t, r.rotX);
+          mat4.translate(t, t, [-0.5, -0.5, -0.5]);
+        } else if (typeof e.yaw === 'number' && e.yaw !== 0) {
+          // Yaw degrees → radians. Rotate about model center.
+          mat4.translate(t, t, [0.5, 0.5, 0.5]);
+          mat4.rotateY(t, t, -e.yaw * Math.PI / 180);
+          mat4.translate(t, t, [-0.5, -0.5, -0.5]);
+        }
+        // Scale model units (0..16) to cell units (0..1).
+        mat4.scale(t, t, [0.0625, 0.0625, 0.0625]);
+        out.merge(m.transform(t));
+      } catch (err) {
+        console.warn('[entity] failed to mesh', e.id, err && err.message);
+      }
+    }
+    return out;
+  }
+
   function patchChestRenderer() {
     const orig = D.SpecialRenderers && D.SpecialRenderers.getBlockMesh;
     if (!orig) return;
@@ -1474,10 +1685,38 @@
     }
     gl.depthMask(true);
 
+    // === Entities ===
+    // Build a single entity mesh (minecarts, item frames, armor stands,
+    // boats, paintings) and draw it last with depth write on so entities
+    // sit on top of block geometry. resources already exposes getTextureUV /
+    // getTextureAtlas — pass it as the atlas to BlockModel.getMesh.
+    if (payload.entities && payload.entities.length) {
+      const entityMesh = buildEntityMesh(payload.entities, resources);
+      if (entityMesh && !entityMesh.isEmpty()) {
+        // finishChunkMesh-style normal fixup (deepslate's mesh expects per-
+        // vertex normals; without it lighting can read flat-black). One pass
+        // over the merged mesh, set each vertex normal to its quad normal.
+        // Reverse winding: BlockModel.getMesh emits CCW-from-outside, which
+        // becomes CCW-from-camera (= front-face) only after deepslate's chunk
+        // traversal. Our direct entity-mesh path skips that, so the iso
+        // camera sees the quads as CW (= back-face) and CULL_FACE.BACK
+        // discards them. One reverse per quad flips the index order so the
+        // visible faces are front-facing for the NW iso projection.
+        for (const q of entityMesh.quads) {
+          q.reverse();
+          const n = q.normal();
+          q.forEach((v) => { v.normal = n; v.blockPos = new D.Vector(0, 0, 0); });
+        }
+        entityMesh.rebuild(gl, { pos: true, color: true, texture: true, normal: true, blockPos: true });
+        gl.depthMask(true);
+        renderer.drawMesh(entityMesh, { pos: true, color: true, texture: true, normal: true });
+      }
+    }
+
     gl.flush();
     gl.finish();
 
-    return { dataUrl: canvas.toDataURL('image/png'), added, skipped, diag: window.__renderDiagnostics };
+    return { dataUrl: canvas.toDataURL('image/png'), added, skipped, diag: window.__renderDiagnostics, entityCount: payload.entities ? payload.entities.length : 0 };
   }
 
   window.__renderLitematic = async (payload, opts) => {

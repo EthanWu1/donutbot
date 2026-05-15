@@ -10,10 +10,10 @@ const { renderLitematic, shutdown } = require('./lib/litematicRender/renderer');
   console.log('rendering...');
   const t0 = Date.now();
   try {
-    const { png, meta, diag, added, skipped } = await renderLitematic(buf, { width: 1024, height: 1024 });
+    const { png, meta, diag, added, skipped, entityCount } = await renderLitematic(buf, { width: 1024, height: 1024 });
     fs.writeFileSync('test-render.png', png);
     console.log(`done in ${Date.now() - t0}ms`, meta);
-    console.log(`added=${added} skipped=${skipped}`);
+    console.log(`added=${added} skipped=${skipped} entities=${entityCount}`);
     if (diag) {
       console.log('--- DIAG ---');
       console.log('unique block types:', diag.uniqueBlockTypes);
