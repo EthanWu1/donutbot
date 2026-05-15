@@ -835,10 +835,10 @@ const CATEGORY_EXTRA_VIEWER_ROLES = {
   [C.TICKET_CATEGORIES.MOD_2]: [..._MOD_AND_ABOVE, C.ROLE_TRIAL_MOD].filter(Boolean),
   // Builder category — all builder roles + Trial Mod and above
   [C.TICKET_CATEGORIES.BUILDING]: [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, ..._MOD_AND_ABOVE].filter(Boolean),
-  // Spawner categories — managers/mods plus dedicated spawner-ticket access
-  // role (Trial Mod / Support intentionally excluded — money-sensitive tickets)
-  [C.TICKET_CATEGORIES.SPAWNER_BUY]: [_ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
-  [C.TICKET_CATEGORIES.SPAWNER_SELL]: [_ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
+  // Spawner categories — full staff chain (incl. Support/Trial Mod) plus the
+  // dedicated spawner-ticket access role.
+  [C.TICKET_CATEGORIES.SPAWNER_BUY]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, _TRIAL_MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
+  [C.TICKET_CATEGORIES.SPAWNER_SELL]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, _TRIAL_MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
   // Farm Help + Publish Schematic — staff + schematic-helper role
   [C.TICKET_CATEGORIES.FARM_HELP]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID].filter(Boolean),
   [C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID].filter(Boolean),

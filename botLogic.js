@@ -16,11 +16,16 @@ function getTicketViewerRoleIds({ buttonKey, isBuilding, staffRoleIds, builderRo
   if (isBuilding) return uniq(builderRoleIds);
 
   if (isSpawnerButton(buttonKey)) {
+    // Full staff chain (incl. Support/Trial Mod) plus the dedicated
+    // spawner-ticket access role. Support and Mod intentionally retain access.
     return uniq([
+      ...(staffRoleIds || []),
+      config?.ROLE_STAFF,
       config?.ROLE_ADMIN,
       config?.ROLE_MANAGER,
       config?.ROLE_CHIEF_MOD,
       config?.ROLE_MOD,
+      config?.ROLE_TRIAL_MOD,
       spawnerRoleId,
     ]);
   }
