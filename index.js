@@ -687,7 +687,9 @@ function buildSchematicBody(sub) {
   if (designers.length) sections.push(`**Designers**\n${designers.join('\n')}`);
 
   if (sub.credits && bulletize(sub.credits).length) {
-    sections.push(`**Credits**\n${bulletize(sub.credits).map(c => `• ${c}`).join('\n')}`);
+    // Credits render without bullets — each line stands on its own so
+    // @mentions or 'Name: what they did' lines read cleanly.
+    sections.push(`**Credits**\n${bulletize(sub.credits).join('\n')}`);
   }
   if (sub.rates && bulletize(sub.rates).length) {
     sections.push(`**Rates**\n${bulletize(sub.rates).map(r => `• ${r}`).join('\n')}`);
@@ -822,9 +824,14 @@ function buildSchematicModal(sub) {
   ]);
 }
 
-// Details modal — consumes / positives / negatives. All optional.
+// Details modal — credits / consumes / positives / negatives. All optional.
+// Credits sits alongside the UserSelectMenu picker: pick users via the
+// menu to auto-fill mentions, OR type 'Name: what they helped with' here
+// for descriptions. Text in this field overwrites the picker's output.
 function buildSchematicDetailsModal(sub) {
   return buildModalFromFields(`publish_modal_details:${sub.id}`, 'Edit Schematic Details', [
+    { id: 'credits',   label: 'Credits',    style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.credits,
+      placeholder: '<@iEtZ>: helped wire the on/off switch' },
     { id: 'consumes',  label: 'Consumes',   style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.consumes,
       placeholder: 'Bone Blocks: 280k/h\nBlaze Rods: 220k/h' },
     { id: 'positives', label: 'Positives',  style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.positives,
@@ -1155,7 +1162,7 @@ async function importSchematicFromThread(guild, threadIdOrUrl, currentSub) {
   return { ok: true, partial: false };
 }
 
-const SCHEMATIC_GUIDELINES_TITLE = '📌 How to Submit a Schematic';
+const SCHEMATIC_GUIDELINES_TITLE = 'How to Submit a Schematic';
 
 async function ensureSchematicGuidelinesPost(guild) {
   try {
@@ -3690,49 +3697,60 @@ client.on('messageCreate', async (message) => {
     if (message.guildId && message.attachments?.size) {
       const litematicAttachment = [...message.attachments.values()].find(a => /\.litematic$/i.test(a.name || a.url || ''));
       if (litematicAttachment) {
-        // Both branches share the same "auto-rerender, delete the user's
-        // message on success" flow. Branch decides whether to also auto-
-        // republish to the forum.
+        // Both branches share the same "auto-rerender" flow. They differ in
+        // whether to delete the user's upload message and whether to auto-
+        // republish the forum post.
         const handleLitematicDrop = async (sub, opts = {}) => {
           const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
           if (!result?.ok) {
-            await message.channel.send({ content: `❌ Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+            await message.channel.send({ content: `Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
             return;
           }
-          // Silent success — delete the user's upload message so the channel
-          // stays tidy. The render itself lives in the bot's render-upload
-          // message (created inside regenerateSchematicRender).
-          await message.delete().catch(() => {});
+          // Tidy the channel only in forum threads — designers can see what
+          // they replaced as a comment chain. In tickets, keep the original
+          // .litematic message so reviewers can audit what was uploaded.
+          if (opts.deleteSourceMessage) {
+            await message.delete().catch(() => {});
+          }
 
           if (opts.republishWhenPublished) {
             const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
             if (fresh.status === 'PUBLISHED' && fresh.forumThreadId) {
               const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
               if (!pubRes?.ok) {
-                await message.channel.send({ content: `⚠️ Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+                await message.channel.send({ content: `Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
               }
             }
           } else if (opts.alwaysRepublish) {
             const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
             const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
             if (!pubRes?.ok) {
-              await message.channel.send({ content: `⚠️ Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+              await message.channel.send({ content: `Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
             }
           }
         };
 
         // Case A: ticket-channel upload during the original submission flow.
+        // Keep the submitter's .litematic visible (reviewers may want to
+        // audit). Only auto-republish if the schem is already published.
         if (isPublishSchematicTicketChannel(message.channel)) {
           const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
-          if (sub) await handleLitematicDrop(sub, { republishWhenPublished: true });
+          if (sub) await handleLitematicDrop(sub, {
+            deleteSourceMessage: false,
+            republishWhenPublished: true,
+          });
         }
         // Case B: replacement upload inside a forum thread we own. Used by
-        // designers to swap a .litematic on an already-published schem
-        // without opening a new ticket.
+        // designers to swap a .litematic on an already-published schem.
+        // Delete the upload message — the new .litematic gets re-attached
+        // to the starter, so leaving the source around is just noise.
         else if (message.channel.isThread?.() && message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID) {
           const sub = await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
           if (sub && message.member && isAuthorizedToEditSubmission(message.member, sub)) {
-            await handleLitematicDrop(sub, { alwaysRepublish: true });
+            await handleLitematicDrop(sub, {
+              deleteSourceMessage: true,
+              alwaysRepublish: true,
+            });
           }
         }
       }
@@ -4771,6 +4789,7 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
 
     const patch = isDetails
       ? {
+          credits:   (interaction.fields.getTextInputValue('credits')   || '').trim(),
           consumes:  (interaction.fields.getTextInputValue('consumes')  || '').trim(),
           positives: (interaction.fields.getTextInputValue('positives') || '').trim(),
           negatives: (interaction.fields.getTextInputValue('negatives') || '').trim(),
@@ -4796,9 +4815,9 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       } catch (e) {
         // Fallback: reply with a button to open Details if showModal failed.
         await interaction.reply({
-          content: '✅ Saved. Click below to add credits, consumes, positives, or negatives.',
+          content: 'Saved. Click below to add credits, consumes, positives, or negatives.',
           components: [new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`publish_edit_details:${sub.id}`).setLabel('Continue to Details').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`publish_edit_details:${sub.id}`).setLabel('Continue to Details').setStyle(ButtonStyle.Secondary),
           )],
           flags: 64,
         }).catch(() => {});
