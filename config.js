@@ -56,8 +56,25 @@ module.exports = {
     SPAWNER_BUY: '1483269182320672788',
     SPAWNER_SELL: '1483269237387690054',
     GIVEAWAY: '1483278745786646538',
+    FARM_HELP: '1504603498434793553',
+    PUBLISH_SCHEMATIC: '1504603385813405728',
+    SCAM_REPORT: '1504603437399277749',
   },
 
+  // Role that gets access to Farm Help + Publish Schematic tickets
+  ROLE_SCHEMATIC_HELPER: '1504603126580252873',
+
+  // Channel for the spawner prices panel (Buy / Sell dropdowns + price embed)
+  CHANNEL_SPAWNER_PRICES: '1483225252581343336',
+
+  // Market channel — exempt from automod spam filter
+  CHANNEL_MARKET: '1483225252044734808',
+
+  // Channel that receives staff role-change embeds
+  CHANNEL_STAFF_CHANGE_LOG: '1483225252292067484',
+
+  // Local main intentionally clears the invite allow-list (was the partnership
+  // category before). Keep it empty unless re-introducing exceptions.
   INVITE_ALLOWED_CATEGORIES: [],
 
   LEVEL_ROLES: {

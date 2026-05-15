@@ -521,6 +521,130 @@ const TICKET_LOG_CHANNEL_ID = C.CHANNEL_TICKET_LOG;
 const MEMBER_ROLE_ID = '1483225250698105069';
 const SPAWNER_TICKET_ACCESS_ROLE_ID = '1484300107703648337';
 const STAFF_LIST_CHANNEL_ID = '1484518287596322879';
+const SCHEMATIC_HELPER_ROLE_ID = C.ROLE_SCHEMATIC_HELPER || '1504603126580252873';
+const SPAWNER_PRICES_CHANNEL_ID = C.CHANNEL_SPAWNER_PRICES || '1483225252581343336';
+const STAFF_CHANGE_LOG_CHANNEL_ID = C.CHANNEL_STAFF_CHANGE_LOG || '1483225252292067484';
+
+// Spawner type registry — used by the spawner-prices panel, /spawner command,
+// and ticket-creation flow. `key` is the slug used for ticket names and DB
+// lookups (zombified_piglin slugifies to "piglin" per request).
+const SPAWNER_TYPES = [
+  { key: 'skeleton',         label: 'Skeleton',         shortName: 'skeleton', emoji: '<:skeleton:1491774177693143231>' },
+  { key: 'creeper',          label: 'Creeper',          shortName: 'creeper',  emoji: '<:Creeper:1491635122586259477>' },
+  { key: 'zombified_piglin', label: 'Zombified Piglin', shortName: 'piglin',   emoji: '🐷' },
+  { key: 'cow',              label: 'Cow',              shortName: 'cow',      emoji: '🐮' },
+  { key: 'pig',              label: 'Pig',              shortName: 'pig',      emoji: '🐖' },
+  { key: 'spider',           label: 'Spider',           shortName: 'spider',   emoji: '🕷️' },
+  { key: 'zombie',           label: 'Zombie',           shortName: 'zombie',   emoji: '🧟' },
+  { key: 'iron_golem',       label: 'Iron Golem',       shortName: 'iron-golem', emoji: '🤖' },
+  { key: 'blaze',            label: 'Blaze',            shortName: 'blaze',    emoji: '🔥' },
+];
+
+function getSpawnerType(key) {
+  return SPAWNER_TYPES.find(t => t.key === String(key || '').toLowerCase()) || null;
+}
+
+// Minimum quantity per spawner type for purchase tickets. Skeleton has a
+// hard floor of 32; other types allow ≥1 but the embed still advertises 32 min.
+const SPAWNER_MIN_QTY = { skeleton: 32 };
+function spawnerMinQtyFor(typeKey) {
+  return SPAWNER_MIN_QTY[String(typeKey || '').toLowerCase()] || 1;
+}
+
+function fmtSpawnerPrice(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  if (v >= 1_000_000_000) return `${+(v / 1_000_000_000).toFixed(2)}b`;
+  if (v >= 1_000_000)     return `${+(v / 1_000_000).toFixed(2)}m`;
+  if (v >= 1_000)         return `${+(v / 1_000).toFixed(2)}k`;
+  return String(Math.round(v));
+}
+
+function parseSpawnerPrice(str) {
+  if (str == null) return null;
+  const s = String(str).trim().toLowerCase().replace(/,/g, '');
+  // Strict: optional digits with one decimal, optional k/m/b suffix.
+  // Anything malformed (e.g. "1.5.2k", "abc") is rejected.
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*([kmb])?$/);
+  if (!m) return null;
+  let n = parseFloat(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (m[2] === 'k') n *= 1_000;
+  else if (m[2] === 'm') n *= 1_000_000;
+  else if (m[2] === 'b') n *= 1_000_000_000;
+  return Math.round(n);
+}
+
+function hasSpawnerTicketAccess(member) {
+  return !!member?.roles?.cache?.has(SPAWNER_TICKET_ACCESS_ROLE_ID);
+}
+
+function isSpawnerTicketChannel(channel) {
+  const pid = channel?.parentId;
+  return [C.TICKET_CATEGORIES.SPAWNER_BUY, C.TICKET_CATEGORIES.SPAWNER_SELL].includes(pid);
+}
+
+// Build the spawner prices embed from the current price map. Always uses the
+// same color, title, notes, and emoji order so /spawner command edits in place.
+function buildSpawnerPricesEmbed(prices) {
+  const buyLines = [];
+  const sellLines = [];
+  for (const t of SPAWNER_TYPES) {
+    const row = prices?.[t.key] || {};
+    const buy = fmtSpawnerPrice(row.buy);
+    const sell = fmtSpawnerPrice(row.sell);
+    if (buy)  buyLines.push(`${t.emoji} ${t.label} **${buy}** each`);
+    if (sell) sellLines.push(`${t.emoji} ${t.label} **${sell}** each`);
+  }
+  const buyBlock  = buyLines.length  ? `### Buying:\n${buyLines.join('\n')}`   : '### Buying:\n*No active buy prices.*';
+  const sellBlock = sellLines.length ? `### Selling:\n${sellLines.join('\n')}` : '### Selling:\n*No active sell prices.*';
+  const desc = [
+    buyBlock,
+    sellBlock,
+    '',
+    '### Notes',
+    '> Our Prices Are **NOT** Negotiable',
+    '> **64 By 64** At Least',
+    '> 32 Spawner **MINIMUM**',
+    '',
+    'Open a ticket below',
+  ].join('\n');
+  return new EmbedBuilder()
+    .setTitle('Spawner Prices')
+    .setColor(0x08a4a7)
+    .setDescription(desc);
+}
+
+function buildSpawnerPanelComponents() {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('spawner_open:buy').setLabel('Buy Spawners').setStyle(ButtonStyle.Secondary).setEmoji('💀'),
+    new ButtonBuilder().setCustomId('spawner_open:sell').setLabel('Sell Spawners').setStyle(ButtonStyle.Secondary).setEmoji('💰'),
+  );
+  return [row];
+}
+
+// Publish or refresh the spawner-prices panel in the configured channel.
+// Returns { channel, message } when successful, null otherwise.
+async function refreshSpawnerPricesPanel(guild) {
+  if (!guild) return null;
+  const channel = await guild.channels.fetch(SPAWNER_PRICES_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased?.()) return null;
+  const prices = await store.getSpawnerPrices().catch(() => ({}));
+  const embed = buildSpawnerPricesEmbed(prices);
+  const components = buildSpawnerPanelComponents();
+  const ref = await store.getSpawnerPanelRef().catch(() => null);
+  let msg = null;
+  if (ref?.channelId === channel.id && ref?.messageId) {
+    msg = await channel.messages.fetch(ref.messageId).catch(() => null);
+  }
+  if (msg) {
+    await msg.edit({ embeds: [embed], components }).catch(() => {});
+  } else {
+    msg = await channel.send({ embeds: [embed], components }).catch(() => null);
+    if (msg) await store.setSpawnerPanelRef({ channelId: msg.channelId, messageId: msg.id }).catch(() => {});
+  }
+  return msg ? { channel, message: msg } : null;
+}
 
 function canAccessTicketChannel(channel, member) {
   if (!channel || !member) return false;
@@ -593,6 +717,9 @@ async function resolvePanelCategory(guildId, panelId) {
     'spawner_buy':       ['CAT_SPAWNER_BUY', 'TICKET_CATEGORIES_SCHEMATICS'],
     'support':           ['CAT_SUPPORT'],
     'gw_claim':          ['CAT_GW_CLAIM'],
+    'farm_help':         ['CAT_FARM_HELP'],
+    'publish_schematic': ['CAT_PUBLISH_SCHEMATIC'],
+    'scam_report':       ['CAT_SCAM_REPORT'],
   };
   const keys = catKeyMap[panelId] || [];
   for (const k of keys) {
@@ -708,9 +835,15 @@ const CATEGORY_EXTRA_VIEWER_ROLES = {
   [C.TICKET_CATEGORIES.MOD_2]: [..._MOD_AND_ABOVE, C.ROLE_TRIAL_MOD].filter(Boolean),
   // Builder category — all builder roles + Trial Mod and above
   [C.TICKET_CATEGORIES.BUILDING]: [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, ..._MOD_AND_ABOVE].filter(Boolean),
-  // Spawner categories — managers/mods plus dedicated spawner-ticket access role
+  // Spawner categories — managers/mods plus dedicated spawner-ticket access
+  // role (Trial Mod / Support intentionally excluded — money-sensitive tickets)
   [C.TICKET_CATEGORIES.SPAWNER_BUY]: [_ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
   [C.TICKET_CATEGORIES.SPAWNER_SELL]: [_ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
+  // Farm Help + Publish Schematic — staff + schematic-helper role
+  [C.TICKET_CATEGORIES.FARM_HELP]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID].filter(Boolean),
+  [C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID].filter(Boolean),
+  // Scam Report — staff only, same access as Support
+  [C.TICKET_CATEGORIES.SCAM_REPORT]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE].filter(Boolean),
 };
 
 function isBuildingTicketChannel(channel, rec) {
@@ -978,14 +1111,17 @@ function panelButtonEmoji(panelId, keyOrLabel) {
   if (p === 'schematic_purchase' && /purchase/.test(s)) return '💰';
 
   // Global ticket panel emojis
-  if (/support/.test(s)) return '⚠️';
+  if (/^other$/.test(s) || /support/.test(s)) return '❓';
   if (/spawner/.test(s) && /(buy|sell)/.test(s)) return '💀';
   if ((/giveaway|gw/.test(p) || /giveaway|gw/.test(s)) && /claim/.test(s)) return '🎊';
+  if (/farm.*help/.test(s)) return '🌱';
+  if (/publish.*schematic/.test(s)) return '📦';
+  if (/scam/.test(s)) return '🔴';
 
   return null;
 }
 
-async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, answers, extraTopLine, creatorUser, openerUser }) {
+async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, answers, extraTopLine, creatorUser, openerUser, nameOverride }) {
   const guild = interaction.guild;
   const cfg = await store.getTicketConfig();
   const ticketNum = await store.nextTicketId();
@@ -993,12 +1129,14 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
   const opener = openerUser || interaction.user;
   const categoryId = btnCfg.categoryId;
   const username = creator.username;
-  const baseName = `${btnCfg.key || buttonKey}-${username}`
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 90);
+  const baseName = nameOverride
+    ? String(nameOverride).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 90)
+    : `${btnCfg.key || buttonKey}-${username}`
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 90);
   const name = (`${baseName || btnCfg.key || buttonKey || "ticket"}`).slice(0, 92);
   // Building tickets start with 🔴 + name (e.g. 🔴base-username, 🔴mining-username).
   // The emoji updates to 🟡/🟠/🟢 via syncTicketChannelName as status changes.
@@ -1054,6 +1192,18 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
     for (const rid of spawnerDenyRoleIds) {
       const role = guild.roles.cache.get(rid);
       if (role) overwrites.push({ id: role, deny: [PermissionsBitField.Flags.ViewChannel] });
+    }
+    // Farm Help + Publish Schematic — grant the schematic-helper role view+send
+    // access only. Intentionally without ManageMessages — helpers shouldn't be
+    // able to delete other users' messages.
+    if (['farm_help', 'publish_schematic'].includes(String(buttonKey))) {
+      const HELPER_ALLOW = [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AttachFiles,
+      ];
+      overwrites.push({ id: SCHEMATIC_HELPER_ROLE_ID, allow: HELPER_ALLOW });
     }
   }
   for (const rid of viewerRoleIds) {
@@ -2408,19 +2558,77 @@ client.once('clientReady', async () => {
   try {
     const panel = await store.getTicketPanel('ticket_center').catch(() => null);
     if (panel?.components) {
-      let changed = false;
-      for (const row of panel.components) {
-        for (const btn of row) {
-          if (btn?.key === 'giveaway_claim' && Array.isArray(btn.questions)) {
-            btn.questions = [
-              { id: 'ign', label: 'IGN', style: 'Short', required: true, min: 1, max: 40 },
-              { id: 'proof', label: 'Will you send proof?', style: 'Short', required: true, min: 1, max: 100 }
-            ];
-            changed = true;
-          }
-        }
+      const before = JSON.stringify(panel.components);
+
+      // Reset components to the canonical layout. Existing button configs
+      // (categoryId, welcome, etc.) are preserved by reusing prior values.
+      const flatExisting = panel.components.flat();
+      const findExisting = (key) => flatExisting.find(c => c?.type === 'button' && c?.key === key) || null;
+
+      const supportLikeButton = (key, label, emoji, fallbackCategoryId, fallbackWelcome, qLabel = 'Describe your issue') => {
+        const existing = findExisting(key);
+        return {
+          type: 'button',
+          key,
+          label,
+          emoji,
+          styleName: 'Secondary',
+          categoryId: existing?.categoryId || fallbackCategoryId,
+          questions: [
+            { id: 'issue', label: qLabel, style: 'Paragraph', required: true, min: 10, max: 1024 }
+          ],
+          welcome: existing?.welcome || fallbackWelcome,
+        };
+      };
+
+      const otherBtn = supportLikeButton(
+        'support', 'Other', '❓',
+        C.TICKET_CATEGORIES.SUPPORT,
+        'Welcome {userMention}, thank you for reaching out!\nPlease describe your issue and we will get back to you as soon as possible.',
+      );
+      const farmHelpBtn = supportLikeButton(
+        'farm_help', 'Farm Help', '🌱',
+        C.TICKET_CATEGORIES.FARM_HELP,
+        'Welcome {userMention}! Describe what farm/build help you need and a helper will be with you shortly.',
+        'What do you need help with?'
+      );
+      const publishSchematicBtn = supportLikeButton(
+        'publish_schematic', 'Publish Schematic', '📦',
+        C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC,
+        'Welcome {userMention}! Share your schematic details and a reviewer will be with you shortly.',
+        'Describe the schematic you want to publish'
+      );
+      const scamReportBtn = supportLikeButton(
+        'scam_report', 'Scam Report', '🔴',
+        C.TICKET_CATEGORIES.SCAM_REPORT,
+        'Welcome {userMention}! Describe the scam and include any evidence — staff will assist you shortly.',
+        'Describe the scam and include evidence'
+      );
+
+      // Carry forward giveaway_claim + partnerships exactly as they were
+      // (only refresh giveaway_claim questions to canonical shape).
+      const gwExisting = findExisting('giveaway_claim');
+      const giveawayBtn = gwExisting ? {
+        ...gwExisting,
+        type: 'button',
+        questions: [
+          { id: 'ign', label: 'IGN', style: 'Short', required: true, min: 1, max: 40 },
+          { id: 'proof', label: 'Will you send proof?', style: 'Short', required: true, min: 1, max: 100 }
+        ],
+      } : null;
+      const partnershipsBtn = findExisting('partnerships');
+
+      // Final canonical layout: 5-then-up-to-2 across two rows.
+      const row1 = [otherBtn, farmHelpBtn, publishSchematicBtn, scamReportBtn];
+      if (giveawayBtn) row1.push(giveawayBtn);
+      const row2 = [];
+      if (partnershipsBtn) row2.push(partnershipsBtn);
+      panel.components = row2.length ? [row1, row2] : [row1];
+
+      const after = JSON.stringify(panel.components);
+      if (before !== after) {
+        await store.setTicketPanel('ticket_center', panel).catch(() => {});
       }
-      if (changed) await store.setTicketPanel('ticket_center', panel).catch(() => {});
     }
     const staffType = await store.getAppType('staff').catch(() => null);
     if (staffType?.questions) {
@@ -2475,12 +2683,16 @@ client.once('clientReady', async () => {
                 await ch.permissionOverwrites.delete(rid).catch(() => {});
               }
             }
-            // Add any missing allowed roles
+            // Add any missing allowed roles. The schematic-helper role gets
+            // a reduced perm set (no ManageMessages); all other roles keep the
+            // legacy staff allow-list.
             for (const rid of cachedAllowedRoles) {
               if (!rolesWithAccess.includes(rid)) {
-                await ch.permissionOverwrites.create(rid, {
-                  ViewChannel: true, SendMessages: true, ReadMessageHistory: true, ManageMessages: true
-                }).catch(() => {});
+                const isSchematicHelper = rid === SCHEMATIC_HELPER_ROLE_ID;
+                const perms = isSchematicHelper
+                  ? { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true }
+                  : { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, ManageMessages: true };
+                await ch.permissionOverwrites.create(rid, perms).catch(() => {});
               }
             }
             if (catId === C.TICKET_CATEGORIES.SPAWNER_BUY || catId === C.TICKET_CATEGORIES.SPAWNER_SELL) {
@@ -2579,6 +2791,57 @@ client.on('guildMemberAdd', async (member) => {
 
 function isVouchable(member) { return !!member && !member.user?.bot; }
 
+// Tracks for staff-change alerts. Each track is an ordered ladder (low→high);
+// a promotion or demotion within ONE track triggers an embed. The Member role
+// is the entry-level "sentinel" for the builder track — used only to label
+// the "before" side of a fresh promotion, never as a destination by itself.
+const STAFF_TRACK_MEMBER_SENTINEL = '1483225250698105069'; // Member role
+const STAFF_TRACKS = {
+  builder: [
+    STAFF_TRACK_MEMBER_SENTINEL, // Member (sentinel, index 0)
+    '1483584432735785101',       // Tier 1 Builder (BUILDER_1 / Trainee)
+    '1483225250824196266',       // Tier 2 Builder (BUILDER_2)
+    '1483225250824196265',       // Tier 3 Builder (BUILDER_3 / Head)
+  ],
+  staff: [
+    '1483584515942252695', // Support (Trial Mod)
+    '1483584512859439276', // Moderator
+    '1483584518408638574', // Supervisor (Chief Mod)
+    '1483225250861940742', // Manager
+    '1483225250861940743', // Administrator
+    '1483225250861940744', // Co-Owner
+    '1483225250966671463', // Owner
+  ],
+};
+
+function highestRoleInTrack(member, trackIds) {
+  if (!member?.roles?.cache) return null;
+  // walk from highest rank to lowest, return first match
+  for (let i = trackIds.length - 1; i >= 0; i--) {
+    if (member.roles.cache.has(trackIds[i])) return trackIds[i];
+  }
+  return null;
+}
+
+async function postStaffChangeAlert(guild, member, oldRoleId, newRoleId) {
+  try {
+    const channel = await guild.channels.fetch(STAFF_CHANGE_LOG_CHANNEL_ID).catch(() => null);
+    if (!channel?.isTextBased?.()) return;
+    const oldRole = oldRoleId ? guild.roles.cache.get(oldRoleId) : null;
+    const newRole = newRoleId ? guild.roles.cache.get(newRoleId) : null;
+    const oldName = oldRole?.name || (oldRoleId ? `\`${oldRoleId}\`` : '—');
+    const newName = newRole?.name || (newRoleId ? `\`${newRoleId}\`` : '—');
+    const eb = new EmbedBuilder()
+      .setColor(0x08a4a7)
+      .setAuthor({ name: member.user.tag || member.user.username, iconURL: member.displayAvatarURL?.({ extension: 'png', size: 128 }) || undefined })
+      .setDescription(`${member} **${oldName} → ${newName}**`)
+      .setTimestamp();
+    await channel.send({ embeds: [eb] }).catch(() => {});
+  } catch (e) {
+    console.error('[staff-change] post error:', e?.message);
+  }
+}
+
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
   try {
     const was = isVouchable(oldMember);
@@ -2590,6 +2853,26 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
       [...newMember.roles.cache.keys()].some(id => !oldMember.roles.cache.has(id));
     if (was !== now || hadTag || rolesChanged) {
       await syncNickname(newMember);
+    }
+
+    // Staff role-change alert. We classify each track's change first, then
+    // only fire if EXACTLY ONE track changed in any way (added/removed/shifted)
+    // AND that change has both an "old" and "new" role we can name. This
+    // suppresses cross-category swaps like Support → Builder, where two tracks
+    // change at once (Support removed in staff track, Tier 1 added in builder).
+    if (rolesChanged && newMember.guild) {
+      const changes = [];
+      for (const [_name, trackIds] of Object.entries(STAFF_TRACKS)) {
+        const oldHigh = highestRoleInTrack(oldMember, trackIds);
+        const newHigh = highestRoleInTrack(newMember, trackIds);
+        if (oldHigh !== newHigh) changes.push({ oldHigh, newHigh });
+      }
+      if (changes.length === 1) {
+        const { oldHigh, newHigh } = changes[0];
+        if (oldHigh && newHigh) {
+          await postStaffChangeAlert(newMember.guild, newMember, oldHigh, newHigh);
+        }
+      }
     }
   } catch {}
 });
@@ -3302,6 +3585,65 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+// --- SPAWNER PRICES PANEL: Buy/Sell button -> type dropdown (ephemeral) ---
+if (interaction.isButton() && interaction.customId.startsWith('spawner_open:')) {
+  const direction = interaction.customId.split(':')[1];
+  if (!['buy','sell'].includes(direction)) {
+    return interaction.reply({ content: 'Unknown action.', flags: 64 }).catch(() => {});
+  }
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(`spawner_type:${direction}`)
+    .setPlaceholder(`Select a spawner type to ${direction}…`)
+    .addOptions(SPAWNER_TYPES.map(t => ({
+      label: t.label,
+      value: t.key,
+      description: `${direction === 'buy' ? 'Buy' : 'Sell'} ${t.label} spawners`.slice(0, 100),
+    })));
+  await interaction.reply({
+    embeds: [new EmbedBuilder()
+      .setColor(0x08a4a7)
+      .setDescription(`Select the spawner type you want to ${direction}.`)],
+    components: [new ActionRowBuilder().addComponents(select)],
+    flags: 64,
+  }).catch(() => {});
+  return;
+}
+
+// --- SPAWNER PRICES PANEL: type dropdown -> quantity modal ---
+if (interaction.isStringSelectMenu() && interaction.customId.startsWith('spawner_type:')) {
+  const direction = interaction.customId.split(':')[1];
+  const typeKey = interaction.values?.[0];
+  const type = getSpawnerType(typeKey);
+  if (!type || !['buy','sell'].includes(direction)) {
+    return interaction.reply({ content: 'Invalid spawner selection.', flags: 64 }).catch(() => {});
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(`spawner_modal:${direction}:${type.key}`)
+    .setTitle(`${direction === 'buy' ? 'Buy' : 'Sell'} ${type.label}`.slice(0, 45));
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('ign')
+        .setLabel('What is your IGN?')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(1)
+        .setMaxLength(40),
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('qty')
+        .setLabel(`How many (number only, min ${spawnerMinQtyFor(type.key)})?`)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(1)
+        .setMaxLength(10),
+    ),
+  );
+  await interaction.showModal(modal).catch(() => {});
+  return;
+}
+
 // --- TICKETS: panel button -> show modal (FAST) ---
 if (interaction.isButton() && interaction.customId.startsWith('tk_open:')) {
   const parts = interaction.customId.split(':');
@@ -3378,6 +3720,17 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     return;
   }
 
+  // Gate: if /application <type> close was used, refuse here too even if the
+  // button hadn't been re-rendered yet.
+  const isClosed = await store.getAppClosed(typeId).catch(() => false);
+  if (isClosed) {
+    await interaction.reply({
+      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Applications closed').setDescription(`**${typeId}** applications are currently closed.`)],
+      flags: 64,
+    }).catch(() => {});
+    return;
+  }
+
   const eb = new EmbedBuilder()
     .setColor(Colors.Green)
     .setTitle("Application started")
@@ -3395,6 +3748,131 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     console.error('FAST-PATH component error:', err);
     return;
   }
+  // --- SPAWNER PRICES PANEL: quantity modal -> create spawner ticket ---
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('spawner_modal:')) {
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
+    const parts = interaction.customId.split(':');
+    const direction = parts[1];               // 'buy' | 'sell'
+    const typeKey = parts[2];
+    const type = getSpawnerType(typeKey);
+    if (!type || !['buy','sell'].includes(direction)) {
+      return safeIReply(interaction, { content: '❌ Invalid spawner selection.', flags: 64 });
+    }
+    const ign = (interaction.fields.getTextInputValue('ign') || '').trim().slice(0, 40);
+    const qtyRaw = (interaction.fields.getTextInputValue('qty') || '').trim();
+    const qty = parseInt(String(qtyRaw).replace(/[^0-9]/g, ''), 10);
+    const minQty = spawnerMinQtyFor(type.key);
+    if (!ign) return safeIReply(interaction, { content: '❌ Please enter your IGN.', flags: 64 });
+    if (!Number.isFinite(qty) || qty <= 0) {
+      return safeIReply(interaction, { content: '❌ Quantity must be a positive number.', flags: 64 });
+    }
+    if (qty < minQty) {
+      return safeIReply(interaction, { content: `❌ Minimum quantity for **${type.label}** is **${minQty}**.`, flags: 64 });
+    }
+
+    // One open ticket per user per spawner direction (mirrors oneOpenPerButton)
+    const cfg = await store.getTicketConfig();
+    const buttonKey = direction === 'buy' ? 'spawner_buy' : 'spawner_sell';
+    if (cfg?.oneOpenPerButton) {
+      const existing = await store.findOpenTicketByUserButton(interaction.guildId, interaction.user.id, 'spawner_prices', buttonKey).catch(() => null);
+      if (existing) {
+        const existingCh = await interaction.guild.channels.fetch(existing.channelId).catch(() => null);
+        if (existingCh) {
+          return safeIReply(interaction, { content: `You already have an open **${direction === 'buy' ? 'Spawner Buy' : 'Spawner Sell'}** ticket: <#${existing.channelId}>`, flags: 64 });
+        }
+        await store.updateTicketRecord(existing.channelId, { status: 'CLOSED' }).catch(() => {});
+      }
+    }
+
+    const categoryId = direction === 'buy' ? C.TICKET_CATEGORIES.SPAWNER_BUY : C.TICKET_CATEGORIES.SPAWNER_SELL;
+    const btnCfg = {
+      key: buttonKey,
+      label: `${direction === 'buy' ? 'Spawner Buy' : 'Spawner Sell'} — ${type.label}`,
+      categoryId,
+      welcome: `Welcome {userMention}! A staff member will be with you shortly.`,
+      questions: [],
+    };
+
+    // Reserve a per-type ticket number BEFORE we create the channel so we can
+    // pass the final name to `channels.create` and avoid burning a rename slot
+    // (Discord throttles to 2 renames per channel per 10 minutes).
+    let num;
+    try {
+      num = await store.nextSpawnerTicketNumber(type.key);
+    } catch {
+      num = Date.now() % 1000; // best-effort fallback if store write fails
+    }
+    const desiredName = `${type.shortName}-${num}`.slice(0, 90);
+
+    let channel;
+    try {
+      channel = await createTicketChannel({
+        interaction,
+        panelId: 'spawner_prices',
+        buttonKey,
+        btnCfg,
+        // Skip the auto-generated QA embed — IGN + quantity are surfaced
+        // in the price embed that follows, no need to duplicate.
+        answers: {},
+        nameOverride: desiredName,
+      });
+    } catch (e) {
+      console.error('[spawner ticket] create error:', e);
+      return safeIReply(interaction, { content: '❌ Failed to create ticket.', flags: 64 });
+    }
+
+    // Persist spawner-specific metadata on the ticket record so /ticket rename
+    // and future status-syncs respect it.
+    try {
+      await store.updateTicketRecord(channel.id, {
+        channelBaseName: desiredName,
+        manualRename: true,
+        spawnerType: type.key,
+        spawnerDirection: direction,
+        spawnerQty: qty,
+      });
+    } catch (e) {
+      console.error('[spawner ticket] update record error:', e?.message);
+    }
+
+    // Send price embed (or "not buying" notice) inside the ticket
+    try {
+      const prices = await store.getSpawnerPrices().catch(() => ({}));
+      const priceVal = prices?.[type.key]?.[direction];
+      const priceStr = fmtSpawnerPrice(priceVal);
+      let embed;
+      if (priceStr) {
+        const verb = direction === 'buy' ? 'buying' : 'selling';
+        embed = new EmbedBuilder()
+          .setColor(0x08a4a7)
+          .setTitle(`${type.label} — ${direction === 'buy' ? 'Buy' : 'Sell'} Price`)
+          .setDescription(`We are currently **${verb}** ${type.emoji} **${type.label}** spawners at **${priceStr}** each.`)
+          .addFields(
+            { name: 'Quantity Requested', value: `**${qty}**`, inline: true },
+            { name: 'Estimated Total', value: `**${fmtSpawnerPrice(qty * Number(priceVal))}**`, inline: true },
+            { name: 'IGN', value: `\`${ign}\``, inline: true },
+          )
+          .setFooter({ text: 'Prices are not negotiable.' });
+      } else {
+        const verbing = direction === 'buy' ? 'buying' : 'selling';
+        embed = new EmbedBuilder()
+          .setColor(0xFFA500)
+          .setTitle(`${type.label} — No Active ${direction === 'buy' ? 'Buy' : 'Sell'} Price`)
+          .setDescription(`We are not currently **${verbing}** ${type.emoji} **${type.label}** spawners. This ticket will stay open in case a staff member wants to handle it.`)
+          .addFields(
+            { name: 'Quantity', value: `**${qty}**`, inline: true },
+            { name: 'IGN', value: `\`${ign}\``, inline: true },
+          );
+      }
+      await channel.send({ embeds: [embed] }).catch(() => {});
+    } catch (e) {
+      console.error('[spawner ticket] embed error:', e?.message);
+    }
+
+    const visible = !!(channel && channel.permissionsFor?.(interaction.user)?.has?.(PermissionsBitField.Flags.ViewChannel));
+    return safeIReply(interaction, { content: visible ? `✅ Ticket created: <#${channel.id}>` : '✅ Ticket created.', flags: 64 });
+  }
+
   // --- TICKETS: modal submit -> create ticket channel ---
   if (interaction.isModalSubmit() && interaction.customId.startsWith("tk_modal:")) {
     await interaction.deferReply({ flags: 64 });
@@ -3546,7 +4024,8 @@ Only the ticket creator can continue.`);
     if (!rec) return interaction.reply({ content: "Not a ticket channel.", flags: 64 });
     const member = interaction.member;
     const isStaff = isStaffMember(member, cfg);
-    if (!isStaff && interaction.customId !== "tk_close") return interaction.reply({ content: "Staff only.", flags: 64 });
+    const spawnerOpsBtn = hasSpawnerTicketAccess(member) && isSpawnerTicketChannel(channel);
+    if (!isStaff && !spawnerOpsBtn && interaction.customId !== "tk_close") return interaction.reply({ content: "Staff only.", flags: 64 });
 
     if (interaction.customId === "tk_claim") {
       // Source of truth: ticket record.
@@ -4599,9 +5078,13 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
 
       const member = interaction.member;
       const isStaff = isStaffMember(member, cfg);
+      // People with the spawner-access role can /ticket rename/claim/close/requestclose
+      // inside any spawner ticket channel they have access to.
+      const spawnerOps = hasSpawnerTicketAccess(member) && isSpawnerTicketChannel(channel);
+      const canManageTicket = isStaff || spawnerOps;
 
       if (sub === 'rename') {
-        if (!isStaff) return safeIReply(interaction, { content: 'Staff only.' });
+        if (!canManageTicket) return safeIReply(interaction, { content: 'Staff only.' });
         try {
           const newNameRaw = options.getString('name', true);
           const clean = String(newNameRaw)
@@ -4632,7 +5115,7 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
 
       // --- BUILDING CLAIM / UNCLAIM (slash) ---
       if (sub === 'claim' || sub === 'unclaim') {
-        if (!isStaff) return safeIReply(interaction, { content: 'Staff only.' });
+        if (!canManageTicket) return safeIReply(interaction, { content: 'Staff only.' });
 
         const latest = await store.getTicketRecord(channel.id).catch(() => rec);
         const cur = latest || rec;
@@ -4699,7 +5182,8 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
         const actingMember = await interaction.guild.members.fetch(interaction.user.id).catch(() => interaction.member);
         const actingIsStaff = isStaffMember(actingMember, cfg);
         const actingIsBuilder = isBuilderMember(actingMember);
-        if (!actingIsStaff && !actingIsBuilder) return safeIReply(interaction, { content: 'Staff or builder only.', flags: 64 });
+        const actingIsSpawnerOps = hasSpawnerTicketAccess(actingMember) && isSpawnerTicketChannel(channel);
+        if (!actingIsStaff && !actingIsBuilder && !actingIsSpawnerOps) return safeIReply(interaction, { content: 'Staff or builder only.', flags: 64 });
         const closeGate = await canCloseTicket(channel.id);
         if (!closeGate.ok) return safeIReply(interaction, { content: closeGate.reason, flags: 64 });
         const reqId = `${channel.id}:${Date.now()}:${interaction.user.id}`;
@@ -6329,10 +6813,13 @@ ${E_TIME} Created ${created}`)
               if (c.emoji) { try { b.setEmoji(c.emoji); } catch {} }
               ar.addComponents(b);
             } else if (c.type === "app") {
+              const isClosed = await store.getAppClosed(c.appTypeId).catch(() => false);
               const b = new ButtonBuilder()
                 .setCustomId(`app_start:${c.appTypeId}`)
-                .setLabel(c.label)
-                .setStyle(ButtonStyle.Secondary);  // always gray
+                .setLabel(isClosed ? `${c.label} — Closed` : c.label)
+                .setStyle(ButtonStyle.Secondary)  // always gray
+                .setDisabled(!!isClosed);
+              if (c.emoji) { try { b.setEmoji(c.emoji); } catch {} }
               ar.addComponents(b);
             } else if (c.type === "dropdown") {
               const dp = await store.getDropdownPanel(c.dropdownId);
@@ -6352,9 +6839,116 @@ ${E_TIME} Created ${created}`)
           if (ar.components.length) rows.push(ar);
         }
 
-        await interaction.channel.send({ embeds: [embed], components: rows });
+        const sent = await interaction.channel.send({ embeds: [embed], components: rows });
+        // Track the published panel message so /application can edit it later.
+        try {
+          await store.setTicketPanelRef(panel.id, { channelId: sent.channelId, messageId: sent.id });
+        } catch {}
         return interaction.editReply("Panel sent.");
       }
+    }
+
+    // --- SPAWNER PRICES MANAGEMENT ---
+    if (commandName === 'spawner') {
+      await interaction.deferReply({ flags: 64 }).catch(() => {});
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)
+          && !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return safeIReply(interaction, { content: 'Manage Server only.', flags: 64 });
+      }
+      const sub = options.getSubcommand();
+
+      if (sub === 'panel') {
+        const res = await refreshSpawnerPricesPanel(interaction.guild);
+        if (!res) return interaction.editReply(`❌ Could not publish panel in <#${SPAWNER_PRICES_CHANNEL_ID}>.`);
+        return interaction.editReply(`✅ Spawner prices panel refreshed in <#${res.channel.id}>.`);
+      }
+
+      if (sub === 'buy' || sub === 'sell') {
+        const typeKey = options.getString('type', true);
+        const priceRaw = options.getString('price', true);
+        const type = getSpawnerType(typeKey);
+        if (!type) return interaction.editReply('❌ Unknown spawner type.');
+        const price = parseSpawnerPrice(priceRaw);
+        if (!price || price <= 0) return interaction.editReply('❌ Price must be a positive number (e.g. `4.1m`, `530000`).');
+        await store.setSpawnerPrice(type.key, sub, price).catch(() => {});
+        await refreshSpawnerPricesPanel(interaction.guild).catch(() => {});
+        return interaction.editReply(`✅ Set **${type.label}** ${sub.toUpperCase()} price to **${fmtSpawnerPrice(price)}** each.`);
+      }
+
+      if (sub === 'remove') {
+        const action = options.getString('action', true);
+        const typeKey = options.getString('type', true);
+        const type = getSpawnerType(typeKey);
+        if (!type) return interaction.editReply('❌ Unknown spawner type.');
+        if (!['buy','sell'].includes(action)) return interaction.editReply('❌ Action must be Buy or Sell.');
+        await store.clearSpawnerPrice(type.key, action).catch(() => {});
+        await refreshSpawnerPricesPanel(interaction.guild).catch(() => {});
+        return interaction.editReply(`✅ Cleared **${type.label}** ${action.toUpperCase()} price.`);
+      }
+    }
+
+    // --- APPLICATION OPEN/CLOSE ---
+    if (commandName === 'application') {
+      await interaction.deferReply({ flags: 64 }).catch(() => {});
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)
+          && !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return safeIReply(interaction, { content: 'Manage Server only.', flags: 64 });
+      }
+      const typeId = options.getString('type', true);
+      const state  = options.getString('state', true);
+      if (!['builder','staff'].includes(typeId)) return interaction.editReply('❌ Unknown application type.');
+      if (!['open','close'].includes(state))    return interaction.editReply('❌ State must be open or close.');
+      const closed = state === 'close';
+      await store.setAppClosed(typeId, closed).catch(() => {});
+
+      // Re-render the published applications panel, if any.
+      let panelEdited = false;
+      try {
+        const ref = await store.getTicketPanelRef('applications').catch(() => null);
+        if (ref?.channelId && ref?.messageId) {
+          const ch = await interaction.guild.channels.fetch(ref.channelId).catch(() => null);
+          const msg = ch ? await ch.messages.fetch(ref.messageId).catch(() => null) : null;
+          if (msg) {
+            const panel = await store.getTicketPanel('applications').catch(() => null);
+            if (panel) {
+              const embed = new EmbedBuilder()
+                .setTitle(panel.embed?.title || 'Applications')
+                .setDescription(panel.embed?.description || '')
+                .setColor(ticketColor(panel.embed?.colorName || 'Green'));
+              const rows = [];
+              const closedMap = await store.listAppClosed().catch(() => ({}));
+              for (const rowDef of (panel.components || [])) {
+                const ar = new ActionRowBuilder();
+                for (const c of (rowDef || [])) {
+                  if (c.type === 'app') {
+                    const isClosed = !!closedMap[c.appTypeId];
+                    const b = new ButtonBuilder()
+                      .setCustomId(`app_start:${c.appTypeId}`)
+                      .setLabel(isClosed ? `${c.label} — Closed` : c.label)
+                      .setStyle(ButtonStyle.Secondary)
+                      .setDisabled(isClosed);
+                    if (c.emoji) { try { b.setEmoji(c.emoji); } catch {} }
+                    ar.addComponents(b);
+                  } else if (c.type === 'button') {
+                    const b = new ButtonBuilder()
+                      .setCustomId(`tk_open:${panel.id}:${c.key}`)
+                      .setLabel(c.label)
+                      .setStyle(ButtonStyle.Secondary);
+                    if (c.emoji) { try { b.setEmoji(c.emoji); } catch {} }
+                    ar.addComponents(b);
+                  }
+                }
+                if (ar.components.length) rows.push(ar);
+              }
+              await msg.edit({ embeds: [embed], components: rows }).catch(() => {});
+              panelEdited = true;
+            }
+          }
+        }
+      } catch (e) { console.error('[application] re-render error:', e?.message); }
+
+      const note = panelEdited ? '' : '\n⚠️ Applications panel has not been published yet (or its message is gone). Run `/ticketpanel send applications` to publish the updated buttons.';
+      return interaction.editReply(`✅ **${typeId}** application is now **${closed ? 'CLOSED' : 'OPEN'}**.${note}`);
     }
 
 
