@@ -5,14 +5,25 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "deploy": "node deploy-commands.js"
+    "test": "node --test \"test/*.test.js\"",
+    "deploy": "node deploy-commands.js",
+    "setup-render": "node lib/litematicRender/setupAssets.js && npm run bundle-render",
+    "bundle-render": "esbuild lib/litematicRender/bundle-entry.mjs --bundle --format=iife --platform=browser --outfile=lib/litematicRender/assets/deepslate-bundle.js"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.44",
+    "@sparticuz/chromium": "^131.0.1",
     "@vladfrangu/async_event_emitter": "^2.2.4",
-    "discord.js": "^14.17.0",
+    "deepslate": "^0.25.1",
     "discord-api-types": "^0.37.119",
+    "discord.js": "^14.17.0",
     "dotenv": "^16.4.5",
-    "lowdb": "^6.0.1"
+    "gl-matrix": "^3.4.3",
+    "lowdb": "^6.0.1",
+    "prismarine-nbt": "^2.5.0",
+    "puppeteer": "^23.6.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
   }
 }

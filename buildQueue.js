@@ -20,6 +20,7 @@ const {
   TextInputBuilder, TextInputStyle
 } = require('discord.js');
 const C = require('./config');
+const { filterCachedRoleIds } = require('./botLogic');
 
 const STATUS = { QUEUED: 'queued', ACTIVE: 'active', CLOSED: 'closed' };
 
@@ -99,6 +100,18 @@ function shortDetails(str, max = 60) {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s || '—';
 }
 
+function requestDisplayName(req) {
+  const name = String(req?.userDisplayName || req?.username || '').replace(/^@+/, '').trim();
+  return name ? `@${name}` : '@unknown';
+}
+
+async function hydrateRequestDisplayName(guild, req) {
+  if (!guild || !req?.userId || req.userDisplayName) return req;
+  const member = await guild.members.fetch(req.userId).catch(() => null);
+  const user = member?.user || await guild.client.users.fetch(req.userId).catch(() => null);
+  return { ...req, userDisplayName: member?.displayName || user?.username || null };
+}
+
 function ticketRow(reqId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`bq_close:${reqId}`).setLabel('Close').setEmoji('🔒').setStyle(ButtonStyle.Secondary),
@@ -110,7 +123,7 @@ function queueBoardEmbed(requests) {
   const rows = requests
     .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
     .slice(0, 25)
-    .map((req, idx) => `**${idx + 1}.** <@${req.userId}> • \`${req.ign}\` • ${shortDetails(req.details, 70)}\n<t:${Math.floor((req.createdAt || Date.now()) / 1000)}:R>`);
+    .map((req, idx) => `**${idx + 1}.** ${requestDisplayName(req)} • \`${req.ign}\` • ${shortDetails(req.details, 70)}\n<t:${Math.floor((req.createdAt || Date.now()) / 1000)}:R>`);
 
   return new EmbedBuilder()
     .setColor(BQ_UI.color)
@@ -173,7 +186,9 @@ async function _doRefreshQueueBoard(guild, store) {
   const msg = await getQueueBoardMessage(guild, store, queueCh);
   if (!msg) return;
   const all = await store.listBuildRequests(guild.id).catch(() => []);
-  const queued = all.filter(r => r.status === STATUS.QUEUED);
+  const queued = await Promise.all(all
+    .filter(r => r.status === STATUS.QUEUED)
+    .map(r => hydrateRequestDisplayName(guild, r)));
   await msg.edit({ embeds: [queueBoardEmbed(queued)], components: queueBoardComponents(queued) }).catch(() => {});
 }
 
@@ -331,6 +346,7 @@ async function handleModalSubmit(interaction, buildType, store) {
   const req = {
     id: reqId, buildType,
     userId: interaction.user.id, guildId: interaction.guildId,
+    userDisplayName: interaction.member?.displayName || interaction.user.username,
     ign, details,
     status: STATUS.QUEUED,
     claimerId: null, ticketChannelId: null, queueMessageId: null,
@@ -396,7 +412,7 @@ async function handleClaim(interaction, reqId, store) {
   const categoryId = C.TICKET_CATEGORIES.BUILDING;
   if (!categoryId) return interaction.followUp({ content: '❌ Building category is missing in config.', flags: 64 });
 
-  const staffRoleIds = [C.ROLE_MANAGER, C.ROLE_ADMIN, C.ROLE_CO_OWNER, C.ROLE_OWNER].filter(Boolean);
+  const staffRoleIds = filterCachedRoleIds([C.ROLE_MANAGER, C.ROLE_ADMIN, C.ROLE_CO_OWNER, C.ROLE_OWNER], guild.roles);
 
   // Channel name: 🟡builder-username
   const builderSlug = interaction.user.username.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 20);
@@ -421,7 +437,7 @@ async function handleClaim(interaction, reqId, store) {
     ...(botMember ? [{ id: botMember.id, allow: botAllow }] : []),
     { id: interaction.user.id, allow: ALLOW },
     { id: req.userId, allow: ALLOW },
-    ...staffRoleIds.map(rid => ({ id: rid, allow: STAFF_ALLOW })),
+    ...staffRoleIds.map(rid => guild.roles.cache.get(rid)).filter(Boolean).map(role => ({ id: role, allow: STAFF_ALLOW })),
   ];
 
   let ticketCh;

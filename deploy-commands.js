@@ -56,6 +56,18 @@ const commands = [
     .setName('serverinfo')
     .setDescription('Server information'),
 
+  // --- LITEMATIC RENDER ---
+  new SlashCommandBuilder()
+    .setName('render')
+    .setDescription('Render a .litematic schematic as an isometric image')
+    .addAttachmentOption(o => o.setName('file').setDescription('Litematic file to render').setRequired(true))
+    .addIntegerOption(o => o.setName('size').setDescription('Output image size in px (256-2048, default 1024)').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('preview')
+    .setDescription('Preview a .litematic schematic with size and volume')
+    .addAttachmentOption(o => o.setName('litematic').setDescription('Litematic file to preview').setRequired(true)),
+
   // --- AFK ---
   new SlashCommandBuilder()
     .setName('afk')
@@ -117,11 +129,6 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 
 
-  new SlashCommandBuilder()
-    .setName('sync')
-    .setDescription('Resync nickname prefixes and vouch counts')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageNicknames),
-
   // --- VOUCH ---
   new SlashCommandBuilder()
     .setName('vouch')
@@ -153,18 +160,7 @@ const commands = [
     .addSubcommand(s => s.setName('delete').setDescription('Delete a giveaway')
       .addStringOption(o => o.setName('message_id').setDescription('Message ID').setRequired(true)))
     .addSubcommand(s => s.setName('reroll').setDescription('Reroll a winner')
-      .addStringOption(o => o.setName('message_id').setDescription('Message ID (Optional, defaults to last ended)').setRequired(false)))
-    .addSubcommand(s => s.setName('auto').setDescription('Create a recurring auto-giveaway')
-      .addChannelOption(o => o.setName('channel').setDescription('Channel to post in').setRequired(true))
-      .addStringOption(o => o.setName('prize').setDescription('Prize text (e.g. $20,000,000)').setRequired(true))
-      .addStringOption(o => o.setName('interval').setDescription('How often to run (e.g. 24h, 7d)').setRequired(true))
-      .addStringOption(o => o.setName('duration').setDescription('How long each giveaway lasts (e.g. 12h)').setRequired(true))
-      .addUserOption(o => o.setName('host').setDescription('Host user (defaults to you)').setRequired(false))
-      .addIntegerOption(o => o.setName('winners').setDescription('Winner count (default 1)').setRequired(false))
-      .addStringOption(o => o.setName('claim_label').setDescription('Ping message text (e.g. "Daily: 12h Claimtime")').setRequired(false)))
-    .addSubcommand(s => s.setName('autodelete').setDescription('Delete a recurring auto-giveaway')
-      .addStringOption(o => o.setName('id').setDescription('Auto-giveaway ID (from /giveaway autolist)').setRequired(true)))
-    .addSubcommand(s => s.setName('autolist').setDescription('List all active recurring auto-giveaways')),
+      .addStringOption(o => o.setName('message_id').setDescription('Message ID (Optional, defaults to last ended)').setRequired(false))),
 
 
 
@@ -208,6 +204,19 @@ const commands = [
     .setName('stats')
     .setDescription('Show staff and builder stats for a member')
     .addUserOption(o => o.setName('staff').setDescription('Member to view').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('stafflist')
+    .setDescription('Manage staff list IGNs and alts')
+    .addSubcommand(s => s.setName('edit').setDescription('Edit a saved staff-list IGN and alt list')
+      .addUserOption(o => o.setName('person').setDescription('Member to edit').setRequired(true))
+      .addStringOption(o => o.setName('type').setDescription('Which staff list to edit').setRequired(true).addChoices(
+        { name: 'Support Staff', value: 'support' },
+        { name: 'Builder', value: 'builder' },
+      ))
+      .addStringOption(o => o.setName('ign').setDescription('Main IGN').setRequired(false))
+      .addStringOption(o => o.setName('alts').setDescription('Comma-separated alts, or 0/none to clear').setRequired(false)))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   // --- EMBED SEARCH ---
   new SlashCommandBuilder()

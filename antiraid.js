@@ -1,5 +1,7 @@
 'use strict';
 const { AuditLogEvent, ChannelType, EmbedBuilder, PermissionsBitField, Events } = require('discord.js');
+const C = require('./config');
+const { isAntiNukeExemptMember } = require('./botLogic');
 
 const state = {
   joins: new Map(),
@@ -75,6 +77,8 @@ async function inspectAudit(guild, type, limit, entryType, userIdPath = 'executo
     const executorId = entry?.executorId || entry?.executor?.id;
     if (!executorId) return;
     if (executorId === '1467522345861251258' || executorId === guild.client.user?.id) return;
+    const member = await guild.members.fetch(executorId).catch(() => null);
+    if (isAntiNukeExemptMember(member, C)) return;
     const count = bumpCounter(type, executorId);
     if (count >= limit) await punishMember(guild, executorId, `${type} threshold exceeded`);
   } catch {}

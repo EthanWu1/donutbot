@@ -37,6 +37,36 @@ const store = require('./store');
 const { getUserBalance } = require('./donutsApi');
 const { parseNumber, parseDuration, getLevelFromXp, getXpForLevel, sanitizeDisplayName } = require('./utils');
 const { generateRankCard } = require('./rankCard');
+const { handlePreviewCommand } = require('./lib/litematicPreview');
+const {
+  APPLICATION_COOLDOWN_MS,
+  buildBuilderLeaderboardLine,
+  buildApplicationReviewEmbedData,
+  filterCachedRoleIds,
+  findApplicationCooldown,
+  formatBuildHistoryLine,
+  formatApplicationReason,
+  formatPayoutRate,
+  getAcceptedInfoKindForRoleIds,
+  getAcceptedStaffListPruneResult,
+  getApplicationAcceptanceRoleIds,
+  getApplicationRoleKind,
+  getBuilderPayoutRateForRoleIds,
+  getEmbedEditModalValues,
+  getTicketViewerRoleIds,
+  isSpawnerButton,
+  normalizeStaffListAltsInput,
+  sanitizeStaffApplicationQuestions,
+  splitIgnList,
+} = require('./botLogic');
+
+// Lazy-loaded inside the litematic handlers so missing render deps
+// (puppeteer, etc.) do not crash bot boot for unrelated features.
+let _litematicRender = null;
+function getLitematicRender() {
+  if (!_litematicRender) _litematicRender = require('./lib/litematicRender/renderer');
+  return _litematicRender;
+}
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -460,7 +490,22 @@ function isStaffMember(member, cfg) {
 
 function isBuilderMember(member) {
   if (!member) return false;
-  return member.roles?.cache?.some?.(r => [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3].filter(Boolean).includes(r.id)) || false;
+  return member.roles?.cache?.some?.(r => [
+    C.ROLE_BUILDER_1,
+    C.ROLE_BUILDER_2,
+    C.ROLE_BUILDER_3,
+    C.ROLE_BUILDER_TIER_1,
+    C.ROLE_BUILDER_TIER_2,
+    C.ROLE_BUILDER_TIER_3,
+  ].filter(Boolean).includes(r.id)) || false;
+}
+
+function canManageStaffList(member) {
+  if (!member) return false;
+  if (member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) return true;
+  if (member.permissions?.has?.(PermissionsBitField.Flags.ManageGuild)) return true;
+  const allowed = [C.ROLE_OWNER, C.ROLE_CO_OWNER, C.ROLE_ADMIN, C.ROLE_MANAGER].filter(Boolean);
+  return member.roles?.cache?.some?.(r => allowed.includes(r.id)) || false;
 }
 
 async function simpleTicketLog(guild, cfg, text) {
@@ -475,6 +520,7 @@ async function simpleTicketLog(guild, cfg, text) {
 const TICKET_LOG_CHANNEL_ID = C.CHANNEL_TICKET_LOG;
 const MEMBER_ROLE_ID = '1483225250698105069';
 const SPAWNER_TICKET_ACCESS_ROLE_ID = '1484300107703648337';
+const STAFF_LIST_CHANNEL_ID = '1484518287596322879';
 
 function canAccessTicketChannel(channel, member) {
   if (!channel || !member) return false;
@@ -547,7 +593,6 @@ async function resolvePanelCategory(guildId, panelId) {
     'spawner_buy':       ['CAT_SPAWNER_BUY', 'TICKET_CATEGORIES_SCHEMATICS'],
     'support':           ['CAT_SUPPORT'],
     'gw_claim':          ['CAT_GW_CLAIM'],
-    'partnership':       ['CAT_PARTNERSHIP'],
   };
   const keys = catKeyMap[panelId] || [];
   for (const k of keys) {
@@ -663,11 +708,9 @@ const CATEGORY_EXTRA_VIEWER_ROLES = {
   [C.TICKET_CATEGORIES.MOD_2]: [..._MOD_AND_ABOVE, C.ROLE_TRIAL_MOD].filter(Boolean),
   // Builder category — all builder roles + Trial Mod and above
   [C.TICKET_CATEGORIES.BUILDING]: [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, ..._MOD_AND_ABOVE].filter(Boolean),
-  // PM category — PM role only
-  [C.TICKET_CATEGORIES.PM]: [C.ROLE_PM].filter(Boolean),
-  // Spawner categories — normal staff plus dedicated spawner-ticket access role
-  [C.TICKET_CATEGORIES.SPAWNER_BUY]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
-  [C.TICKET_CATEGORIES.SPAWNER_SELL]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
+  // Spawner categories — managers/mods plus dedicated spawner-ticket access role
+  [C.TICKET_CATEGORIES.SPAWNER_BUY]: [_ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
+  [C.TICKET_CATEGORIES.SPAWNER_SELL]: [_ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
 };
 
 function isBuildingTicketChannel(channel, rec) {
@@ -938,7 +981,6 @@ function panelButtonEmoji(panelId, keyOrLabel) {
   if (/support/.test(s)) return '⚠️';
   if (/spawner/.test(s) && /(buy|sell)/.test(s)) return '💀';
   if ((/giveaway|gw/.test(p) || /giveaway|gw/.test(s)) && /claim/.test(s)) return '🎊';
-  if (/partner/.test(s) || /partnership/.test(s)) return '🤝';
 
   return null;
 }
@@ -970,24 +1012,21 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
   const finalName = isBuilding ? `${TICKET_EMOJIS.unclaimed}${name}`.slice(0, 100) : name;
 
   // ── Permission rules ─────────────────────────────────────────────────────
-  // Building tickets: only builder roles (chief/trained/trainee) can see them
-  // All other tickets: staff + partner manager can see them (builders cannot)
-  const staffId   = await store.getConfigValue(guild.id, 'ROLE_STAFF').catch(() => null);
-  const pmId      = await store.getConfigValue(guild.id, 'ROLE_PARTNER_MANAGER').catch(() => null);
-  const chiefB    = await store.getConfigValue(guild.id, 'ROLE_CHIEF_BUILDER').catch(() => null);
-  const trainedB  = await store.getConfigValue(guild.id, 'ROLE_TRAINED_BUILDER').catch(() => null);
-  const traineeB  = await store.getConfigValue(guild.id, 'ROLE_TRAINEE_BUILDER').catch(() => null);
+  // Building tickets: builder roles only. Spawner tickets: spawner allowlist only.
+  const staffId   = await store.getConfigValue(guild.id, 'ROLE_STAFF').catch(() => null) || C.ROLE_STAFF;
+  const chiefB    = await store.getConfigValue(guild.id, 'ROLE_CHIEF_BUILDER').catch(() => null) || C.ROLE_BUILDER_1;
+  const trainedB  = await store.getConfigValue(guild.id, 'ROLE_TRAINED_BUILDER').catch(() => null) || C.ROLE_BUILDER_2;
+  const traineeB  = await store.getConfigValue(guild.id, 'ROLE_TRAINEE_BUILDER').catch(() => null) || C.ROLE_BUILDER_3;
 
-  const staffRoleIds   = [staffId, pmId].filter(id => id && id.length > 5);
-  const builderRoleIds = [chiefB, trainedB, traineeB].filter(id => id && id.length > 5);
+  let staffRoleIds   = filterCachedRoleIds([staffId, C.ROLE_ADMIN, C.ROLE_MANAGER, C.ROLE_CHIEF_MOD, C.ROLE_MOD, C.ROLE_TRIAL_MOD], guild.roles);
+  let builderRoleIds = filterCachedRoleIds([chiefB, trainedB, traineeB], guild.roles);
 
   // Fall back to legacy config if DB not yet set
   if (!staffRoleIds.length) {
     const dbLegacy = await store.getConfigValue(guild.id, 'ROLES_STAFF_IDS').catch(() => null);
     const legacyIds = (dbLegacy || '').split(',').map(s => s.trim()).filter(s => s.length > 5);
-    staffRoleIds.push(...legacyIds);
     const cfgStaff = (cfg.staffRoleIds || []).filter(id => id && id.length > 5);
-    staffRoleIds.push(...cfgStaff);
+    staffRoleIds = filterCachedRoleIds([...staffRoleIds, ...legacyIds, ...cfgStaff], guild.roles);
   }
 
   const STAFF_ALLOW   = [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageMessages];
@@ -1001,20 +1040,25 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
     { id: creator.id, allow: MEMBER_ALLOW },
   ];
 
-  if (isBuilding) {
-    // Building: only builders see it (not regular staff)
-    for (const rid of [...new Set(builderRoleIds)]) {
-      overwrites.push({ id: rid, allow: STAFF_ALLOW });
+  const viewerRoleIds = filterCachedRoleIds(getTicketViewerRoleIds({
+    buttonKey,
+    isBuilding,
+    staffRoleIds,
+    builderRoleIds,
+    spawnerRoleId: SPAWNER_TICKET_ACCESS_ROLE_ID,
+    config: C,
+  }), guild.roles);
+  if (isSpawnerButton(buttonKey)) {
+    const spawnerDenyRoleIds = filterCachedRoleIds([staffId, C.ROLE_STAFF, ...(cfg?.staffRoleIds || [])], guild.roles)
+      .filter(rid => !viewerRoleIds.includes(rid));
+    for (const rid of spawnerDenyRoleIds) {
+      const role = guild.roles.cache.get(rid);
+      if (role) overwrites.push({ id: role, deny: [PermissionsBitField.Flags.ViewChannel] });
     }
-  } else {
-    // All other categories: staff + partner manager see it (builders do NOT)
-    for (const rid of [...new Set(staffRoleIds)]) {
-      overwrites.push({ id: rid, allow: STAFF_ALLOW });
-    }
-    // Spawner buy/sell tickets also need the dedicated ticket-access role.
-    if (['spawner_buy', 'spawner_sell'].includes(String(buttonKey))) {
-      overwrites.push({ id: SPAWNER_TICKET_ACCESS_ROLE_ID, allow: STAFF_ALLOW });
-    }
+  }
+  for (const rid of viewerRoleIds) {
+    const role = guild.roles.cache.get(rid);
+    if (role) overwrites.push({ id: role, allow: STAFF_ALLOW });
   }
 
   const channel = await guild.channels.create({
@@ -1041,17 +1085,9 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
   if (extraTopLine) fields.push({ name: "Selection", value: extraTopLine.slice(0,1024) });
   if (fields.length) eb.addFields(fields.slice(0, 25));
 
-  // Ping routing: building tickets → @ all builders, all others → @ staff
+  // Ping routing follows the viewer allowlist.
   let staffPing = null;
-  if (isBuilding) {
-    // Ping all builder roles
-    const pingBuilders = [...new Set(builderRoleIds)];
-    staffPing = pingBuilders.map(r => `<@&${r}>`).join(' ') || null;
-  } else {
-    // Ping staff role(s) only
-    const pingStaff = [...new Set(staffRoleIds)];
-    staffPing = pingStaff.map(r => `<@&${r}>`).join(' ') || null;
-  }
+  staffPing = viewerRoleIds.map(r => `<@&${r}>`).join(' ') || null;
 
   // Two-panel opener: Info, then Q&A (no numbering)
   const infoEmbed = eb;
@@ -1191,7 +1227,7 @@ async function closeTicket({ guild, channel, closerId, reason }) {
       openedAt: closedRec2?.createdAt,
       claimedById: closedRec2?.claimedById,
       reason,
-      channelName: closedRec2?.label || channel.name,
+      channelName: channel.name,
     });
 
     if (closedRec2?.creatorId) {
@@ -1208,7 +1244,8 @@ async function closeTicket({ guild, channel, closerId, reason }) {
       const files = [];
       if (transcript) {
         const buf = Buffer.from(transcript, 'utf8');
-        files.push(new AttachmentBuilder(buf, { name: `transcript-${closedRec2?.ticketNum || channel.id}.txt` }));
+        const namePart = slugify(channel.name || closedRec2?.label || 'ticket') || 'ticket';
+        files.push(new AttachmentBuilder(buf, { name: `transcript-${closedRec2?.ticketNum || channel.id}-${namePart}.txt` }));
       }
       await logCh.send({ embeds: [closedEmbed], files }).catch(() => {});
     }
@@ -1233,6 +1270,303 @@ async function closeTicket({ guild, channel, closerId, reason }) {
 async function cleanupTranscriptsOnBoot() {}
 
 const appSessions = new Map(); // userId -> session
+const acceptedStaffInfoSessions = new Map(); // userId -> accepted staff/builder IGN collection
+
+async function getApplicationCooldown(userId, typeId) {
+  if (!getApplicationRoleKind(typeId)) return { blocked: false, until: 0, remainingMs: 0, last: null };
+  const tsys = await store.getTicketSystem().catch(() => null);
+  const submissions = tsys?.applications?.submissions || {};
+  return findApplicationCooldown({ submissions, userId, typeId, now: Date.now(), cooldownMs: APPLICATION_COOLDOWN_MS });
+}
+
+function applicationCooldownEmbed(typeTitle, cooldown) {
+  return new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('Application cooldown')
+    .setDescription(`You can submit one **${typeTitle || 'application'}** every 3 days.\n\nTry again ${tsR(cooldown.until)}.`);
+}
+
+function acceptedInfoEmbed(title, description) {
+  return new EmbedBuilder()
+    .setColor(0x08a4a7)
+    .setTitle(title)
+    .setDescription(description)
+    .setFooter({ text: 'Failure to comply will result in instant demotion.' });
+}
+
+function acceptedInfoSession({ userId, kind, sessionId = generateId(), appId = null, acceptedById = null, acceptedAt = Date.now() }) {
+  return {
+    sessionId,
+    kind,
+    userId,
+    appId,
+    acceptedById,
+    acceptedAt,
+    step: 'ign',
+    ign: null,
+    altCount: 0,
+    alts: [],
+  };
+}
+
+function getOrCreateAcceptedInfoSession(userId, kind, sessionId) {
+  const existing = acceptedStaffInfoSessions.get(userId);
+  if (existing?.sessionId === sessionId && existing?.kind === kind) return existing;
+  const sess = acceptedInfoSession({ userId, kind, sessionId });
+  acceptedStaffInfoSessions.set(userId, sess);
+  return sess;
+}
+
+function acceptedMainIgnRow(kind, sessionId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`accepted_info_main_open:${kind}:${sessionId}`)
+      .setLabel('Enter IGN')
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+function acceptedMainIgnModal(kind, sessionId) {
+  return new ModalBuilder()
+    .setCustomId(`accepted_info_main:${kind}:${sessionId}`)
+    .setTitle('Staff Info')
+    .addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('main_ign')
+        .setLabel('Main IGN')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(1)
+        .setMaxLength(16)
+    ));
+}
+
+function acceptedAltIgnsModal(kind, sessionId, count) {
+  const modal = new ModalBuilder()
+    .setCustomId(`accepted_info_alts:${kind}:${sessionId}:${count}`)
+    .setTitle('Alt IGNs');
+  for (let i = 1; i <= count; i += 1) {
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId(`alt_${i}`)
+        .setLabel(`Alt IGN ${i}`)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(1)
+        .setMaxLength(16)
+    ));
+  }
+  return modal;
+}
+
+function altCountRow(kind, sessionId) {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`accepted_info_alt:${kind}:${sessionId}`)
+    .setPlaceholder('Alt accounts')
+    .addOptions([0, 1, 2, 3, 4, 5].map(n => ({ label: String(n), value: String(n) })));
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+function staffListTitle(kind) {
+  return kind === 'builder' ? 'Builders' : 'Support Staff';
+}
+
+function buildAcceptedStaffListEmbed(kind, list) {
+  const title = staffListTitle(kind);
+  const rows = Object.values(list || {})
+    .filter(Boolean)
+    .sort((a, b) => Number(a.acceptedAt || a.updatedAt || 0) - Number(b.acceptedAt || b.updatedAt || 0));
+  const description = rows.length
+    ? rows.map((r, i) => {
+      const alts = Array.isArray(r.alts) && r.alts.length ? `\n> Alts: ${r.alts.map(a => `\`${a}\``).join(', ')}` : '';
+      return `**${i + 1}.** <@${r.userId}>\n> IGN: \`${r.ign || 'Pending'}\`${alts}`;
+    }).join('\n\n')
+    : 'No entries yet.';
+  return new EmbedBuilder()
+    .setColor(kind === 'builder' ? 0xFFB300 : 0x00A8FF)
+    .setTitle(title)
+    .setDescription(description.slice(0, 4096))
+    .setTimestamp();
+}
+
+async function getAcceptedInfoRoleSets(guild) {
+  const supportRoleIds = filterCachedRoleIds([
+    await store.getConfigValue(guild.id, 'ROLE_STAFF').catch(() => null),
+    await store.getConfigValue(guild.id, 'ROLE_SUPPORT').catch(() => null),
+    C.ROLE_STAFF,
+    C.ROLE_SUPPORT,
+  ], guild.roles);
+  const builderRoleIds = filterCachedRoleIds([
+    await store.getConfigValue(guild.id, 'ROLE_BUILDER_TIER_1').catch(() => null),
+    await store.getConfigValue(guild.id, 'ROLE_BUILDER_TIER_2').catch(() => null),
+    await store.getConfigValue(guild.id, 'ROLE_BUILDER_TIER_3').catch(() => null),
+    await store.getConfigValue(guild.id, 'ROLE_TRAINEE_BUILDER').catch(() => null),
+    await store.getConfigValue(guild.id, 'ROLE_TRAINED_BUILDER').catch(() => null),
+    await store.getConfigValue(guild.id, 'ROLE_CHIEF_BUILDER').catch(() => null),
+    C.ROLE_BUILDER_TIER_1,
+    C.ROLE_BUILDER_TIER_2,
+    C.ROLE_BUILDER_TIER_3,
+    C.ROLE_BUILDER_1,
+    C.ROLE_BUILDER_2,
+    C.ROLE_BUILDER_3,
+  ], guild.roles);
+  return { supportRoleIds, builderRoleIds };
+}
+
+async function getActiveAcceptedUserIds(guild, kind, roleSets) {
+  await guild.members.fetch().catch(() => null);
+  const roleIds = kind === 'builder' ? roleSets.builderRoleIds : roleSets.supportRoleIds;
+  const active = new Set();
+  for (const member of guild.members.cache.values()) {
+    if (member.user?.bot) continue;
+    if (member.roles?.cache?.some?.(r => roleIds.includes(r.id))) active.add(member.id);
+  }
+  return active;
+}
+
+async function refreshAcceptedStaffList(kind) {
+  const ch = await client.channels.fetch(STAFF_LIST_CHANNEL_ID).catch(() => null);
+  if (!ch?.isTextBased?.()) return;
+  const data = await store.getAcceptedStaffList().catch(() => null);
+  if (!data) return;
+  const key = kind === 'builder' ? 'builders' : 'support';
+  const messageKey = kind === 'builder' ? 'buildersMessageId' : 'supportMessageId';
+  let list = data[key] || {};
+  if (ch.guild) {
+    const roleSets = await getAcceptedInfoRoleSets(ch.guild).catch(() => null);
+    if (roleSets) {
+      const activeUserIds = await getActiveAcceptedUserIds(ch.guild, kind, roleSets).catch(() => null);
+      if (activeUserIds) {
+        const pruned = getAcceptedStaffListPruneResult(list, activeUserIds);
+        list = pruned.active;
+        for (const userId of pruned.removed) {
+          await store.deleteAcceptedStaffListEntry(kind, userId).catch(() => {});
+        }
+      }
+    }
+  }
+  const embed = buildAcceptedStaffListEmbed(kind, list);
+  let msg = data[messageKey] ? await ch.messages.fetch(data[messageKey]).catch(() => null) : null;
+  if (msg) {
+    await msg.edit({ embeds: [embed] }).catch(() => {});
+    return;
+  }
+  msg = await ch.send({ embeds: [embed] }).catch(() => null);
+  if (msg) await store.setAcceptedStaffListMessageId(kind, msg.id).catch(() => {});
+}
+
+async function saveAcceptedStaffInfo(userId) {
+  const sess = acceptedStaffInfoSessions.get(userId);
+  if (!sess?.ign) return;
+  await store.setAcceptedStaffListEntry(sess.kind, userId, {
+    userId,
+    ign: sess.ign,
+    alts: Array.isArray(sess.alts) ? sess.alts : [],
+    appId: sess.appId,
+    acceptedById: sess.acceptedById,
+    acceptedAt: sess.acceptedAt,
+    infoRequestedAt: sess.infoRequestedAt || Date.now(),
+  }).catch(() => {});
+  await refreshAcceptedStaffList(sess.kind).catch(() => {});
+}
+
+async function startAcceptedStaffInfoFlow({ user, submission, acceptedById, dm }) {
+  const kind = getApplicationRoleKind(submission?.typeId);
+  if (!kind || !user) return;
+  const channel = dm || await user.createDM().catch(() => null);
+  if (!channel) return;
+  const sess = acceptedInfoSession({
+    userId: user.id,
+    kind,
+    appId: submission.id,
+    acceptedById,
+    acceptedAt: Date.now(),
+  });
+  acceptedStaffInfoSessions.set(user.id, sess);
+  await channel.send({
+    embeds: [acceptedInfoEmbed(`${staffListTitle(kind)} Info`, 'Click below to enter your main Minecraft IGN.')],
+    components: [acceptedMainIgnRow(kind, sess.sessionId)]
+  }).catch(() => {});
+}
+
+async function requestAcceptedInfoForMember(member, kind) {
+  if (!member || member.user?.bot || !kind) return false;
+  const list = await store.getAcceptedStaffList().catch(() => null);
+  const key = kind === 'builder' ? 'builders' : 'support';
+  const existing = list?.[key]?.[member.id] || null;
+  if (existing?.ign || existing?.infoRequestedAt) return false;
+
+  const sess = acceptedInfoSession({
+    userId: member.id,
+    kind,
+    appId: null,
+    acceptedById: client.user?.id || null,
+    acceptedAt: Date.now(),
+  });
+  sess.infoRequestedAt = Date.now();
+  acceptedStaffInfoSessions.set(member.id, sess);
+  const dm = await member.user.createDM().catch(() => null);
+  if (!dm) return false;
+  const sent = await dm.send({
+    embeds: [acceptedInfoEmbed(`${staffListTitle(kind)} Info`, 'Click below to enter your main Minecraft IGN.')],
+    components: [acceptedMainIgnRow(kind, sess.sessionId)]
+  }).catch(() => null);
+  if (!sent) return false;
+
+  await store.setAcceptedStaffListEntry(kind, member.id, {
+    userId: member.id,
+    ign: null,
+    alts: [],
+    appId: null,
+    acceptedById: client.user?.id || null,
+    acceptedAt: sess.acceptedAt,
+    infoRequestedAt: sess.infoRequestedAt,
+  }).catch(() => {});
+  return true;
+}
+
+async function sendAcceptedInfoBackfillForGuild(guild) {
+  const roleSets = await getAcceptedInfoRoleSets(guild).catch(() => null);
+  if (!roleSets) return;
+  await guild.members.fetch().catch(() => null);
+  let changed = false;
+  for (const member of guild.members.cache.values()) {
+    if (member.user?.bot) continue;
+    const kind = getAcceptedInfoKindForRoleIds([...member.roles.cache.keys()], roleSets);
+    if (!kind) continue;
+    changed = (await requestAcceptedInfoForMember(member, kind).catch(() => false)) || changed;
+  }
+  if (changed) {
+    await refreshAcceptedStaffList('support').catch(() => {});
+    await refreshAcceptedStaffList('builder').catch(() => {});
+  }
+}
+
+async function grantApplicationAcceptanceRoles({ guild, userId, typeId, reason }) {
+  const kind = getApplicationRoleKind(typeId);
+  if (!guild || !userId || !kind) return [];
+
+  const roleConfig = {
+    ...C,
+    ROLE_STAFF: await store.getConfigValue(guild.id, 'ROLE_STAFF').catch(() => null) || C.ROLE_STAFF,
+    ROLE_SUPPORT: await store.getConfigValue(guild.id, 'ROLE_SUPPORT').catch(() => null) || C.ROLE_SUPPORT || C.ROLE_TRIAL_MOD,
+    ROLE_BUILDER_TIER_1: await store.getConfigValue(guild.id, 'ROLE_BUILDER_TIER_1').catch(() => null)
+      || await store.getConfigValue(guild.id, 'ROLE_TRAINEE_BUILDER').catch(() => null)
+      || C.ROLE_BUILDER_TIER_1
+      || C.ROLE_BUILDER_3,
+  };
+  const roleIds = getApplicationAcceptanceRoleIds(kind, roleConfig);
+  if (!roleIds.length) return [];
+
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return [];
+
+  const missing = roleIds.filter(roleId => roleId && !member.roles.cache.has(roleId));
+  if (!missing.length) return [];
+
+  await member.roles.add(missing, reason || 'Application accepted');
+  return missing;
+}
 
 async function sendApplicationDmConfirm({ guild, user, type }) {
   const dm = await user.createDM().catch(() => null);
@@ -1266,6 +1600,8 @@ async function startApplicationDmFlow(interaction, typeId) {
   const cfg = await store.getTicketConfig();
   const type = await store.getAppType(typeId);
   if (!type) return;
+  const cooldown = await getApplicationCooldown(user.id, typeId);
+  if (cooldown.blocked) return false;
 
   // Persist id on type for confirm buttons
   type.id = typeId;
@@ -1283,6 +1619,7 @@ async function startApplicationDmFlow(interaction, typeId) {
     awaiting: false,
     expiresAt: Date.now() + 3 * 60 * 60 * 1000
   });
+  return true;
 }
 
 async function sendNextAppQuestion(userId) {
@@ -1311,13 +1648,19 @@ async function sendNextAppQuestion(userId) {
     const reviewCh = reviewId ? await client.channels.fetch(reviewId).catch(() => null) : null;
     const appId = `${sess.typeId}-${userId}-${Date.now()}`;
 
+    const reviewData = buildApplicationReviewEmbedData({
+      typeTitle: type.title,
+      typeId: sess.typeId,
+      userMention: String(user),
+      userId: user.id,
+      answers: sess.answers,
+    });
     const eb = new EmbedBuilder()
-      .setColor(Colors.Yellow)
-      .setTitle(`${type.title || sess.typeId} — Pending`)
-      .setDescription(`Applicant: ${user} (\`${user.id}\`)`);
-
-    const fields = Object.entries(sess.answers).map(([k, v]) => ({ name: k.slice(0, 256), value: String(v).slice(0, 1024) }));
-    if (fields.length) eb.addFields(fields.slice(0, 25));
+      .setColor(reviewData.color)
+      .setTitle(reviewData.title)
+      .setDescription(reviewData.description)
+      .setTimestamp();
+    if (reviewData.fields.length) eb.addFields(reviewData.fields);
 
     let m = null;
     if (reviewCh && reviewCh.isTextBased()) {
@@ -1437,10 +1780,6 @@ const CO_OWNER_ROLE_ID       = C.ROLE_CO_OWNER;
 const STAFF_PAY_AMOUNT       = C.STAFF_PAY_AMOUNT;
 const STAFF_PAY_RECEIVER_IGN = C.STAFF_PAY_RECEIVER_IGN;
 
-// ── Auto Giveaway System ──────────────────────────────────────────────────────
-// Channel/host IDs are now stored per auto-giveaway in data.json via /giveaway auto
-const GW_PING_ROLE_ID = C.ROLE_GW_PING; // default ping role (can be overridden per auto-gw)
-
 const cfg = { token: String(process.env.BOT_TOKEN || process.env.TOKEN || '').trim() };
 
 const client = new Client({
@@ -1464,6 +1803,13 @@ function ts(ms) { return `<t:${Math.floor(ms / 1000)}:f>`; }
 function tsR(ms) { return `<t:${Math.floor(ms / 1000)}:R>`; }
 function money(n) { const v = Number(n); return !Number.isFinite(v) ? '$0' : `$${v.toLocaleString('en-US')}`; }
 function seconds(ms) { return Math.max(0, Math.floor(ms / 1000)); }
+async function resolveGuildDisplayName(guild, userId) {
+  if (!guild || !userId) return 'unknown';
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (member?.displayName) return member.displayName;
+  const user = await guild.client.users.fetch(userId).catch(() => null);
+  return user?.username || 'unknown';
+}
 
 async function ensureDir(p) {
   await fsp.mkdir(p, { recursive: true }).catch(() => {});
@@ -1504,7 +1850,7 @@ function extractBaseNameFromDisplay(displayName) {
   let name = String(displayName || '').trim();
   if (!name) return '';
 
-  const LEGACY_PREFIX_RE = /^(?:(?:\[AFK\]|AFK)\s*(?:\|\s*)?)?(?:(?:tier\s*\d+\s+)?(?:support|builder|staff|pm|partner\s*manager|manager|admin|co[- ]?owner|owner))\s*\|\s*/i;
+  const LEGACY_PREFIX_RE = /^(?:(?:\[AFK\]|AFK)\s*(?:\|\s*)?)?(?:(?:tier\s*\d+\s+)?(?:support|builder|staff|manager|admin|co[- ]?owner|owner))\s*\|\s*/i;
 
   // Strip generated pieces repeatedly so names like
   // "[AFK] Staff | Tier 1 Support | Builder | Name [3]" collapse back to "Name".
@@ -1605,24 +1951,36 @@ async function syncNickname(member) {
   return true;
 }
 
-// Returns the tax rate (fraction kept by builder) based on their role
-// Head Builder (1477849591310454867) = 0% tax (100% payout)
-// Trained Builder (1472623228231876842) = 5% tax (95% payout)
-// Trainee Builder (1472623563893768316) = 10% tax (90% payout)
+// Returns the payout rate (fraction kept by builder) based on their builder tier.
 async function getBuilderTaxRate(guild, builderDiscordId) {
   try {
     const member = await guild.members.fetch(builderDiscordId).catch(() => null);
     if (!member) return 0.90;
-    if (member.roles.cache.has('1483584432735785101')) return 0.95; // 5% tax
-    if (member.roles.cache.has('1483225250824196266')) return 0.925; // 7.5% tax
-    return 0.90; // 10% tax
+    const roleConfig = {
+      ...C,
+      ROLE_BUILDER_TIER_1: await store.getConfigValue(guild.id, 'ROLE_BUILDER_TIER_1').catch(() => null)
+        || await store.getConfigValue(guild.id, 'ROLE_TRAINEE_BUILDER').catch(() => null)
+        || C.ROLE_BUILDER_TIER_1
+        || C.ROLE_BUILDER_3,
+      ROLE_BUILDER_TIER_2: await store.getConfigValue(guild.id, 'ROLE_BUILDER_TIER_2').catch(() => null)
+        || await store.getConfigValue(guild.id, 'ROLE_TRAINED_BUILDER').catch(() => null)
+        || C.ROLE_BUILDER_TIER_2
+        || C.ROLE_BUILDER_2,
+      ROLE_BUILDER_TIER_3: await store.getConfigValue(guild.id, 'ROLE_BUILDER_TIER_3').catch(() => null)
+        || await store.getConfigValue(guild.id, 'ROLE_CHIEF_BUILDER').catch(() => null)
+        || C.ROLE_BUILDER_TIER_3
+        || C.ROLE_BUILDER_1,
+    };
+    const roleIds = [...member.roles.cache.keys()];
+    return getBuilderPayoutRateForRoleIds(roleIds, roleConfig);
   } catch { return 0.90; }
 }
 
 // Build a consistent tracking embed for any build job status
 function buildTrackingEmbed(job, status, opts = {}) {
-  const payoutPct = job.taxRate ? `${Math.round(job.taxRate * 100)}%` : '90%';
-  const builderPayout = job.taxRate ? Math.floor(job.price * job.taxRate) : Math.floor(job.price * 0.90);
+  const payoutRate = Number.isFinite(Number(job.taxRate)) ? Number(job.taxRate) : 0.90;
+  const payoutPct = formatPayoutRate(payoutRate);
+  const builderPayout = Math.floor(job.price * payoutRate);
   let color, title;
   switch (status) {
     case 'PENDING': color = 0xFFC300; title = 'Build In Progress'; break;
@@ -1778,15 +2136,11 @@ function renderStaffStatsEmbed(rows, page, totalPages) {
   const fmtMs = (ms) => { if (ms == null) return '—'; const sec = Math.max(0, Math.round(ms / 1000)); const m = Math.floor(sec / 60); const s = sec % 60; return `${m}m ${String(s).padStart(2,'0')}s`; };
   const desc = pageRows.length ? pageRows.map((r, i) => {
     const n = page * 10 + i + 1;
-    let badge = '';
-    if (n === 1) badge = ' 🥇';
-    else if (n === 2) badge = ' 🥈';
-    else if (n === 3) badge = ' 🥉';
-    return `**${n}.** <@${r.staffId}>${badge}\n> 🔒 **Closed:** \`${r.closed}\` | ✍️ **Renamed:** \`${r.renamed}\`\n> 💬 **Messages:** \`${r.messages}\` | ⏱️ **Avg Response:** \`${fmtMs(r.avgMs)}\``;
+    return `**${n}.** <@${r.staffId}>\n> **Closed:** \`${r.closed}\` | **Renamed:** \`${r.renamed}\`\n> **Messages:** \`${r.messages}\` | **Avg Response:** \`${fmtMs(r.avgMs)}\``;
   }).join('\n\n') : 'No stats yet.';
   return new EmbedBuilder()
     .setColor(0x00A8FF)
-    .setTitle('🛡️ Staff Performance Leaderboard')
+    .setTitle('Staff Performance Leaderboard')
     .setDescription(desc)
     .setFooter({ text: `Page ${page + 1}/${totalPages} • Staff Stats` })
     .setTimestamp();
@@ -1796,16 +2150,11 @@ function renderBuilderStatsEmbed(rows, page, totalPages) {
   const pageRows = chunkItems(rows, 10)[page] || [];
   const desc = pageRows.length ? pageRows.map((r, i) => {
     const n = page * 10 + i + 1;
-    let badge = '';
-    if (n === 1) badge = ' 👑';
-    else if (n === 2) badge = ' 🥈';
-    else if (n === 3) badge = ' 🥉';
-    const ignPart = r.builderIgn ? ` \`[${r.builderIgn}]\`` : '';
-    return `**${n}.** <@${r.discordId}>${badge}${ignPart}\n> 🛠️ **Finished:** \`${r.finished}\` | 💎 **Earned:** \`${money(r.earned)}\`\n> ⏳ **Pending:** \`${r.pending}\``;
+    return buildBuilderLeaderboardLine(r, n, money);
   }).join('\n\n') : 'No builder stats yet.';
   return new EmbedBuilder()
     .setColor(0xFFB300)
-    .setTitle('🏗️ Builder Leaderboard')
+    .setTitle('Builder Leaderboard')
     .setDescription(desc)
     .setFooter({ text: `Page ${page + 1}/${totalPages} • Top Builders` })
     .setTimestamp();
@@ -2075,12 +2424,8 @@ client.once('clientReady', async () => {
     }
     const staffType = await store.getAppType('staff').catch(() => null);
     if (staffType?.questions) {
-      for (const q of staffType.questions) q.min = 0;
-      if (staffType.questions[1]) {
-        staffType.questions[1].label = 'Do you want to be support staff or partner manager?';
-        staffType.questions[1].style = 'Short';
-        staffType.questions[1].required = true;
-      }
+      staffType.questions = sanitizeStaffApplicationQuestions(staffType.questions);
+      staffType.title = staffType.title || 'Support Staff Application';
       await store.setAppType('staff', staffType).catch(() => {});
     }
   } catch (e) { console.error('startup panel migration error:', e?.message); }
@@ -2095,6 +2440,12 @@ client.once('clientReady', async () => {
     }
   } catch (e) { console.error('build queue board restore error:', e); }
 
+  try {
+    for (const guild of client.guilds.cache.values()) {
+      await sendAcceptedInfoBackfillForGuild(guild).catch(() => {});
+    }
+  } catch (e) { console.error('accepted staff info backfill error:', e?.message || e); }
+
   await processExpiredTimedRoles().catch(() => {});
   setInterval(() => processExpiredTimedRoles().catch(() => {}), 60 * 1000);
 
@@ -2103,6 +2454,7 @@ client.once('clientReady', async () => {
     const cfg = await store.getTicketConfig().catch(() => null);
     for (const guild of client.guilds.cache.values()) {
       for (const [catId, allowedRoles] of Object.entries(CATEGORY_EXTRA_VIEWER_ROLES)) {
+        const cachedAllowedRoles = filterCachedRoleIds(allowedRoles, guild.roles);
         const channels = guild.channels.cache.filter(c => c.type === ChannelType.GuildText && c.parentId === catId);
         for (const ch of channels.values()) {
           try {
@@ -2113,21 +2465,29 @@ client.once('clientReady', async () => {
               .filter(ow => ow.type === 1) // 1 = role overwrite
               .map(ow => ow.id);
             // Remove roles that should NOT have access in this category
-            const globalStaffIds = cfg?.staffRoleIds || [];
+            const configuredStaffId = await store.getConfigValue(guild.id, 'ROLE_STAFF').catch(() => null);
+            const globalStaffIds = filterCachedRoleIds([...(cfg?.staffRoleIds || []), configuredStaffId, C.ROLE_STAFF], guild.roles);
             for (const rid of rolesWithAccess) {
               if (rid === guild.roles.everyone.id) continue; // keep @everyone deny
-              const isAllowed = allowedRoles.includes(rid);
+              const isAllowed = cachedAllowedRoles.includes(rid);
               // If a global staff role is in here but not in allowedRoles, remove it
               if (!isAllowed && globalStaffIds.includes(rid)) {
                 await ch.permissionOverwrites.delete(rid).catch(() => {});
               }
             }
             // Add any missing allowed roles
-            for (const rid of allowedRoles) {
+            for (const rid of cachedAllowedRoles) {
               if (!rolesWithAccess.includes(rid)) {
                 await ch.permissionOverwrites.create(rid, {
                   ViewChannel: true, SendMessages: true, ReadMessageHistory: true, ManageMessages: true
                 }).catch(() => {});
+              }
+            }
+            if (catId === C.TICKET_CATEGORIES.SPAWNER_BUY || catId === C.TICKET_CATEGORIES.SPAWNER_SELL) {
+              for (const rid of globalStaffIds) {
+                if (!cachedAllowedRoles.includes(rid)) {
+                  await ch.permissionOverwrites.edit(rid, { ViewChannel: false }).catch(() => {});
+                }
               }
             }
           } catch {}
@@ -2387,6 +2747,44 @@ async function updateVouchboard(guild) {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return; 
 
+  // --- ACCEPTED STAFF/BUILDER INFO FLOW ---
+  if (!message.guild && acceptedStaffInfoSessions.has(message.author.id)) {
+    const sess = acceptedStaffInfoSessions.get(message.author.id);
+    const val = String(message.content || '').trim();
+
+    if (sess.step === 'ign') {
+      const ign = sanitizeDisplayName(val, { maxLen: 16 });
+      if (!ign) {
+        await message.channel.send({ embeds: [acceptedInfoEmbed('IGN Required', 'Please reply with your main Minecraft IGN.')] }).catch(() => {});
+        return;
+      }
+      sess.ign = ign;
+      sess.step = 'alt_count';
+      acceptedStaffInfoSessions.set(message.author.id, sess);
+      await message.channel.send({
+        embeds: [acceptedInfoEmbed('Alt Accounts', 'Select how many alt accounts you have.')],
+        components: [altCountRow(sess.kind, sess.sessionId)]
+      }).catch(() => {});
+      return;
+    }
+
+    if (sess.step === 'alt_igns') {
+      const alts = splitIgnList(val, sess.altCount).map(x => sanitizeDisplayName(x, { maxLen: 16 })).filter(Boolean);
+      if (alts.length < sess.altCount) {
+        await message.channel.send({
+          embeds: [acceptedInfoEmbed('Alt IGNs Required', `Please send all ${sess.altCount} alt IGN${sess.altCount === 1 ? '' : 's'}, separated by commas or new lines.`)]
+        }).catch(() => {});
+        return;
+      }
+      sess.alts = alts;
+      acceptedStaffInfoSessions.set(message.author.id, sess);
+      await saveAcceptedStaffInfo(message.author.id);
+      acceptedStaffInfoSessions.delete(message.author.id);
+      await message.channel.send({ embeds: [new EmbedBuilder().setColor(Colors.Green).setTitle('Info saved').setDescription('Your staff list info has been saved.')] }).catch(() => {});
+      return;
+    }
+  }
+
   // --- APPLICATIONS: DM answer flow ---
   if (!message.guild && appSessions.has(message.author.id)) {
     const sess = appSessions.get(message.author.id);
@@ -2532,20 +2930,28 @@ client.on('messageCreate', async (message) => {
     }
   } catch {}
 
-  // --- TICKETS: track staff response/message stats ---
+  // --- TICKETS/GENERAL: track staff message stats ---
   try {
-    if (message.guildId && message.channel?.type === ChannelType.GuildText) {
-      const rec = await store.getTicketRecord(message.channelId).catch(() => null);
-      if (rec && rec.status === 'OPEN') {
-        const cfg = await store.getTicketConfig().catch(() => null);
-        const isStaff = cfg ? isStaffMember(message.member, cfg) : false;
-        if (isStaff) {
+    if (message.guildId && !message.author?.bot) {
+      const cfg = await store.getTicketConfig().catch(() => null);
+      if (cfg) {
+        const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+        if (isStaffMember(member, cfg)) {
           await store.recordTicketMessage(message.guildId, message.author.id).catch(() => {});
-          if (!rec.firstStaffMessageAt) {
-            await store.updateTicketRecord(message.channelId, {
-              firstStaffMessageAt: Date.now(),
-              firstResponderId: message.author.id
-            }).catch(() => {});
+        }
+      }
+
+      if (message.channel?.type === ChannelType.GuildText) {
+        const rec = await store.getTicketRecord(message.channelId).catch(() => null);
+        if (rec && rec.status === 'OPEN') {
+          const isStaff = cfg ? isStaffMember(message.member, cfg) : false;
+          if (isStaff) {
+            if (!rec.firstStaffMessageAt) {
+              await store.updateTicketRecord(message.channelId, {
+                firstStaffMessageAt: Date.now(),
+                firstResponderId: message.author.id
+              }).catch(() => {});
+            }
           }
         }
       }
@@ -2656,6 +3062,7 @@ client.on('interactionCreate', async (interaction) => {
       const messageId = interaction.values?.[0];
       const snap = messageId ? session.entries.get(messageId) : null;
       if (!snap) return;
+      const editValues = getEmbedEditModalValues(snap);
 
       const modal = new ModalBuilder()
         .setCustomId(`edit_embed_modal:${interaction.channelId}:${messageId}`)
@@ -2668,7 +3075,7 @@ client.on('interactionCreate', async (interaction) => {
             .setLabel('Message Content (Optional)')
             .setStyle(TextInputStyle.Paragraph)
             .setRequired(false)
-            .setValue(snap.content || '')
+            .setValue(editValues.content)
         ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
@@ -2676,7 +3083,7 @@ client.on('interactionCreate', async (interaction) => {
             .setLabel('Embed Title (Optional)')
             .setStyle(TextInputStyle.Short)
             .setRequired(false)
-            .setValue(snap.title || '')
+            .setValue(editValues.title)
         ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
@@ -2684,7 +3091,7 @@ client.on('interactionCreate', async (interaction) => {
             .setLabel('Embed Description (Optional)')
             .setStyle(TextInputStyle.Paragraph)
             .setRequired(false)
-            .setValue(snap.description || '')
+            .setValue(editValues.description)
         ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
@@ -2692,7 +3099,7 @@ client.on('interactionCreate', async (interaction) => {
             .setLabel('Embed Color (Hex)')
             .setStyle(TextInputStyle.Short)
             .setRequired(false)
-            .setValue(snap.color || '#2b2d31')
+            .setValue(editValues.color)
         )
       );
 
@@ -2751,6 +3158,93 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.showModal(modal);
       stickyEditSessions.delete(sessionId);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('accepted_info_main_open:')) {
+      const [, kind, sessionId] = interaction.customId.split(':');
+      getOrCreateAcceptedInfoSession(interaction.user.id, kind, sessionId);
+      await interaction.showModal(acceptedMainIgnModal(kind, sessionId)).catch(() => {});
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('accepted_info_main:')) {
+      const [, kind, sessionId] = interaction.customId.split(':');
+      const sess = getOrCreateAcceptedInfoSession(interaction.user.id, kind, sessionId);
+      const ign = sanitizeDisplayName(interaction.fields.getTextInputValue('main_ign'), { maxLen: 16 });
+      if (!ign) {
+        await interaction.reply({ embeds: [acceptedInfoEmbed('IGN Required', 'Please submit your main Minecraft IGN again.')] }).catch(() => {});
+        return;
+      }
+      sess.ign = ign;
+      sess.step = 'alt_count';
+      acceptedStaffInfoSessions.set(interaction.user.id, sess);
+      await interaction.reply({
+        embeds: [acceptedInfoEmbed('Alt Accounts', 'Select how many alt accounts you have.')],
+        components: [altCountRow(kind, sessionId)]
+      }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('accepted_info_alts:')) {
+      const [, kind, sessionId, countRaw] = interaction.customId.split(':');
+      const count = Math.max(1, Math.min(5, Number(countRaw || 1) || 1));
+      const sess = acceptedStaffInfoSessions.get(interaction.user.id);
+      if (!sess || sess.sessionId !== sessionId || sess.kind !== kind || !sess.ign) {
+        await interaction.reply({
+          embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Session expired').setDescription('Please contact management to restart staff info collection.')]
+        }).catch(() => {});
+        return;
+      }
+      const alts = [];
+      for (let i = 1; i <= count; i += 1) {
+        const alt = sanitizeDisplayName(interaction.fields.getTextInputValue(`alt_${i}`), { maxLen: 16 });
+        if (alt) alts.push(alt);
+      }
+      if (alts.length < count) {
+        await interaction.reply({ embeds: [acceptedInfoEmbed('Alt IGNs Required', `Please submit all ${count} alt IGN${count === 1 ? '' : 's'}.`)] }).catch(() => {});
+        return;
+      }
+      sess.altCount = count;
+      sess.alts = alts;
+      sess.step = 'done';
+      acceptedStaffInfoSessions.set(interaction.user.id, sess);
+      await saveAcceptedStaffInfo(interaction.user.id);
+      acceptedStaffInfoSessions.delete(interaction.user.id);
+      await interaction.reply({ embeds: [new EmbedBuilder().setColor(Colors.Green).setTitle('Info saved').setDescription('Your staff list info has been saved.')] }).catch(() => {});
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('accepted_info_alt:')) {
+      const parts = interaction.customId.split(':');
+      const kind = parts.length >= 3 ? parts[1] : acceptedStaffInfoSessions.get(interaction.user.id)?.kind;
+      const sessionId = parts.length >= 3 ? parts[2] : parts[1];
+      const sess = acceptedStaffInfoSessions.get(interaction.user.id);
+      if (!sess || sess.sessionId !== sessionId || sess.kind !== kind) {
+        await interaction.update({
+          embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Session expired').setDescription('Please contact management to restart staff info collection.')],
+          components: []
+        }).catch(() => {});
+        return;
+      }
+
+      const count = Math.max(0, Math.min(5, Number(interaction.values?.[0] || 0) || 0));
+      sess.altCount = count;
+      sess.step = count > 0 ? 'alt_igns' : 'done';
+      acceptedStaffInfoSessions.set(interaction.user.id, sess);
+
+      if (count === 0) {
+        sess.alts = [];
+        await saveAcceptedStaffInfo(interaction.user.id);
+        acceptedStaffInfoSessions.delete(interaction.user.id);
+        await interaction.update({
+          embeds: [new EmbedBuilder().setColor(Colors.Green).setTitle('Info saved').setDescription('Your staff list info has been saved.')],
+          components: []
+        }).catch(() => {});
+        return;
+      }
+
+      await interaction.showModal(acceptedAltIgnsModal(kind, sessionId, count)).catch(() => {});
       return;
     }
 
@@ -2877,6 +3371,12 @@ if (interaction.isButton() && interaction.customId.startsWith('tk_ddbuy:')) {
 // --- APPLICATIONS: start -> DM flow (FAST ack) ---
 if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
   const typeId = interaction.customId.split(':')[1];
+  const type = await store.getAppType(typeId).catch(() => null);
+  const cooldown = await getApplicationCooldown(interaction.user.id, typeId);
+  if (cooldown.blocked) {
+    await interaction.reply({ embeds: [applicationCooldownEmbed(type?.title || typeId, cooldown)], flags: 64 }).catch(() => {});
+    return;
+  }
 
   const eb = new EmbedBuilder()
     .setColor(Colors.Green)
@@ -3181,6 +3681,16 @@ Only the ticket creator can continue.`);
     }
 
     if (action === "start") {
+      const type = await store.getAppType(typeId).catch(() => null);
+      const cooldown = await getApplicationCooldown(interaction.user.id, typeId);
+      if (cooldown.blocked) {
+        await interaction.update({
+          components: [],
+          embeds: [applicationCooldownEmbed(type?.title || typeId, cooldown)]
+        }).catch(() => {});
+        appSessions.delete(interaction.user.id);
+        return;
+      }
       // ensure session exists
       if (!sess || sess.typeId !== typeId) {
         const cfgNow = await store.getTicketConfig().catch(() => ({}));
@@ -3223,10 +3733,20 @@ Only the ticket creator can continue.`);
       const status = action === "accept" ? "ACCEPTED" : "DENIED";
       await store.updateAppSubmission(appId, { status, decidedById: interaction.user.id, decidedAt: Date.now() });
       const color = status === "ACCEPTED" ? Colors.Green : Colors.Red;
-      const title = status === "ACCEPTED" ? "✅ Accepted" : "❌ Denied";
+      const title = status === "ACCEPTED" ? "Accepted" : "Denied";
       const baseEmbed = interaction.message.embeds?.[0] ? EmbedBuilder.from(interaction.message.embeds[0]) : new EmbedBuilder();
-      const eb = baseEmbed.setColor(color).setTitle(`${interaction.message.embeds[0]?.title?.split("—")[0]?.trim() || "Application"} — ${title}`);
+      const baseTitle = (interaction.message.embeds[0]?.title || "Application").replace(/\s+[—-]\s+(Accepted|Denied)$/i, '').trim();
+      const eb = baseEmbed.setColor(color).setTitle(`${baseTitle} - ${title}`);
+      if (typeof eb.clearFooter === 'function') eb.clearFooter();
       await interaction.message.edit({ embeds: [eb], components: [] }).catch(()=>{});
+      if (status === "ACCEPTED") {
+        await grantApplicationAcceptanceRoles({
+          guild: interaction.guild,
+          userId: sub.userId,
+          typeId: sub.typeId,
+          reason: `Application accepted by ${interaction.user.tag}`,
+        }).catch(e => console.error('Application role grant error:', e?.message || e));
+      }
       const user = await interaction.client.users.fetch(sub.userId).catch(()=>null);
       if (user) {
         const dm = await user.createDM().catch(()=>null);
@@ -3241,6 +3761,7 @@ Only the ticket creator can continue.`);
               `Your application for **${typeName}** has been ${accepted ? "accepted" : "denied"} by ${interaction.user}.`
             );
           await dm.send({ embeds: [dmEmbed] }).catch(()=>{});
+          if (accepted) await startAcceptedStaffInfoFlow({ user, submission: sub, acceptedById: interaction.user.id, dm }).catch(() => {});
         }
       }
       return;
@@ -3299,11 +3820,21 @@ ${sourceLink}`;
       const msg = ch ? await ch.messages.fetch(sub.reviewMessageId).catch(()=>null) : null;
       if (msg) {
         const color = status === "ACCEPTED" ? Colors.Green : Colors.Red;
-        const title = status === "ACCEPTED" ? "✅ Accepted" : "❌ Denied";
-        const eb = EmbedBuilder.from(msg.embeds[0]).setColor(color).setTitle(`${msg.embeds[0]?.title?.split("—")[0]?.trim() || "Application"} — ${title}`).addFields({ name: "Reason", value: reason.slice(0,1024) });
+        const title = status === "ACCEPTED" ? "Accepted" : "Denied";
+        const baseTitle = (msg.embeds[0]?.title || "Application").replace(/\s+[—-]\s+(Accepted|Denied)$/i, '').trim();
+        const eb = EmbedBuilder.from(msg.embeds[0]).setColor(color).setTitle(`${baseTitle} - ${title}`).addFields({ name: "Reason", value: formatApplicationReason(reason) });
+        if (typeof eb.clearFooter === 'function') eb.clearFooter();
         await msg.edit({ embeds: [eb], components: [] }).catch(()=>{});
       }
     } catch {}
+    if (status === "ACCEPTED") {
+      await grantApplicationAcceptanceRoles({
+        guild: interaction.guild,
+        userId: sub.userId,
+        typeId: sub.typeId,
+        reason: `Application accepted by ${interaction.user.tag}`,
+      }).catch(e => console.error('Application role grant error:', e?.message || e));
+    }
     const user = await interaction.client.users.fetch(sub.userId).catch(()=>null);
     if (user) {
       const dm = await user.createDM().catch(()=>null);
@@ -3317,8 +3848,9 @@ ${sourceLink}`;
           .setDescription(
             `Your application for **${typeName}** has been ${accepted ? "accepted" : "denied"} by ${interaction.user}.`
           )
-          .addFields({ name: "Message from reviewer:", value: reason ? `\`\`\`${reason.slice(0, 900)}\`\`\`` : "\u200b" });
+          .addFields({ name: "Reason", value: formatApplicationReason(reason) });
         await dm.send({ embeds: [dmEmbed] }).catch(()=>{});
+        if (accepted) await startAcceptedStaffInfoFlow({ user, submission: sub, acceptedById: interaction.user.id, dm }).catch(() => {});
       }
     }
     return interaction.editReply("Decision sent.");
@@ -3406,7 +3938,12 @@ ${sourceLink}`;
         const msg = ch ? await ch.messages.fetch(sticky.lastMessageId).catch(() => null) : null;
         if (msg) {
           const embeds = [];
-          if (embedData) embeds.push(new EmbedBuilder().setTitle(embedData.title).setDescription(embedData.description).setColor(embedData.color));
+          if (embedData && (embedData.title || embedData.description)) {
+            const eb = new EmbedBuilder().setColor(embedData.color);
+            if (embedData.title) eb.setTitle(embedData.title);
+            if (embedData.description) eb.setDescription(embedData.description);
+            embeds.push(eb);
+          }
           await msg.edit({ content: content || null, embeds });
         }
       }
@@ -4631,16 +5168,15 @@ Only the ticket creator can continue.`);
       if (sub === 'lb') {
         await interaction.deferReply().catch(() => {});
         const countsById = await store.getBuilderFinishedCountsById(interaction.guildId).catch(() => ({}));
-        const jobs = await store.listBuildJobs(interaction.guildId).catch(() => []);
         const records = await store.listBuildRecords(interaction.guildId).catch(() => []);
-        const totals = Object.entries(countsById).map(([discordId, finished]) => {
-          const mine = jobs.filter(j => String(j.builderDiscordId || '') === String(discordId));
+        const totals = (await Promise.all(Object.entries(countsById).map(async ([discordId, finished]) => {
+          const member = await interaction.guild.members.fetch(discordId).catch(() => null);
+          if (!member || !isBuilderMember(member)) return null;
           const mineRecords = records.filter(r => String(r.builderDiscordId || '') === String(discordId));
           const earned = mineRecords.reduce((a, r) => a + Number(r.price ?? r.amount ?? 0), 0);
-          const pending = mine.filter(j => ['PENDING','WAITING_PAYMENT','AWAITING_CONFIRM','AWAITING_PAYOUT'].includes(String(j.status || '').toUpperCase())).length;
-          const builderIgn = mineRecords[0]?.builderIgn || mine.find(j => j.builderIgn)?.builderIgn || null;
-          return { discordId, finished: Number(finished || 0), earned, pending, builderIgn };
-        }).sort((a, b) => (b.finished - a.finished) || (b.earned - a.earned));
+          const displayName = member.displayName || member.user?.username || await resolveGuildDisplayName(interaction.guild, discordId);
+          return { discordId, displayName, finished: Number(finished || 0), earned };
+        }))).filter(Boolean).sort((a, b) => (b.finished - a.finished) || (b.earned - a.earned));
         const sessionId = generateId();
         const totalPages = Math.max(1, Math.ceil(totals.length / 10));
         statsPanelSessions.set(sessionId, { kind: 'builder', userId: interaction.user.id, page: 0, rows: totals, createdAt: Date.now() });
@@ -4658,17 +5194,12 @@ Only the ticket creator can continue.`);
           return safeIReply(interaction, { content: `No completed builds found for <@${targetUser.id}>.`, flags: 64 });
         }
 
-        const lines = records.slice(0, 25).map((r, i) => {
-          const dateStr = r.at ? `<t:${Math.floor(r.at / 1000)}:d>` : '—';
-          const priceStr = money(r.price ?? r.amount);
-          const customer = r.customerIgn ? `\`${r.customerIgn}\`` : '—';
-          return `**${i + 1}.** ${dateStr} — Customer: ${customer} — Price: **${priceStr}**`;
-        });
+        const lines = records.slice(0, 25).map((r, i) => formatBuildHistoryLine(r, i + 1, money, targetUser.id));
 
         const total = records.length;
         const eb = new EmbedBuilder()
           .setColor(0x2b2d31)
-          .setTitle(`🏗️ Build History — ${targetUser.username}`)
+          .setTitle(`Build History - ${targetUser.username}`)
           .setDescription(lines.join('\n').slice(0, 4096))
           .setFooter({ text: `Total builds: ${total}` })
           .setTimestamp();
@@ -4703,18 +5234,15 @@ Only the ticket creator can continue.`);
         CAT_BUILDING:           'Category: Building',
         CAT_SPAWNER_SELL:       'Category: Spawner Sell',
         CAT_SPAWNER_BUY:        'Category: Spawner Buy',
-        CAT_PARTNERSHIP:        'Category: Partnership',
         CAT_SUPPORT:            'Category: Support',
         CAT_GW_CLAIM:           'Category: Giveaway Claim',
         ROLE_STAFF:             'Role: Staff',
         ROLE_TRAINEE_BUILDER:   'Role: Trainee Builder',
         ROLE_TRAINED_BUILDER:   'Role: Trained Builder',
         ROLE_CHIEF_BUILDER:     'Role: Chief Builder',
-        ROLE_PARTNER_MANAGER:   'Role: Partner Manager',
         VOUCH_CHANNEL_ID:       'Vouch detection channel',
         VOUCH_SCAM_ALERT_USER:  'Scam alert user ID',
         PREFIX_STAFF:           'Prefix: Staff',
-        PREFIX_PARTNER_MANAGER: 'Prefix: Partner Manager',
         PREFIX_CHIEF_BUILDER:   'Prefix: Chief Builder',
         PREFIX_TRAINED_BUILDER: 'Prefix: Trained Builder',
         PREFIX_TRAINEE_BUILDER: 'Prefix: Trainee Builder',
@@ -4774,7 +5302,6 @@ Only the ticket creator can continue.`);
         building:     'CAT_BUILDING',
         spawner_sell: 'CAT_SPAWNER_SELL',
         spawner_buy:  'CAT_SPAWNER_BUY',
-        partnership:  'CAT_PARTNERSHIP',
         support:      'CAT_SUPPORT',
         gw_claim:     'CAT_GW_CLAIM',
       };
@@ -4795,16 +5322,13 @@ Only the ticket creator can continue.`);
         trainee_builder: 'ROLE_TRAINEE_BUILDER',
         trained_builder: 'ROLE_TRAINED_BUILDER',
         chief_builder:   'ROLE_CHIEF_BUILDER',
-        partner_manager: 'ROLE_PARTNER_MANAGER',
       };
       const key = keyMap[sub];
       if (!key) return interaction.editReply('❌ Unknown role.');
       await store.setConfigValue(gid, key, role.id);
       // Rebuild combined staff IDs (used for ticket permission overwrites)
-      // Staff = staff role. Builders = all three builder roles. Partner manager = staff.
       const staffId   = await store.getConfigValue(gid, 'ROLE_STAFF').catch(() => null);
-      const pmId      = await store.getConfigValue(gid, 'ROLE_PARTNER_MANAGER').catch(() => null);
-      const allStaff  = [staffId, pmId].filter(Boolean).join(',');
+      const allStaff  = [staffId].filter(Boolean).join(',');
       await store.setConfigValue(gid, 'ROLES_STAFF_IDS', allStaff);
       const b1 = await store.getConfigValue(gid, 'ROLE_CHIEF_BUILDER').catch(() => null);
       const b2 = await store.getConfigValue(gid, 'ROLE_TRAINED_BUILDER').catch(() => null);
@@ -4891,7 +5415,6 @@ Only the ticket creator can continue.`);
       const prefix = options.getString('prefix', true);
       const keyMap = {
         staff:           'PREFIX_STAFF',
-        partner_manager: 'PREFIX_PARTNER_MANAGER',
         chief_builder:   'PREFIX_CHIEF_BUILDER',
         trained_builder: 'PREFIX_TRAINED_BUILDER',
         trainee_builder: 'PREFIX_TRAINEE_BUILDER',
@@ -5325,91 +5848,6 @@ if (commandName === 'giveaway') {
         return;
       }
 
-      // --- /giveaway auto ---
-      if (sub === 'auto') {
-        await interaction.deferReply({ flags: 64 });
-        const channel = options.getChannel('channel', true);
-        const prize = options.getString('prize', true);
-        const intervalRaw = options.getString('interval', true);
-        const durationRaw = options.getString('duration', true);
-        const host = options.getUser('host') || interaction.user;
-        const winnersCount = Math.max(1, options.getInteger('winners') || 1);
-        const claimLabel = options.getString('claim_label') || '';
-
-        const intervalMs = parseDuration(intervalRaw);
-        const durationMs = parseDuration(durationRaw);
-        if (!intervalMs) return interaction.editReply('❌ Invalid interval. Use e.g. `24h`, `7d`.');
-        if (!durationMs) return interaction.editReply('❌ Invalid duration. Use e.g. `12h`.');
-        if (durationMs >= intervalMs) return interaction.editReply('❌ Duration must be shorter than the interval.');
-
-        const autoId = generateId();
-        const cfg = {
-          id: autoId,
-          channelId: channel.id,
-          guildId: interaction.guildId,
-          prize,
-          hostId: host.id,
-          intervalMs,
-          durationMs,
-          winnersCount,
-          claimLabel,
-          pingRoleId: GW_PING_ROLE_ID,
-          createdAt: Date.now(),
-        };
-        await store.setAutoGiveaway(autoId, cfg);
-        scheduleAutoGiveaway(autoId, cfg);
-
-        await interaction.editReply({
-          embeds: [new EmbedBuilder()
-            .setColor(0x57f287)
-            .setTitle('✅ Auto-Giveaway Created')
-            .addFields(
-              { name: 'ID', value: `\`${autoId}\``, inline: true },
-              { name: 'Channel', value: `<#${channel.id}>`, inline: true },
-              { name: 'Prize', value: prize, inline: true },
-              { name: 'Interval', value: intervalRaw, inline: true },
-              { name: 'Duration', value: durationRaw, inline: true },
-              { name: 'Winners', value: String(winnersCount), inline: true },
-              { name: 'Host', value: `<@${host.id}>`, inline: true },
-            )
-            .setFooter({ text: 'First giveaway will post at the next interval.' })
-          ]
-        });
-        return;
-      }
-
-      // --- /giveaway auto_delete ---
-      if (sub === 'autodelete') {
-        await interaction.deferReply({ flags: 64 });
-        const autoId = options.getString('id', true);
-        const autos = await store.getAutoGiveaways();
-        if (!autos[autoId]) return interaction.editReply(`❌ No auto-giveaway found with ID \`${autoId}\`.`);
-        // Cancel pending timer
-        const timer = autoGwTimers.get(autoId);
-        if (timer) { clearTimeout(timer); autoGwTimers.delete(autoId); }
-        await store.deleteAutoGiveaway(autoId);
-        await interaction.editReply(`✅ Auto-giveaway \`${autoId}\` deleted. No more recurring posts.`);
-        return;
-      }
-
-      // --- /giveaway auto_list ---
-      if (sub === 'autolist') {
-        await interaction.deferReply({ flags: 64 });
-        const autos = await store.getAutoGiveaways();
-        const entries = Object.values(autos || {});
-        if (!entries.length) return interaction.editReply('No auto-giveaways configured.');
-        const lines = entries.map(a =>
-          `**ID:** \`${a.id}\` • <#${a.channelId}> • ${a.prize} • every ${formatDuration(a.intervalMs)} • lasts ${formatDuration(a.durationMs)} • ${a.winnersCount}w`
-        );
-        await interaction.editReply({
-          embeds: [new EmbedBuilder()
-            .setColor(0x5865f2)
-            .setTitle('🔁 Recurring Auto-Giveaways')
-            .setDescription(lines.join('\n').slice(0, 4000))
-          ]
-        });
-        return;
-      }
     }
 
     // --- AFK ---
@@ -5588,30 +6026,86 @@ if (commandName === 'giveaway') {
       const avgMs = rc > 0 ? Math.round(Number(s.responseTotalMs || 0) / rc) : null;
       const fmtMs = (ms) => { if (ms == null) return '—'; const sec = Math.max(0, Math.round(ms / 1000)); const m = Math.floor(sec / 60); const secRem = sec % 60; return `${m}m ${String(secRem).padStart(2,'0')}s`; };
       const finished = records.length;
-      const pending = mine.filter(j => ['PENDING','WAITING_PAYMENT','AWAITING_CONFIRM','AWAITING_PAYOUT'].includes(String(j.status || '').toUpperCase())).length;
       const volume = records.reduce((a,r)=>a+Number(r.price ?? r.amount ?? 0),0);
       const builderIgn = records.find(r => r.builderIgn)?.builderIgn || mine.find(j => j.builderIgn)?.builderIgn || null;
+      const displayName = targetMember?.displayName || targetUser.username;
       const eb = new EmbedBuilder()
-        .setColor(0x2b2d31)
-        .setTitle(`Stats — ${targetUser.username}`)
-        .setDescription(`${targetUser}`)
+        .setColor(0x00A8FF)
+        .setThumbnail(targetUser.displayAvatarURL({ dynamic: true, size: 256 }))
+        .setDescription(`@${displayName}'s overall activity.`)
         .setTimestamp();
-      if (staffRole || Number(s.openCount || 0) || Number(s.renameCount || 0) || Number(s.messageCount || 0) || rc) {
-        eb.addFields({ name: 'Staff Stats', value: `Opened: **${Number(s.openCount || 0)}**
-Renamed: **${Number(s.renameCount || 0)}**
-Messages: **${Number(s.messageCount || 0)}**
-Avg response: **${fmtMs(avgMs)}**`, inline: false });
+      if (staffRole || Number(s.closed || 0) || Number(s.renameCount || 0) || Number(s.messageCount || 0) || rc) {
+        eb.addFields({ name: 'Staff History', value: `> **Closed Tickets:** \`${Number(s.closed || 0)}\`\n> **Tickets Renamed:** \`${Number(s.renameCount || 0)}\`\n> **Total Messages:** \`${Number(s.messageCount || 0)}\`\n> **Avg Response:** \`${fmtMs(avgMs)}\``, inline: false });
       }
-      if (builderRole || finished || pending || volume) {
-        eb.addFields({ name: 'Build Stats', value: `Finished: **${finished}**
-Price: **${money(volume)}**
-Pending: **${pending}**
-Builder IGN: ${builderIgn ? `\`${builderIgn}\`` : '—'}`, inline: false });
+      if (builderRole || finished || volume) {
+        let text = `> **Orders Finished:** \`${finished}\`\n> **Total Revenue:** \`${money(volume)}\``;
+        if (builderIgn) text += `\n> **Builder IGN:** \`${builderIgn}\``;
+        eb.addFields({ name: 'Builder History', value: text, inline: false });
       }
-      if (!eb.data.fields?.length) eb.setDescription(`${targetUser}
-
-No staff or builder stats found yet.`);
+      if (!eb.data.fields?.length) eb.setDescription(`${targetUser} has no recorded staff or builder history.`);
       return interaction.editReply({ embeds: [eb] });
+    }
+
+    if (commandName === 'stafflist') {
+      await interaction.deferReply({ flags: 64 }).catch(() => {});
+      if (!canManageStaffList(interaction.member)) {
+        return interaction.editReply('Managers only.');
+      }
+
+      const sub = options.getSubcommand(false);
+      if (sub === 'edit') {
+        const targetUser = options.getUser('person', true);
+        const kind = options.getString('type', true) === 'builder' ? 'builder' : 'support';
+        const ignRaw = options.getString('ign', false);
+        const altsRaw = options.getString('alts', false);
+        if (ignRaw == null && altsRaw == null) {
+          return interaction.editReply('Provide `ign`, `alts`, or both.');
+        }
+
+        const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+        if (!targetMember) return interaction.editReply('That member is not in this server.');
+
+        const roleSets = await getAcceptedInfoRoleSets(interaction.guild).catch(() => null);
+        const requiredRoleIds = kind === 'builder' ? roleSets?.builderRoleIds : roleSets?.supportRoleIds;
+        const hasMatchingRole = targetMember.roles.cache.some(r => (requiredRoleIds || []).includes(r.id));
+        if (!hasMatchingRole) {
+          return interaction.editReply(`That member does not have a ${staffListTitle(kind).toLowerCase()} role.`);
+        }
+
+        const data = await store.getAcceptedStaffList().catch(() => null);
+        const key = kind === 'builder' ? 'builders' : 'support';
+        const existing = data?.[key]?.[targetUser.id] || {};
+        const ign = ignRaw == null
+          ? String(existing.ign || '').trim()
+          : sanitizeDisplayName(ignRaw, { maxLen: 16 });
+        if (!ign) return interaction.editReply('Main IGN is required for a new staff-list entry.');
+
+        const alts = altsRaw == null
+          ? (Array.isArray(existing.alts) ? existing.alts : [])
+          : normalizeStaffListAltsInput(altsRaw, s => sanitizeDisplayName(s, { maxLen: 16 }));
+
+        await store.setAcceptedStaffListEntry(kind, targetUser.id, {
+          userId: targetUser.id,
+          ign,
+          alts,
+          appId: existing.appId || null,
+          acceptedById: existing.acceptedById || interaction.user.id,
+          acceptedAt: existing.acceptedAt || Date.now(),
+          infoRequestedAt: existing.infoRequestedAt || Date.now(),
+        });
+        await refreshAcceptedStaffList(kind).catch(() => {});
+
+        const altText = alts.length ? alts.map(a => `\`${a}\``).join(', ') : 'None';
+        const eb = new EmbedBuilder()
+          .setColor(Colors.Green)
+          .setTitle('Staff List Updated')
+          .setDescription(`${targetUser} in **${staffListTitle(kind)}**`)
+          .addFields(
+            { name: 'IGN', value: `\`${ign}\``, inline: true },
+            { name: 'Alts', value: altText.slice(0, 1024), inline: false },
+          );
+        return interaction.editReply({ embeds: [eb] });
+      }
     }
 
     // --- BUILDER: availability board ---
@@ -5627,6 +6121,86 @@ No staff or builder stats found yet.`);
       const msg = await targetCh.send({ embeds: [embed] }).catch(() => null);
       if (msg) { await msg.react('⬆️').catch(() => {}); await msg.react('⬇️').catch(() => {}); }
       return interaction.editReply(`✅ Suggestion submitted${targetCh.id !== interaction.channelId ? ` in <#${targetCh.id}>` : '.'}`);
+    }
+
+    // --- LITEMATIC PREVIEW ---
+    if (commandName === 'preview') {
+      return handlePreviewCommand(interaction, {
+        renderLitematic: (buf, opts) => getLitematicRender().renderLitematic(buf, opts),
+      });
+    }
+
+    // --- LITEMATIC RENDER ---
+    if (commandName === 'render') {
+      // Hardened input + DoS guards.
+      const RENDER_MAX_FILE_BYTES = 5 * 1024 * 1024;
+      const RENDER_USER_COOLDOWN_MS = 30 * 1000;
+      const RENDER_QUEUE_MAX = 3;
+      const RENDER_DOWNLOAD_TIMEOUT_MS = 15 * 1000;
+
+      if (!global.__renderCooldowns) global.__renderCooldowns = new Map();
+      if (typeof global.__renderInFlight !== 'number') global.__renderInFlight = 0;
+
+      const now = Date.now();
+      const lastAt = global.__renderCooldowns.get(interaction.user.id) || 0;
+      if (now - lastAt < RENDER_USER_COOLDOWN_MS) {
+        const remain = Math.ceil((RENDER_USER_COOLDOWN_MS - (now - lastAt)) / 1000);
+        return interaction.reply({ content: `Please wait ${remain}s before another render.`, ephemeral: true });
+      }
+      if (global.__renderInFlight >= RENDER_QUEUE_MAX) {
+        return interaction.reply({ content: `Renderer busy (${RENDER_QUEUE_MAX} in flight). Try again shortly.`, ephemeral: true });
+      }
+
+      await interaction.deferReply();
+      const file = interaction.options.getAttachment('file', true);
+      const size = Math.min(2048, Math.max(256, interaction.options.getInteger('size') || 1024));
+      if (!/\.litematic$/i.test(file.name || '')) {
+        return interaction.editReply('Attachment must be a `.litematic` file.');
+      }
+      if (typeof file.size === 'number' && file.size > RENDER_MAX_FILE_BYTES) {
+        return interaction.editReply(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max ${Math.floor(RENDER_MAX_FILE_BYTES / 1024 / 1024)} MB.`);
+      }
+
+      global.__renderCooldowns.set(interaction.user.id, now);
+      global.__renderInFlight += 1;
+      try {
+        const ac = new AbortController();
+        const timeoutId = setTimeout(() => ac.abort(), RENDER_DOWNLOAD_TIMEOUT_MS);
+        let res;
+        try {
+          res = await fetch(file.url, { signal: ac.signal });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+        if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+        const declared = parseInt(res.headers.get('content-length') || '0', 10);
+        if (declared && declared > RENDER_MAX_FILE_BYTES) {
+          throw new Error(`file too large: ${declared} bytes`);
+        }
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > RENDER_MAX_FILE_BYTES) {
+          throw new Error(`file too large after download: ${buf.length} bytes`);
+        }
+        const t0 = Date.now();
+        const { png, meta } = await getLitematicRender().renderLitematic(buf, { width: size, height: size });
+        const ms = Date.now() - t0;
+        const att = new AttachmentBuilder(png, { name: `${(meta?.name || 'render').replace(/[^a-zA-Z0-9_-]+/g, '_')}.png` });
+        const eb = new EmbedBuilder()
+          .setColor(0x2b2d31)
+          .setTitle(meta?.name || file.name)
+          .setDescription([
+            meta?.author ? `Author: **${meta.author}**` : null,
+            meta?.size ? `Size: \`${meta.size.x} x ${meta.size.y} x ${meta.size.z}\`` : null,
+            typeof meta?.blockCount === 'number' ? `Blocks: \`${meta.blockCount.toLocaleString()}\`` : null,
+            `Rendered in ${ms}ms`,
+          ].filter(Boolean).join(' | '))
+          .setImage(`attachment://${att.name}`);
+        return interaction.editReply({ embeds: [eb], files: [att] });
+      } catch (e) {
+        return interaction.editReply(`Render failed: ${String(e.message || e).slice(0, 300)}`);
+      } finally {
+        global.__renderInFlight = Math.max(0, global.__renderInFlight - 1);
+      }
     }
 
     // --- SERVER INFO ---
@@ -5716,22 +6290,6 @@ ${E_TIME} Created ${created}`)
     }
 
     
-
-    if (commandName === 'sync') {
-      await interaction.deferReply({ flags: 64 });
-      await interaction.guild.members.fetch().catch(() => null);
-      let ok = 0, fail = 0;
-      for (const member of interaction.guild.members.cache.values()) {
-        if (member.user?.bot) continue;
-        try {
-          await syncNickname(member);
-          ok += 1;
-        } catch (e) {
-          fail += 1;
-        }
-      }
-      return interaction.editReply(`✅ Synced nicknames for ${ok} member(s)${fail ? ` — ${fail} failed.` : '.'}`);
-    }
 
     // --- TICKET PANELS ---
     if (commandName === "ticketpanel") {
@@ -6227,6 +6785,7 @@ async function handleWatchPaid(watchId) {
               customerIgn: job.customerIgn,
               receiverIgn: job.receiverIgn,
               builderDiscordId: job.builderDiscordId || job.completedBy || null,
+              customerDiscordId: job.customerDiscordId || null,
               at: finalAt,
             }).catch(() => {});
           }
@@ -6300,112 +6859,7 @@ function stopPaywatchPolling(watchId) { const t = paywatchTimers.get(watchId); i
 // Sponsorship / staff pay board removed
 
 // ════════════════════════════════════════════════════════════════════════════
-// AUTO GIVEAWAYS  (DB-driven, configurable via /giveaway auto)
 // ════════════════════════════════════════════════════════════════════════════
-
-// In-memory map of active auto-giveaway timers: autoGwId -> timeoutId
-const autoGwTimers = new Map();
-
-async function postAutoGiveaway({ autoId, channelId, prize, hostId, durationMs, winnersCount, claimLabel, pingRoleId, guildId }) {
-  const ch = await client.channels.fetch(channelId).catch(() => null);
-  if (!ch) return;
-  const endsAt = Date.now() + durationMs;
-  const gwId = generateId();
-  const hostMention = `<@${hostId}>`;
-  const wc = winnersCount || 1;
-
-  const embed = new EmbedBuilder()
-    .setColor(0xf1c40f)
-    .setTitle('🎉 GIVEAWAY')
-    .setDescription(
-      `**Prize:** ${prize}\n**Hosted by:** ${hostMention}\n**Ends:** ${ts(endsAt)} (${tsR(endsAt)})\nEntries: **0**\nWinners: **${wc}**`
-    )
-    .setFooter({ text: `GW ID: ${gwId}` })
-    .setTimestamp(endsAt);
-
-  const joinBtn = new ButtonBuilder().setCustomId('giveaway_join').setEmoji('🎉').setStyle(ButtonStyle.Primary);
-  const row = new ActionRowBuilder().addComponents(joinBtn);
-
-  const msg = await ch.send({ embeds: [embed], components: [row] }).catch(() => null);
-  if (!msg) return;
-
-  const guildIdResolved = guildId || ch.guildId;
-  await store.createGiveaway({
-    id: gwId, messageId: msg.id, channelId, guildId: guildIdResolved,
-    prize, hostId, endsAt, entries: [], ended: false,
-    winnersCount: wc, createdAt: Date.now(),
-  }).catch(() => {});
-
-  if (pingRoleId || GW_PING_ROLE_ID) {
-    await ch.send({ content: `<@&${pingRoleId || GW_PING_ROLE_ID}> ${claimLabel || ''}`.trim() }).catch(() => {});
-  }
-
-  // Auto-end after durationMs
-  setTimeout(async () => {
-    try {
-      const gw = await store.getGiveaway(msg.id).catch(() => null);
-      if (!gw || gw.ended) return;
-      await store.endGiveaway(msg.id).catch(() => {});
-      const unique = [...new Set(gw.entries || [])];
-      const shuffled = unique.sort(() => Math.random() - 0.5);
-      const winners = shuffled.slice(0, wc);
-      const winText = winners.length > 0
-        ? `🎉 Winners: ${winners.map(w => `<@${w}>`).join(', ')}`
-        : 'No entries — no winners.';
-      const endedEmbed = new EmbedBuilder(embed.data).setColor(0x95a5a6)
-        .setDescription(`${embed.data.description}\n\n${winText}`);
-      await msg.edit({ embeds: [endedEmbed], components: [] }).catch(() => {});
-      if (winners.length > 0) {
-        await ch.send({ content: `🎉 Congratulations ${winners.map(w => `<@${w}>`).join(' and ')}! You each won **${prize}**!` }).catch(() => {});
-      }
-
-      // Schedule next run if this auto-giveaway still exists in DB
-      if (autoId) {
-        const autos = await store.getAutoGiveaways().catch(() => ({}));
-        if (autos[autoId]) scheduleAutoGiveaway(autoId, autos[autoId]);
-      }
-    } catch (e) { console.error('Auto GW end error:', e); }
-  }, durationMs);
-}
-
-function scheduleAutoGiveaway(autoId, cfg) {
-  // Clear any existing timer for this ID
-  const existing = autoGwTimers.get(autoId);
-  if (existing) clearTimeout(existing);
-
-  const delay = Math.max(1000, cfg.intervalMs - Date.now() % cfg.intervalMs || cfg.intervalMs);
-  const t = setTimeout(async () => {
-    autoGwTimers.delete(autoId);
-    // Re-fetch to make sure it hasn't been deleted
-    const autos = await store.getAutoGiveaways().catch(() => ({}));
-    if (!autos[autoId]) return;
-    const c = autos[autoId];
-    try {
-      await postAutoGiveaway({
-        autoId,
-        channelId: c.channelId,
-        prize: c.prize,
-        hostId: c.hostId,
-        durationMs: c.durationMs,
-        winnersCount: c.winnersCount || 1,
-        claimLabel: c.claimLabel || '',
-        pingRoleId: c.pingRoleId || null,
-        guildId: c.guildId || null,
-      });
-    } catch (e) { console.error('Auto GW post error:', e); }
-    // Next run is scheduled inside postAutoGiveaway after the giveaway ends
-  }, delay);
-  autoGwTimers.set(autoId, t);
-}
-
-async function loadAndScheduleAutoGiveaways() {
-  const autos = await store.getAutoGiveaways().catch(() => ({}));
-  for (const [id, cfg] of Object.entries(autos)) {
-    scheduleAutoGiveaway(id, cfg);
-  }
-}
-
-
 
 async function ensureLoaReactionPanel() {
   try {
@@ -6499,9 +6953,6 @@ client.once(Events.ClientReady, async () => {
   };
   tick().catch(() => {});
   setInterval(() => tick().catch(() => {}), 60 * 1000);
-
-  // Load DB-configured auto giveaways
-  await loadAndScheduleAutoGiveaways().catch(() => {});
 });
 
 client.login(cfg.token);
