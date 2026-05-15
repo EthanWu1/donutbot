@@ -37,7 +37,7 @@ const store = require('./store');
 const { getUserBalance } = require('./donutsApi');
 const { parseNumber, parseDuration, getLevelFromXp, getXpForLevel, sanitizeDisplayName } = require('./utils');
 const { generateRankCard } = require('./rankCard');
-const { handlePreviewCommand } = require('./lib/litematicPreview');
+const { handleRenderCommand } = require('./lib/litematicRenderCommand');
 const {
   APPLICATION_COOLDOWN_MS,
   buildBuilderLeaderboardLine,
@@ -6607,84 +6607,11 @@ if (commandName === 'giveaway') {
       return interaction.editReply(`✅ Suggestion submitted${targetCh.id !== interaction.channelId ? ` in <#${targetCh.id}>` : '.'}`);
     }
 
-    // --- LITEMATIC PREVIEW ---
-    if (commandName === 'preview') {
-      return handlePreviewCommand(interaction, {
-        renderLitematic: (buf, opts) => getLitematicRender().renderLitematic(buf, opts),
-      });
-    }
-
     // --- LITEMATIC RENDER ---
     if (commandName === 'render') {
-      // Hardened input + DoS guards.
-      const RENDER_MAX_FILE_BYTES = 5 * 1024 * 1024;
-      const RENDER_USER_COOLDOWN_MS = 30 * 1000;
-      const RENDER_QUEUE_MAX = 3;
-      const RENDER_DOWNLOAD_TIMEOUT_MS = 15 * 1000;
-
-      if (!global.__renderCooldowns) global.__renderCooldowns = new Map();
-      if (typeof global.__renderInFlight !== 'number') global.__renderInFlight = 0;
-
-      const now = Date.now();
-      const lastAt = global.__renderCooldowns.get(interaction.user.id) || 0;
-      if (now - lastAt < RENDER_USER_COOLDOWN_MS) {
-        const remain = Math.ceil((RENDER_USER_COOLDOWN_MS - (now - lastAt)) / 1000);
-        return interaction.reply({ content: `Please wait ${remain}s before another render.`, ephemeral: true });
-      }
-      if (global.__renderInFlight >= RENDER_QUEUE_MAX) {
-        return interaction.reply({ content: `Renderer busy (${RENDER_QUEUE_MAX} in flight). Try again shortly.`, ephemeral: true });
-      }
-
-      await interaction.deferReply();
-      const file = interaction.options.getAttachment('file', true);
-      const size = Math.min(2048, Math.max(256, interaction.options.getInteger('size') || 1024));
-      if (!/\.litematic$/i.test(file.name || '')) {
-        return interaction.editReply('Attachment must be a `.litematic` file.');
-      }
-      if (typeof file.size === 'number' && file.size > RENDER_MAX_FILE_BYTES) {
-        return interaction.editReply(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max ${Math.floor(RENDER_MAX_FILE_BYTES / 1024 / 1024)} MB.`);
-      }
-
-      global.__renderCooldowns.set(interaction.user.id, now);
-      global.__renderInFlight += 1;
-      try {
-        const ac = new AbortController();
-        const timeoutId = setTimeout(() => ac.abort(), RENDER_DOWNLOAD_TIMEOUT_MS);
-        let res;
-        try {
-          res = await fetch(file.url, { signal: ac.signal });
-        } finally {
-          clearTimeout(timeoutId);
-        }
-        if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
-        const declared = parseInt(res.headers.get('content-length') || '0', 10);
-        if (declared && declared > RENDER_MAX_FILE_BYTES) {
-          throw new Error(`file too large: ${declared} bytes`);
-        }
-        const buf = Buffer.from(await res.arrayBuffer());
-        if (buf.length > RENDER_MAX_FILE_BYTES) {
-          throw new Error(`file too large after download: ${buf.length} bytes`);
-        }
-        const t0 = Date.now();
-        const { png, meta } = await getLitematicRender().renderLitematic(buf, { width: size, height: size });
-        const ms = Date.now() - t0;
-        const att = new AttachmentBuilder(png, { name: `${(meta?.name || 'render').replace(/[^a-zA-Z0-9_-]+/g, '_')}.png` });
-        const eb = new EmbedBuilder()
-          .setColor(0x2b2d31)
-          .setTitle(meta?.name || file.name)
-          .setDescription([
-            meta?.author ? `Author: **${meta.author}**` : null,
-            meta?.size ? `Size: \`${meta.size.x} x ${meta.size.y} x ${meta.size.z}\`` : null,
-            typeof meta?.blockCount === 'number' ? `Blocks: \`${meta.blockCount.toLocaleString()}\`` : null,
-            `Rendered in ${ms}ms`,
-          ].filter(Boolean).join(' | '))
-          .setImage(`attachment://${att.name}`);
-        return interaction.editReply({ embeds: [eb], files: [att] });
-      } catch (e) {
-        return interaction.editReply(`Render failed: ${String(e.message || e).slice(0, 300)}`);
-      } finally {
-        global.__renderInFlight = Math.max(0, global.__renderInFlight - 1);
-      }
+      return handleRenderCommand(interaction, {
+        renderLitematic: (buf, opts) => getLitematicRender().renderLitematic(buf, opts),
+      });
     }
 
     // --- SERVER INFO ---

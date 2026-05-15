@@ -177,7 +177,7 @@ test('uses an undarkened deepslate water tint for custom fluid meshes', async ()
   assert.equal(result.diag.waterTextureAlpha, 230);
 });
 
-test('supports transparent preview backgrounds', async () => {
+test('supports transparent render backgrounds', async () => {
   const result = await renderPayload({
     name: 'transparent background',
     author: 'test',

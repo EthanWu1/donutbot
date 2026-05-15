@@ -59,14 +59,8 @@ const commands = [
   // --- LITEMATIC RENDER ---
   new SlashCommandBuilder()
     .setName('render')
-    .setDescription('Render a .litematic schematic as an isometric image')
-    .addAttachmentOption(o => o.setName('file').setDescription('Litematic file to render').setRequired(true))
-    .addIntegerOption(o => o.setName('size').setDescription('Output image size in px (256-2048, default 1024)').setRequired(false)),
-
-  new SlashCommandBuilder()
-    .setName('preview')
-    .setDescription('Preview a .litematic schematic with size and volume')
-    .addAttachmentOption(o => o.setName('litematic').setDescription('Litematic file to preview').setRequired(true)),
+    .setDescription('Render a .litematic schematic with size and volume')
+    .addAttachmentOption(o => o.setName('litematic').setDescription('Litematic file to render').setRequired(true)),
 
   // --- AFK ---
   new SlashCommandBuilder()

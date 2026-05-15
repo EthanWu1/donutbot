@@ -4,12 +4,12 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const {
-  buildPreviewMessage,
-  handlePreviewCommand,
-} = require('../lib/litematicPreview');
+  buildRenderMessage,
+  handleRenderCommand,
+} = require('../lib/litematicRenderCommand');
 
-test('builds preview embed with volume, size, and attached render image', () => {
-  const message = buildPreviewMessage({
+test('builds render embed with volume, size, and attached transparent image', () => {
+  const message = buildRenderMessage({
     png: Buffer.from('png'),
     fileName: 'EtZ Kelp T2.3 NEW.litematic',
     meta: {
@@ -30,10 +30,10 @@ test('builds preview embed with volume, size, and attached render image', () => 
     { name: 'Size', value: '`55 x 22 x 29`', inline: true },
   ]);
   assert.equal(embed.image.url, `attachment://${message.files[0].name}`);
-  assert.match(message.files[0].name, /^EtZ_Kelp_T2_3_NEW-preview\.png$/);
+  assert.match(message.files[0].name, /^EtZ_Kelp_T2_3_NEW-render\.png$/);
 });
 
-test('preview command renders attachment with transparent background option', async () => {
+test('render command renders litematic attachment with transparent background option', async () => {
   const calls = [];
   const interaction = {
     user: { id: 'user-1' },
@@ -71,7 +71,7 @@ test('preview command renders attachment with transparent background option', as
     };
   };
 
-  await handlePreviewCommand(interaction, {
+  await handleRenderCommand(interaction, {
     fetchImpl,
     renderLitematic,
     cooldowns: new Map(),
@@ -92,7 +92,7 @@ test('preview command renders attachment with transparent background option', as
   assert.equal(embed.image.url, `attachment://${reply[1].files[0].name}`);
 });
 
-test('preview command rejects non-litematic attachments', async () => {
+test('render command rejects non-litematic attachments', async () => {
   let rendered = false;
   const interaction = {
     user: { id: 'user-1' },
@@ -107,7 +107,7 @@ test('preview command rejects non-litematic attachments', async () => {
     },
   };
 
-  await handlePreviewCommand(interaction, {
+  await handleRenderCommand(interaction, {
     fetchImpl: async () => { throw new Error('should not fetch'); },
     renderLitematic: async () => { rendered = true; },
     cooldowns: new Map(),
