@@ -3597,7 +3597,6 @@ if (interaction.isButton() && interaction.customId.startsWith('spawner_open:')) 
     .addOptions(SPAWNER_TYPES.map(t => ({
       label: t.label,
       value: t.key,
-      description: `${direction === 'buy' ? 'Buy' : 'Sell'} ${t.label} spawners`.slice(0, 100),
     })));
   await interaction.reply({
     embeds: [new EmbedBuilder()
@@ -3856,7 +3855,7 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       } else {
         const verbing = direction === 'buy' ? 'buying' : 'selling';
         embed = new EmbedBuilder()
-          .setColor(0xFFA500)
+          .setColor(0x08a4a7)
           .setTitle(`${type.label} — No Active ${direction === 'buy' ? 'Buy' : 'Sell'} Price`)
           .setDescription(`We are not currently **${verbing}** ${type.emoji} **${type.label}** spawners. This ticket will stay open in case a staff member wants to handle it.`)
           .addFields(
@@ -3864,7 +3863,10 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
             { name: 'IGN', value: `\`${ign}\``, inline: true },
           );
       }
-      await channel.send({ embeds: [embed] }).catch(() => {});
+      const priceMsg = await channel.send({ embeds: [embed] }).catch(() => null);
+      if (priceMsg) {
+        try { await priceMsg.pin(); } catch (e) { console.error('[spawner ticket] pin error:', e?.message); }
+      }
     } catch (e) {
       console.error('[spawner ticket] embed error:', e?.message);
     }
