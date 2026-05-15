@@ -886,6 +886,29 @@ function canManageSchematicSubmission(member) {
   );
 }
 
+// Pull Discord user IDs out of a designers paragraph. Each line typically
+// looks like `<@123>` or `<@!123>` — plain text falls through ignored.
+function parseDesignerUserIds(text) {
+  if (!text) return [];
+  const ids = new Set();
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = line.match(/<@!?(\d{16,20})>/);
+    if (m) ids.add(m[1]);
+  }
+  return [...ids];
+}
+
+// Edit access for a submission: original submitter, any mentioned designer,
+// or a schematic manager. Lets designers fix typos / replace .litematics
+// straight from the forum thread after the ticket is closed.
+function isAuthorizedToEditSubmission(member, sub) {
+  if (!member || !sub) return false;
+  if (canManageSchematicSubmission(member)) return true;
+  if (String(member.user?.id || member.id) === String(sub.submitterId)) return true;
+  const designerIds = parseDesignerUserIds(sub.designers);
+  return designerIds.includes(String(member.user?.id || member.id));
+}
+
 // Publish a submission to the forum OR update the existing thread in place if
 // one was already created (idempotent — designers can run `/publish post`
 // after fixing typos and the same thread is updated).
@@ -910,6 +933,12 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
   const embed = buildSchematicEmbed(sub, { forPreview: false });
   embed.setImage('attachment://render.png');
 
+  // Edit button on the starter message — gives designers a way to fix typos
+  // or replace the .litematic long after the original ticket is closed.
+  const editRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`publish_edit_forum:${sub.id}`).setLabel('Edit').setStyle(ButtonStyle.Secondary).setEmoji('✏️'),
+  );
+
   // If the submission already references a forum thread, try to edit that
   // thread's starter message in place. Falls through to creating a new thread
   // if the original was deleted manually.
@@ -918,7 +947,12 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     thread = await forum.threads.fetch(sub.forumThreadId).catch(() => null);
   }
 
-  if (thread && !thread.archived) {
+  if (thread) {
+    // If the thread is archived, un-archive before editing so designers don't
+    // hit a "thread is archived" error on subsequent edits.
+    if (thread.archived) {
+      try { await thread.setArchived(false); } catch {}
+    }
     const starter = await thread.fetchStarterMessage().catch(() => null);
     if (starter) {
       try {
@@ -928,15 +962,24 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
             new AttachmentBuilder(renderBuf, { name: 'render.png' }),
             new AttachmentBuilder(litematicBuf, { name: sub.litematicName || `${sub.id}.litematic` }),
           ],
+          components: [editRow],
         });
         // Rename the thread if the schem was renamed.
         if (sub.name && thread.name !== sub.name.slice(0, 100)) {
           await thread.setName(sub.name.slice(0, 100)).catch(() => {});
         }
+        // Sync attachment URLs to the new starter so subsequent edits don't
+        // 404 on a deleted ticket's stale URLs.
+        const freshStarter = await thread.fetchStarterMessage().catch(() => null);
+        const atts = freshStarter ? [...freshStarter.attachments.values()] : [];
+        const renderAtt = atts.find(a => /\.png$/i.test(a.name || ''));
+        const litematicAtt = atts.find(a => /\.litematic$/i.test(a.name || ''));
         await store.updateSchematicSubmission(sub.id, {
           status: 'PUBLISHED',
           publishedAt: sub.publishedAt || Date.now(),
           updatedAt: Date.now(),
+          renderUrl: renderAtt?.url || sub.renderUrl,
+          litematicUrl: litematicAtt?.url || sub.litematicUrl,
         }).catch(() => {});
         return { ok: true, thread, updated: true };
       } catch (e) {
@@ -956,6 +999,7 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
           new AttachmentBuilder(renderBuf, { name: 'render.png' }),
           new AttachmentBuilder(litematicBuf, { name: sub.litematicName || `${sub.id}.litematic` }),
         ],
+        components: [editRow],
       },
     });
   } catch (e) {
@@ -963,12 +1007,17 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
   }
 
   const starter = await thread.fetchStarterMessage().catch(() => null);
+  const newAtts = starter ? [...starter.attachments.values()] : [];
+  const renderNew = newAtts.find(a => /\.png$/i.test(a.name || ''));
+  const litematicNew = newAtts.find(a => /\.litematic$/i.test(a.name || ''));
   await store.updateSchematicSubmission(sub.id, {
     status: 'PUBLISHED',
     forumThreadId: thread.id,
     forumStarterMessageId: starter?.id || null,
     publishedAt: Date.now(),
     updatedAt: Date.now(),
+    renderUrl: renderNew?.url || sub.renderUrl,
+    litematicUrl: litematicNew?.url || sub.litematicUrl,
   }).catch(() => {});
 
   return { ok: true, thread, updated: false };
@@ -3561,21 +3610,54 @@ async function updateVouchboard(guild) {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  // --- PUBLISH SCHEMATIC: auto-render uploaded .litematic ---
+  // --- PUBLISH SCHEMATIC: auto-render uploaded .litematic (ticket OR forum thread) ---
   try {
-    if (message.guildId && isPublishSchematicTicketChannel(message.channel) && message.attachments?.size) {
+    if (message.guildId && message.attachments?.size) {
       const litematicAttachment = [...message.attachments.values()].find(a => /\.litematic$/i.test(a.name || a.url || ''));
       if (litematicAttachment) {
-        const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
-        if (sub) {
-          await message.channel.send({
-            embeds: [new EmbedBuilder().setColor(0x08a4a7).setDescription(`🔧 Rendering \`${litematicAttachment.name || 'schematic.litematic'}\` — this may take a few seconds.`)]
-          }).catch(() => {});
-          const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-          if (!result?.ok) {
+        // Case A: ticket-channel upload during the original submission flow.
+        if (isPublishSchematicTicketChannel(message.channel)) {
+          const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
+          if (sub) {
             await message.channel.send({
-              embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Render failed').setDescription(result?.reason || 'Unknown error.')]
+              embeds: [new EmbedBuilder().setColor(0x08a4a7).setDescription(`🔧 Rendering \`${litematicAttachment.name || 'schematic.litematic'}\` — this may take a few seconds.`)]
             }).catch(() => {});
+            const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+            if (!result?.ok) {
+              await message.channel.send({
+                embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Render failed').setDescription(result?.reason || 'Unknown error.')]
+              }).catch(() => {});
+            }
+          }
+        }
+        // Case B: replacement upload inside a forum thread we own. Used by
+        // designers to swap a .litematic on an already-published schem
+        // without opening a new ticket.
+        else if (message.channel.isThread?.() && message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID) {
+          const sub = await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
+          if (sub && message.member && isAuthorizedToEditSubmission(message.member, sub)) {
+            await message.channel.send({
+              embeds: [new EmbedBuilder().setColor(0x08a4a7).setDescription(`🔧 New \`.litematic\` detected — re-rendering and updating the post.`)]
+            }).catch(() => {});
+            const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+            if (!result?.ok) {
+              await message.channel.send({
+                embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Render failed').setDescription(result?.reason || 'Unknown error.')]
+              }).catch(() => {});
+            } else {
+              // Re-publish to push the new render + new .litematic to the starter.
+              const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
+              const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+              if (!pubRes?.ok) {
+                await message.channel.send({
+                  embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Forum update failed').setDescription(pubRes?.reason || 'Unknown error.')]
+                }).catch(() => {});
+              } else {
+                await message.channel.send({
+                  embeds: [new EmbedBuilder().setColor(0x08a4a7).setDescription(`✅ Forum post updated by ${message.author}.`)]
+                }).catch(() => {});
+              }
+            }
           }
         }
       }
@@ -4204,13 +4286,39 @@ if (interaction.isButton() && (
   const subId = interaction.customId.split(':')[1];
   const sub = await store.getSchematicSubmission(subId).catch(() => null);
   if (!sub) return interaction.reply({ content: 'Submission record missing — open a fresh Publish Schematic ticket.', flags: 64 }).catch(() => {});
-  const isOwner = String(interaction.user.id) === String(sub.submitterId);
-  if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
-    return interaction.reply({ content: 'Only the submitter or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
+  if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
+    return interaction.reply({ content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
   }
   const wantExtras = interaction.customId.startsWith('publish_edit_extras:');
   const modal = wantExtras ? buildSchematicExtrasModal(sub) : buildSchematicBasicsModal(sub);
   await interaction.showModal(modal).catch(() => {});
+  return;
+}
+
+// --- PUBLISH SCHEMATIC: forum-side Edit button -> ephemeral edit panel ---
+if (interaction.isButton() && interaction.customId.startsWith('publish_edit_forum:')) {
+  const subId = interaction.customId.split(':')[1];
+  const sub = await store.getSchematicSubmission(subId).catch(() => null);
+  if (!sub) return interaction.reply({ content: 'Submission record missing.', flags: 64 }).catch(() => {});
+  if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
+    return interaction.reply({ content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
+  }
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`publish_edit_basics:${sub.id}`).setLabel('Edit Basics').setStyle(ButtonStyle.Secondary).setEmoji('✏️'),
+    new ButtonBuilder().setCustomId(`publish_edit_extras:${sub.id}`).setLabel('Edit Extras').setStyle(ButtonStyle.Secondary).setEmoji('⚙️'),
+  );
+  await interaction.reply({
+    embeds: [new EmbedBuilder()
+      .setColor(0x08a4a7)
+      .setTitle(`Editing — ${sub.name || 'Untitled Schematic'}`)
+      .setDescription([
+        'Use the buttons below to edit text. Changes auto-publish to this thread.',
+        '',
+        '**To replace the schematic file:** drop a new `.litematic` directly in this forum thread. The bot will re-render and update the post automatically.',
+      ].join('\n'))],
+    components: [row],
+    flags: 64,
+  }).catch(() => {});
   return;
 }
 
@@ -4530,9 +4638,8 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     const sub = await store.getSchematicSubmission(subId).catch(() => null);
     if (!sub) return safeIReply(interaction, { content: 'Submission record missing.', flags: 64 });
 
-    const isOwner = String(interaction.user.id) === String(sub.submitterId);
-    if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
-      return safeIReply(interaction, { content: 'Only the submitter or a schematic manager can edit this submission.', flags: 64 });
+    if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
+      return safeIReply(interaction, { content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 });
     }
 
     const patch = {
@@ -4544,9 +4651,23 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       updatedAt: Date.now(),
     };
     const updated = await store.updateSchematicSubmission(subId, patch);
+    const finalSub = updated || { ...sub, ...patch };
+
+    // If the ticket is still open, refresh the pinned draft preview.
     const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
-    if (channel) await postOrUpdateSchematicDraftPreview(channel, updated || { ...sub, ...patch }).catch(() => {});
-    return safeIReply(interaction, { content: '✅ Basics saved. Drop your `.litematic` to render, then a manager will `/publish post`.', flags: 64 });
+    if (channel) await postOrUpdateSchematicDraftPreview(channel, finalSub).catch(() => {});
+
+    // If the schem is already published, auto-sync the forum thread starter
+    // so designer edits are immediately visible without manual /publish post.
+    let republishNote = '';
+    if (finalSub.status === 'PUBLISHED' && finalSub.forumThreadId) {
+      const res = await publishOrUpdateSchematicForumPost(interaction.guild, finalSub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+      republishNote = res?.ok
+        ? ` Forum thread updated.`
+        : `\n⚠️ Could not auto-update forum thread: ${res?.reason}`;
+    }
+
+    return safeIReply(interaction, { content: `✅ Basics saved.${republishNote}`, flags: 64 });
   }
 
   // --- PUBLISH SCHEMATIC: import modal submit -> clone existing thread into current ticket ---
@@ -4578,9 +4699,8 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     const sub = await store.getSchematicSubmission(subId).catch(() => null);
     if (!sub) return safeIReply(interaction, { content: 'Submission record missing.', flags: 64 });
 
-    const isOwner = String(interaction.user.id) === String(sub.submitterId);
-    if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
-      return safeIReply(interaction, { content: 'Only the submitter or a schematic manager can edit this submission.', flags: 64 });
+    if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
+      return safeIReply(interaction, { content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 });
     }
 
     const patch = {
@@ -4591,9 +4711,17 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       updatedAt: Date.now(),
     };
     const updated = await store.updateSchematicSubmission(subId, patch);
+    const finalSub = updated || { ...sub, ...patch };
+
     const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
-    if (channel) await postOrUpdateSchematicDraftPreview(channel, updated || { ...sub, ...patch }).catch(() => {});
-    return safeIReply(interaction, { content: '✅ Extras saved.', flags: 64 });
+    if (channel) await postOrUpdateSchematicDraftPreview(channel, finalSub).catch(() => {});
+
+    let republishNote = '';
+    if (finalSub.status === 'PUBLISHED' && finalSub.forumThreadId) {
+      const res = await publishOrUpdateSchematicForumPost(interaction.guild, finalSub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+      republishNote = res?.ok ? ' Forum thread updated.' : `\n⚠️ Could not auto-update forum thread: ${res?.reason}`;
+    }
+    return safeIReply(interaction, { content: `✅ Extras saved.${republishNote}`, flags: 64 });
   }
 
   // --- TICKETS: modal submit -> create ticket channel ---

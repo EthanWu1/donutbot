@@ -1356,6 +1356,11 @@ async function listSchematicSubmissions() {
   await ensureDb();
   return { ...(dataStore().schematicSubmissions || {}) };
 }
+async function findSchematicSubmissionByForumThread(threadId) {
+  await ensureDb();
+  const all = Object.values(dataStore().schematicSubmissions || {});
+  return all.find(s => String(s.forumThreadId || '') === String(threadId)) || null;
+}
 async function getSchematicGuidelinesRef() {
   await ensureDb();
   return dataStore().schematicGuidelinesRef || null;
@@ -1432,7 +1437,7 @@ getSpawnerPrices, setSpawnerPrice, clearSpawnerPrice, getSpawnerPanelRef, setSpa
 getAppClosed, setAppClosed, listAppClosed,
 getTicketPanelRef, setTicketPanelRef,
 getSchematicSubmission, setSchematicSubmission, updateSchematicSubmission, findSchematicSubmissionByTicketChannel,
-listSchematicSubmissions,
+listSchematicSubmissions, findSchematicSubmissionByForumThread,
 getSchematicGuidelinesRef, setSchematicGuidelinesRef,
 addTimedRole, getActiveTimedRole, revokeTimedRole, listTimedRoles, listExpiredTimedRoles,
 };
