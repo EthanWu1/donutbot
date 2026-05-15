@@ -522,6 +522,9 @@ const MEMBER_ROLE_ID = '1483225250698105069';
 const SPAWNER_TICKET_ACCESS_ROLE_ID = '1484300107703648337';
 const STAFF_LIST_CHANNEL_ID = '1484518287596322879';
 const SCHEMATIC_HELPER_ROLE_ID = C.ROLE_SCHEMATIC_HELPER || '1504603126580252873';
+// Additional role that needs view access to Publish Schematic + Farm Help
+// tickets. Same reduced perm set as SCHEMATIC_HELPER_ROLE_ID.
+const SCHEMATIC_VIEWER_ROLE_ID = '1354555895316611176';
 const SPAWNER_PRICES_CHANNEL_ID = C.CHANNEL_SPAWNER_PRICES || '1483225252581343336';
 const SCHEMATIC_FORUM_CHANNEL_ID = C.CHANNEL_SCHEMATIC_FORUM || '1504844039546208386';
 const SCHEMATIC_SUBMISSION_LINK_CHANNEL_ID = C.CHANNEL_SCHEMATIC_SUBMISSION_LINK || '1483225252581343334';
@@ -1397,9 +1400,9 @@ const CATEGORY_EXTRA_VIEWER_ROLES = {
   // dedicated spawner-ticket access role.
   [C.TICKET_CATEGORIES.SPAWNER_BUY]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, _TRIAL_MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
   [C.TICKET_CATEGORIES.SPAWNER_SELL]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, _TRIAL_MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
-  // Farm Help + Publish Schematic — staff + schematic-helper role
-  [C.TICKET_CATEGORIES.FARM_HELP]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID].filter(Boolean),
-  [C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID].filter(Boolean),
+  // Farm Help + Publish Schematic — staff + schematic-helper + schematic-viewer roles
+  [C.TICKET_CATEGORIES.FARM_HELP]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID, SCHEMATIC_VIEWER_ROLE_ID].filter(Boolean),
+  [C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID, SCHEMATIC_VIEWER_ROLE_ID].filter(Boolean),
   // Scam Report — staff only, same access as Support
   [C.TICKET_CATEGORIES.SCAM_REPORT]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE].filter(Boolean),
 };
@@ -1754,9 +1757,10 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
       const role = guild.roles.cache.get(rid);
       if (role) overwrites.push({ id: role, deny: [PermissionsBitField.Flags.ViewChannel] });
     }
-    // Farm Help + Publish Schematic — grant the schematic-helper role view+send
-    // access only. Intentionally without ManageMessages — helpers shouldn't be
-    // able to delete other users' messages.
+    // Farm Help + Publish Schematic — grant the schematic-helper and the
+    // schematic-viewer roles view+send access only. Intentionally without
+    // ManageMessages — helpers/viewers shouldn't be able to delete others'
+    // messages.
     if (['farm_help', 'publish_schematic'].includes(String(buttonKey))) {
       const HELPER_ALLOW = [
         PermissionsBitField.Flags.ViewChannel,
@@ -1765,6 +1769,7 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
         PermissionsBitField.Flags.AttachFiles,
       ];
       overwrites.push({ id: SCHEMATIC_HELPER_ROLE_ID, allow: HELPER_ALLOW });
+      overwrites.push({ id: SCHEMATIC_VIEWER_ROLE_ID, allow: HELPER_ALLOW });
     }
   }
   for (const rid of viewerRoleIds) {
@@ -3333,13 +3338,13 @@ client.once('clientReady', async () => {
                 await ch.permissionOverwrites.delete(rid).catch(() => {});
               }
             }
-            // Add any missing allowed roles. The schematic-helper role gets
-            // a reduced perm set (no ManageMessages); all other roles keep the
-            // legacy staff allow-list.
+            // Add any missing allowed roles. The schematic helper + viewer
+            // roles get a reduced perm set (no ManageMessages); all other
+            // roles keep the legacy staff allow-list.
             for (const rid of cachedAllowedRoles) {
               if (!rolesWithAccess.includes(rid)) {
-                const isSchematicHelper = rid === SCHEMATIC_HELPER_ROLE_ID;
-                const perms = isSchematicHelper
+                const isSchematicSoft = rid === SCHEMATIC_HELPER_ROLE_ID || rid === SCHEMATIC_VIEWER_ROLE_ID;
+                const perms = isSchematicSoft
                   ? { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true }
                   : { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, ManageMessages: true };
                 await ch.permissionOverwrites.create(rid, perms).catch(() => {});
