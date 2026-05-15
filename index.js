@@ -726,8 +726,60 @@ function buildSchematicEmbed(sub, { forPreview = false } = {}) {
 function buildSchematicPreviewComponents(sub) {
   const startRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`publish_edit_basics:${sub.id}`).setLabel('Edit Basics').setStyle(ButtonStyle.Secondary).setEmoji('✏️'),
+    new ButtonBuilder().setCustomId(`publish_edit_extras:${sub.id}`).setLabel('Edit Extras').setStyle(ButtonStyle.Secondary).setEmoji('⚙️'),
   );
   return [startRow];
+}
+
+// Build the basics modal (name, designers, rates, build, how-to-use) prefilled
+// with the submission's current values.
+function buildSchematicBasicsModal(sub) {
+  const modal = new ModalBuilder()
+    .setCustomId(`publish_modal_basics:${sub.id}`)
+    .setTitle('Submit Schematic — Basics');
+  const fields = [
+    { id: 'name',      label: 'Schematic Name',                    style: TextInputStyle.Short,     required: true,  max: 80,   value: sub.name },
+    { id: 'designers', label: 'Designers (one @mention/line)',     style: TextInputStyle.Paragraph, required: true,  max: 500,  value: sub.designers },
+    { id: 'rates',     label: 'Rates (one per line, optional)',    style: TextInputStyle.Paragraph, required: false, max: 800,  value: sub.rates },
+    { id: 'build',     label: 'Build instructions (optional)',     style: TextInputStyle.Paragraph, required: false, max: 1500, value: sub.build },
+    { id: 'howto',     label: 'How to use',                        style: TextInputStyle.Paragraph, required: true,  max: 1500, value: sub.howto },
+  ];
+  for (const f of fields) {
+    const input = new TextInputBuilder()
+      .setCustomId(f.id)
+      .setLabel(f.label)
+      .setStyle(f.style)
+      .setRequired(f.required)
+      .setMaxLength(f.max);
+    if (f.value && String(f.value).trim()) input.setValue(String(f.value).slice(0, f.max));
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+  }
+  return modal;
+}
+
+// Build the extras modal (credits, consumes, positives, negatives) prefilled
+// with the submission's current values. All four fields are optional.
+function buildSchematicExtrasModal(sub) {
+  const modal = new ModalBuilder()
+    .setCustomId(`publish_modal_extras:${sub.id}`)
+    .setTitle('Submit Schematic — Extras');
+  const fields = [
+    { id: 'credits',   label: 'Credits (Name: what they did)',   style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.credits },
+    { id: 'consumes',  label: 'Consumes (one per line)',         style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.consumes },
+    { id: 'positives', label: 'Positives (one per line)',        style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.positives },
+    { id: 'negatives', label: 'Negatives (one per line)',        style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.negatives },
+  ];
+  for (const f of fields) {
+    const input = new TextInputBuilder()
+      .setCustomId(f.id)
+      .setLabel(f.label)
+      .setStyle(f.style)
+      .setRequired(f.required)
+      .setMaxLength(f.max);
+    if (f.value && String(f.value).trim()) input.setValue(String(f.value).slice(0, f.max));
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+  }
+  return modal;
 }
 
 async function postOrUpdateSchematicDraftPreview(channel, sub) {
@@ -3968,36 +4020,21 @@ if (interaction.isStringSelectMenu() && interaction.customId.startsWith('spawner
   return;
 }
 
-// --- PUBLISH SCHEMATIC: Start / Edit basics button -> Modal 1 ---
-if (interaction.isButton() && (interaction.customId.startsWith('publish_start:') || interaction.customId.startsWith('publish_edit_basics:'))) {
+// --- PUBLISH SCHEMATIC: Start / Edit basics / Edit extras buttons -> modals ---
+if (interaction.isButton() && (
+  interaction.customId.startsWith('publish_start:') ||
+  interaction.customId.startsWith('publish_edit_basics:') ||
+  interaction.customId.startsWith('publish_edit_extras:')
+)) {
   const subId = interaction.customId.split(':')[1];
   const sub = await store.getSchematicSubmission(subId).catch(() => null);
   if (!sub) return interaction.reply({ content: 'Submission record missing — open a fresh Publish Schematic ticket.', flags: 64 }).catch(() => {});
-  // Only the submitter and schem managers can fill the modal.
   const isOwner = String(interaction.user.id) === String(sub.submitterId);
   if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
     return interaction.reply({ content: 'Only the submitter or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
   }
-  const modal = new ModalBuilder()
-    .setCustomId(`publish_modal_basics:${sub.id}`)
-    .setTitle('Submit Schematic — Basics');
-  const fields = [
-    { id: 'name',      label: 'Schematic Name',                style: TextInputStyle.Short,     required: true,  max: 80,   value: sub.name },
-    { id: 'designers', label: 'Designers (one @mention/line)', style: TextInputStyle.Paragraph, required: true,  max: 500,  value: sub.designers },
-    { id: 'rates',     label: 'Rates (one per line, optional)',style: TextInputStyle.Paragraph, required: false, max: 800,  value: sub.rates },
-    { id: 'build',     label: 'Build instructions (optional)', style: TextInputStyle.Paragraph, required: false, max: 1500, value: sub.build },
-    { id: 'howto',     label: 'How to use',                    style: TextInputStyle.Paragraph, required: true,  max: 1500, value: sub.howto },
-  ];
-  for (const f of fields) {
-    const input = new TextInputBuilder()
-      .setCustomId(f.id)
-      .setLabel(f.label)
-      .setStyle(f.style)
-      .setRequired(f.required)
-      .setMaxLength(f.max);
-    if (f.value && String(f.value).trim()) input.setValue(String(f.value).slice(0, f.max));
-    modal.addComponents(new ActionRowBuilder().addComponents(input));
-  }
+  const wantExtras = interaction.customId.startsWith('publish_edit_extras:');
+  const modal = wantExtras ? buildSchematicExtrasModal(sub) : buildSchematicBasicsModal(sub);
   await interaction.showModal(modal).catch(() => {});
   return;
 }
@@ -4261,6 +4298,31 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
     if (channel) await postOrUpdateSchematicDraftPreview(channel, updated || { ...sub, ...patch }).catch(() => {});
     return safeIReply(interaction, { content: '✅ Basics saved. Drop your `.litematic` to render, then a manager will `/publish post`.', flags: 64 });
+  }
+
+  // --- PUBLISH SCHEMATIC: modal 2 submit -> save extras + refresh preview ---
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('publish_modal_extras:')) {
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
+    const subId = interaction.customId.split(':')[1];
+    const sub = await store.getSchematicSubmission(subId).catch(() => null);
+    if (!sub) return safeIReply(interaction, { content: 'Submission record missing.', flags: 64 });
+
+    const isOwner = String(interaction.user.id) === String(sub.submitterId);
+    if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
+      return safeIReply(interaction, { content: 'Only the submitter or a schematic manager can edit this submission.', flags: 64 });
+    }
+
+    const patch = {
+      credits:   (interaction.fields.getTextInputValue('credits')   || '').trim(),
+      consumes:  (interaction.fields.getTextInputValue('consumes')  || '').trim(),
+      positives: (interaction.fields.getTextInputValue('positives') || '').trim(),
+      negatives: (interaction.fields.getTextInputValue('negatives') || '').trim(),
+      updatedAt: Date.now(),
+    };
+    const updated = await store.updateSchematicSubmission(subId, patch);
+    const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
+    if (channel) await postOrUpdateSchematicDraftPreview(channel, updated || { ...sub, ...patch }).catch(() => {});
+    return safeIReply(interaction, { content: '✅ Extras saved.', flags: 64 });
   }
 
   // --- TICKETS: modal submit -> create ticket channel ---
@@ -7310,27 +7372,37 @@ ${E_TIME} Created ${created}`)
 
     // --- PUBLISH (schematic submission) ---
     if (commandName === 'publish') {
-      await interaction.deferReply({ flags: 64 }).catch(() => {});
+      // IMPORTANT: do NOT defer up front — basics/extras subcommands need to
+      // show modals, and interaction.showModal() must be the FIRST response.
+      // The other subcommands defer themselves below.
       const channel = interaction.channel;
       if (!channel || !isPublishSchematicTicketChannel(channel)) {
-        return safeIReply(interaction, { content: 'Run this inside a Publish Schematic ticket.', flags: 64 });
+        return interaction.reply({ content: 'Run this inside a Publish Schematic ticket.', flags: 64 }).catch(() => {});
       }
       const sub = await store.findSchematicSubmissionByTicketChannel(channel.id).catch(() => null);
       if (!sub) {
-        return safeIReply(interaction, { content: 'No submission record for this ticket. Click **Start Submission** first.', flags: 64 });
+        return interaction.reply({ content: 'No submission record for this ticket. Click **Start Submission** first.', flags: 64 }).catch(() => {});
       }
       const isOwner = String(interaction.user.id) === String(sub.submitterId);
       const isManager = canManageSchematicSubmission(interaction.member);
       if (!isOwner && !isManager) {
-        return safeIReply(interaction, { content: 'Only the submitter or a schematic manager can use /publish here.', flags: 64 });
+        return interaction.reply({ content: 'Only the submitter or a schematic manager can use /publish here.', flags: 64 }).catch(() => {});
       }
       const sub_action = options.getSubcommand();
 
       if (sub_action === 'basics') {
-        // Build modal directly here — interaction.showModal requires the original
-        // interaction object, not a deferred one. We undo the defer by following up.
-        return safeIReply(interaction, { content: 'Click the **Edit Basics** button on the pinned draft preview to reopen the form.', flags: 64 });
+        await interaction.showModal(buildSchematicBasicsModal(sub)).catch(() => {});
+        return;
       }
+
+      if (sub_action === 'extras') {
+        await interaction.showModal(buildSchematicExtrasModal(sub)).catch(() => {});
+        return;
+      }
+
+      // Subcommands below this point are async work — defer now so the 3s
+      // window doesn't expire while we render or POST to the forum API.
+      await interaction.deferReply({ flags: 64 }).catch(() => {});
 
       if (sub_action === 'render') {
         if (!isManager) {
