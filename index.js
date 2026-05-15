@@ -6901,10 +6901,21 @@ ${E_TIME} Created ${created}`)
     // --- SPAWNER PRICES MANAGEMENT ---
     if (commandName === 'spawner') {
       await interaction.deferReply({ flags: 64 }).catch(() => {});
-      // Allow-list — only this single Discord user ID may run /spawner.
+      // Allow-list: the owner user id + anyone with Admin or Manager role
+      // (or Discord Administrator perm).
       const SPAWNER_COMMAND_OWNER_ID = '508574921010577409';
-      if (interaction.user.id !== SPAWNER_COMMAND_OWNER_ID) {
-        return safeIReply(interaction, { content: 'You are not authorized to use this command.', flags: 64 });
+      const memberRoles = interaction.member?.roles?.cache;
+      const hasAdminOrManagerRole = !!(memberRoles && (
+        (C.ROLE_ADMIN   && memberRoles.has(C.ROLE_ADMIN))   ||
+        (C.ROLE_MANAGER && memberRoles.has(C.ROLE_MANAGER))
+      ));
+      const hasDiscordAdmin = interaction.member?.permissions?.has?.(PermissionsBitField.Flags.Administrator);
+      if (
+        interaction.user.id !== SPAWNER_COMMAND_OWNER_ID &&
+        !hasAdminOrManagerRole &&
+        !hasDiscordAdmin
+      ) {
+        return safeIReply(interaction, { content: 'Admin or Manager only.', flags: 64 });
       }
       const sub = options.getSubcommand();
 
