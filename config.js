@@ -73,6 +73,13 @@ module.exports = {
   // Channel that receives staff role-change embeds
   CHANNEL_STAFF_CHANGE_LOG: '1483225252292067484',
 
+  // Forum channel where published schematics live as threads.
+  CHANNEL_SCHEMATIC_FORUM: '1504844039546208386',
+
+  // Channel that holds the "Publish Schematic" ticket button — referenced in
+  // the pinned guidelines post inside the schematic forum.
+  CHANNEL_SCHEMATIC_SUBMISSION_LINK: '1483225252581343334',
+
   // Local main intentionally clears the invite allow-list (was the partnership
   // category before). Keep it empty unless re-introducing exceptions.
   INVITE_ALLOWED_CATEGORIES: [],

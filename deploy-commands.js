@@ -340,6 +340,14 @@ new SlashCommandBuilder()
     ))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
+// --- PUBLISH SCHEMATIC ---
+new SlashCommandBuilder()
+  .setName('publish')
+  .setDescription('Manage a schematic submission in this Publish Schematic ticket')
+  .addSubcommand(s => s.setName('basics').setDescription('Re-open the basics modal prefilled with current values'))
+  .addSubcommand(s => s.setName('render').setDescription('Force a fresh render from the latest .litematic'))
+  .addSubcommand(s => s.setName('post').setDescription('Publish this submission to the schematic forum')),
+
 // --- KELP FARM CATALOG ---
 new SlashCommandBuilder()
   .setName('kelp')

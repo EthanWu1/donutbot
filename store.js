@@ -1324,6 +1324,45 @@ async function setTicketPanelRef(panelId, ref) {
   return ref;
 }
 
+// ─── SCHEMATIC SUBMISSIONS ────────────────────────────────────────────────────
+// One submission per ticket; record carries draft state and (once published)
+// the forum thread reference.
+async function getSchematicSubmission(id) {
+  await ensureDb();
+  return dataStore().schematicSubmissions?.[id] || null;
+}
+async function setSchematicSubmission(id, data) {
+  await ensureDb();
+  dataStore().schematicSubmissions ||= {};
+  dataStore().schematicSubmissions[id] = data;
+  scheduleDbWrite();
+  return data;
+}
+async function updateSchematicSubmission(id, patch) {
+  await ensureDb();
+  dataStore().schematicSubmissions ||= {};
+  const cur = dataStore().schematicSubmissions[id];
+  if (!cur) return null;
+  Object.assign(cur, patch || {});
+  scheduleDbWrite();
+  return cur;
+}
+async function findSchematicSubmissionByTicketChannel(channelId) {
+  await ensureDb();
+  const all = Object.values(dataStore().schematicSubmissions || {});
+  return all.find(s => String(s.ticketChannelId || '') === String(channelId)) || null;
+}
+async function getSchematicGuidelinesRef() {
+  await ensureDb();
+  return dataStore().schematicGuidelinesRef || null;
+}
+async function setSchematicGuidelinesRef(ref) {
+  await ensureDb();
+  dataStore().schematicGuidelinesRef = ref;
+  scheduleDbWrite();
+  return ref;
+}
+
 // ─── BUILD QUEUE ──────────────────────────────────────────────────────────────
 async function setBuildRequest(id, data) {
   await ensureDb();
@@ -1388,5 +1427,7 @@ setBuildRequest, getBuildRequest, listBuildRequests, deleteBuildRequest,
 getSpawnerPrices, setSpawnerPrice, clearSpawnerPrice, getSpawnerPanelRef, setSpawnerPanelRef, nextSpawnerTicketNumber,
 getAppClosed, setAppClosed, listAppClosed,
 getTicketPanelRef, setTicketPanelRef,
+getSchematicSubmission, setSchematicSubmission, updateSchematicSubmission, findSchematicSubmissionByTicketChannel,
+getSchematicGuidelinesRef, setSchematicGuidelinesRef,
 addTimedRole, getActiveTimedRole, revokeTimedRole, listTimedRoles, listExpiredTimedRoles,
 };

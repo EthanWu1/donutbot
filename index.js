@@ -523,6 +523,9 @@ const SPAWNER_TICKET_ACCESS_ROLE_ID = '1484300107703648337';
 const STAFF_LIST_CHANNEL_ID = '1484518287596322879';
 const SCHEMATIC_HELPER_ROLE_ID = C.ROLE_SCHEMATIC_HELPER || '1504603126580252873';
 const SPAWNER_PRICES_CHANNEL_ID = C.CHANNEL_SPAWNER_PRICES || '1483225252581343336';
+const SCHEMATIC_FORUM_CHANNEL_ID = C.CHANNEL_SCHEMATIC_FORUM || '1504844039546208386';
+const SCHEMATIC_SUBMISSION_LINK_CHANNEL_ID = C.CHANNEL_SCHEMATIC_SUBMISSION_LINK || '1483225252581343334';
+const SCHEMATIC_FORUM_AUTO_ARCHIVE_MIN = 10080; // 7 days — Discord's longest
 const STAFF_CHANGE_LOG_CHANNEL_ID = C.CHANNEL_STAFF_CHANGE_LOG || '1483225252292067484';
 
 // Spawner type registry — used by the spawner-prices panel, /spawner command,
@@ -645,6 +648,224 @@ async function refreshSpawnerPricesPanel(guild) {
   }
   return msg ? { channel, message: msg } : null;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FEATURE BLOCK: SCHEMATIC SUBMISSIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SCHEMATIC_MAX_BODY_CHARS = 2000;
+
+// Split a multi-line free-form input into bullet points, ignoring blank lines.
+function bulletize(text) {
+  if (!text) return [];
+  return String(text)
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+}
+
+// Parse a designers paragraph into one Discord mention per line. Accepts
+// `<@id>`, `<@!id>`, plain numeric ID, or raw text. Plain text falls through
+// unchanged so submitters can write IGNs if they want.
+function parseDesignerLines(text) {
+  const lines = bulletize(text);
+  return lines.map(line => {
+    const idMatch = line.match(/^<@!?(\d{16,20})>$/) || line.match(/^(\d{16,20})$/);
+    if (idMatch) return `<@${idMatch[1]}>`;
+    return line;
+  });
+}
+
+function buildSchematicBody(sub) {
+  const sections = [];
+  const designers = parseDesignerLines(sub.designers || '');
+  if (designers.length) sections.push(`**Designers**\n${designers.map(d => `• ${d}`).join('\n')}`);
+
+  if (sub.credits && bulletize(sub.credits).length) {
+    sections.push(`**Credits**\n${bulletize(sub.credits).map(c => `• ${c}`).join('\n')}`);
+  }
+  if (sub.rates && bulletize(sub.rates).length) {
+    sections.push(`**Rates**\n${bulletize(sub.rates).map(r => `• ${r}`).join('\n')}`);
+  }
+  if (sub.consumes && bulletize(sub.consumes).length) {
+    sections.push(`**Consumes**\n${bulletize(sub.consumes).map(c => `• ${c}`).join('\n')}`);
+  }
+  if (sub.positives && bulletize(sub.positives).length) {
+    sections.push(`**Positives**\n${bulletize(sub.positives).map(p => `• ${p}`).join('\n')}`);
+  }
+  if (sub.negatives && bulletize(sub.negatives).length) {
+    sections.push(`**Negatives**\n${bulletize(sub.negatives).map(n => `• ${n}`).join('\n')}`);
+  }
+
+  const instructions = [];
+  if (sub.build && String(sub.build).trim()) instructions.push(`**Build**\n${String(sub.build).trim()}`);
+  if (sub.howto && String(sub.howto).trim()) instructions.push(`**How to use**\n${String(sub.howto).trim()}`);
+  if (instructions.length) sections.push(`**Instructions**\n\n${instructions.join('\n\n')}`);
+
+  let body = sections.join('\n\n');
+  if (body.length > SCHEMATIC_MAX_BODY_CHARS) {
+    body = body.slice(0, SCHEMATIC_MAX_BODY_CHARS - 1).trimEnd() + '…';
+  }
+  return body;
+}
+
+function buildSchematicEmbed(sub, { forPreview = false } = {}) {
+  const eb = new EmbedBuilder()
+    .setColor(0x08a4a7)
+    .setTitle(sub.name || 'Untitled Schematic');
+  const body = buildSchematicBody(sub);
+  if (body) eb.setDescription(body);
+  if (sub.renderUrl) eb.setImage(sub.renderUrl);
+  if (forPreview) {
+    const charCount = body.length;
+    eb.setFooter({ text: `Draft • ${charCount}/${SCHEMATIC_MAX_BODY_CHARS} chars${sub.renderUrl ? ' • render ready' : ' • awaiting .litematic upload'}` });
+  }
+  return eb;
+}
+
+function buildSchematicPreviewComponents(sub) {
+  const startRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`publish_edit_basics:${sub.id}`).setLabel('Edit Basics').setStyle(ButtonStyle.Secondary).setEmoji('✏️'),
+  );
+  return [startRow];
+}
+
+async function postOrUpdateSchematicDraftPreview(channel, sub) {
+  const embed = buildSchematicEmbed(sub, { forPreview: true });
+  const components = buildSchematicPreviewComponents(sub);
+  if (sub.draftMessageId) {
+    const existing = await channel.messages.fetch(sub.draftMessageId).catch(() => null);
+    if (existing) {
+      await existing.edit({ embeds: [embed], components }).catch(() => {});
+      return existing;
+    }
+  }
+  const msg = await channel.send({ embeds: [embed], components }).catch(() => null);
+  if (msg) {
+    await store.updateSchematicSubmission(sub.id, { draftMessageId: msg.id }).catch(() => {});
+    try { await msg.pin(); } catch (e) { console.error('[schematic draft] pin error:', e?.message); }
+  }
+  return msg;
+}
+
+// Find the most-recent .litematic attachment in a ticket channel (within the
+// last 50 messages). Returns { url, name, message } or null.
+async function findLatestLitematicAttachment(channel) {
+  const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+  if (!recent) return null;
+  for (const msg of recent.values()) {
+    for (const a of msg.attachments.values()) {
+      if (/\.litematic$/i.test(a.name || a.url || '')) {
+        return { url: a.url, name: a.name || 'schematic.litematic', message: msg };
+      }
+    }
+  }
+  return null;
+}
+
+// Download a URL into a Buffer (used for re-attaching the .litematic to the
+// forum post and for piping into the renderer).
+async function downloadToBuffer(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`download ${url}: ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+// Run the existing litematic renderer on a .litematic buffer; returns the PNG
+// buffer. Throws on failure.
+async function renderLitematicToPng(buffer) {
+  const renderer = getLitematicRender();
+  const { png } = await renderer.renderLitematic(buffer, {});
+  return png;
+}
+
+// Re-render the .litematic uploaded in this ticket, attach the PNG to the
+// draft preview, and persist its URL on the submission. Returns the updated
+// submission record or null on failure.
+async function regenerateSchematicRender(channel, sub) {
+  const found = await findLatestLitematicAttachment(channel);
+  if (!found) return { ok: false, reason: 'No .litematic file found in this ticket. Upload one first.' };
+  try {
+    const litematicBuf = await downloadToBuffer(found.url);
+    const renderBuf = await renderLitematicToPng(litematicBuf);
+    // Upload render as a fresh message attachment so we get a stable Discord CDN URL.
+    const renderMsg = await channel.send({
+      files: [new AttachmentBuilder(renderBuf, { name: 'render.png' })],
+    }).catch(() => null);
+    const renderUrl = renderMsg?.attachments?.first()?.url || null;
+    const updated = await store.updateSchematicSubmission(sub.id, {
+      renderUrl,
+      renderMessageId: renderMsg?.id || null,
+      litematicUrl: found.url,
+      litematicName: found.name,
+      updatedAt: Date.now(),
+    });
+    await postOrUpdateSchematicDraftPreview(channel, updated || sub).catch(() => {});
+    return { ok: true, submission: updated || sub };
+  } catch (e) {
+    return { ok: false, reason: `Render failed: ${e?.message || e}` };
+  }
+}
+
+// Returns true if the channel is in the Publish Schematic ticket category.
+function isPublishSchematicTicketChannel(channel) {
+  return channel?.parentId === C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC;
+}
+
+function canManageSchematicSubmission(member) {
+  if (!member) return false;
+  if (member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) return true;
+  if (member.permissions?.has?.(PermissionsBitField.Flags.ManageGuild)) return true;
+  const roles = member.roles?.cache;
+  if (!roles) return false;
+  return (
+    roles.has(SCHEMATIC_HELPER_ROLE_ID) ||
+    (C.ROLE_ADMIN && roles.has(C.ROLE_ADMIN)) ||
+    (C.ROLE_MANAGER && roles.has(C.ROLE_MANAGER))
+  );
+}
+
+async function ensureSchematicGuidelinesPost(guild) {
+  try {
+    const forum = await guild.channels.fetch(SCHEMATIC_FORUM_CHANNEL_ID).catch(() => null);
+    if (!forum || forum.type !== ChannelType.GuildForum) return;
+    const ref = await store.getSchematicGuidelinesRef().catch(() => null);
+    if (ref?.guildId === guild.id && ref?.threadId) {
+      const existing = await forum.threads.fetch(ref.threadId).catch(() => null);
+      if (existing) return; // already created
+    }
+    const thread = await forum.threads.create({
+      name: '📌 How to submit a schematic',
+      autoArchiveDuration: SCHEMATIC_FORUM_AUTO_ARCHIVE_MIN,
+      message: {
+        embeds: [new EmbedBuilder()
+          .setColor(0x08a4a7)
+          .setTitle('How to submit a schematic')
+          .setDescription([
+            `Open a ticket in <#${SCHEMATIC_SUBMISSION_LINK_CHANNEL_ID}> using the **Publish Schematic** button.`,
+            '',
+            'You will be asked for:',
+            '• Schematic name',
+            '• Designers',
+            '• Build instructions',
+            '• How to use it',
+            '• Rates (optional)',
+            '',
+            'Drop your `.litematic` file in the ticket and the bot will render an isoview automatically.',
+            '',
+            'A schematic manager will review and post the finalized version here.',
+          ].join('\n'))],
+      },
+    }).catch(e => { console.error('[schematic guidelines] create error:', e?.message); return null; });
+    if (!thread) return;
+    try { await thread.pin(); } catch (e) { console.error('[schematic guidelines] pin error:', e?.message); }
+    await store.setSchematicGuidelinesRef({ guildId: guild.id, threadId: thread.id }).catch(() => {});
+  } catch (e) {
+    console.error('[schematic guidelines] ensure error:', e?.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 
 function canAccessTicketChannel(channel, member) {
   if (!channel || !member) return false;
@@ -2585,6 +2806,7 @@ client.once('clientReady', async () => {
   // Seed static autonick defaults into store so /autonick list shows them
   for (const guild of client.guilds.cache.values()) {
     await store.seedAutoNickDefaults(guild.id, STATIC_AUTONICK_ENTRIES).catch(() => {});
+    await ensureSchematicGuidelinesPost(guild).catch(() => {});
   }
 
   checkGiveaways().catch(() => {}); // run immediately on startup to catch missed endings
@@ -3110,7 +3332,28 @@ async function updateVouchboard(guild) {
 }
 
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return; 
+  if (message.author.bot) return;
+
+  // --- PUBLISH SCHEMATIC: auto-render uploaded .litematic ---
+  try {
+    if (message.guildId && isPublishSchematicTicketChannel(message.channel) && message.attachments?.size) {
+      const litematicAttachment = [...message.attachments.values()].find(a => /\.litematic$/i.test(a.name || a.url || ''));
+      if (litematicAttachment) {
+        const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
+        if (sub) {
+          await message.channel.send({
+            embeds: [new EmbedBuilder().setColor(0x08a4a7).setDescription(`🔧 Rendering \`${litematicAttachment.name || 'schematic.litematic'}\` — this may take a few seconds.`)]
+          }).catch(() => {});
+          const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+          if (!result?.ok) {
+            await message.channel.send({
+              embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Render failed').setDescription(result?.reason || 'Unknown error.')]
+            }).catch(() => {});
+          }
+        }
+      }
+    }
+  } catch (e) { console.error('[publish_schematic] auto-render error:', e?.message); }
 
   // --- ACCEPTED STAFF/BUILDER INFO FLOW ---
   if (!message.guild && acceptedStaffInfoSessions.has(message.author.id)) {
@@ -3725,6 +3968,40 @@ if (interaction.isStringSelectMenu() && interaction.customId.startsWith('spawner
   return;
 }
 
+// --- PUBLISH SCHEMATIC: Start / Edit basics button -> Modal 1 ---
+if (interaction.isButton() && (interaction.customId.startsWith('publish_start:') || interaction.customId.startsWith('publish_edit_basics:'))) {
+  const subId = interaction.customId.split(':')[1];
+  const sub = await store.getSchematicSubmission(subId).catch(() => null);
+  if (!sub) return interaction.reply({ content: 'Submission record missing — open a fresh Publish Schematic ticket.', flags: 64 }).catch(() => {});
+  // Only the submitter and schem managers can fill the modal.
+  const isOwner = String(interaction.user.id) === String(sub.submitterId);
+  if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
+    return interaction.reply({ content: 'Only the submitter or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(`publish_modal_basics:${sub.id}`)
+    .setTitle('Submit Schematic — Basics');
+  const fields = [
+    { id: 'name',      label: 'Schematic Name',                style: TextInputStyle.Short,     required: true,  max: 80,   value: sub.name },
+    { id: 'designers', label: 'Designers (one @mention/line)', style: TextInputStyle.Paragraph, required: true,  max: 500,  value: sub.designers },
+    { id: 'rates',     label: 'Rates (one per line, optional)',style: TextInputStyle.Paragraph, required: false, max: 800,  value: sub.rates },
+    { id: 'build',     label: 'Build instructions',            style: TextInputStyle.Paragraph, required: true,  max: 1500, value: sub.build },
+    { id: 'howto',     label: 'How to use',                    style: TextInputStyle.Paragraph, required: true,  max: 1500, value: sub.howto },
+  ];
+  for (const f of fields) {
+    const input = new TextInputBuilder()
+      .setCustomId(f.id)
+      .setLabel(f.label)
+      .setStyle(f.style)
+      .setRequired(f.required)
+      .setMaxLength(f.max);
+    if (f.value && String(f.value).trim()) input.setValue(String(f.value).slice(0, f.max));
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+  }
+  await interaction.showModal(modal).catch(() => {});
+  return;
+}
+
 // --- TICKETS: panel button -> show modal (FAST) ---
 if (interaction.isButton() && interaction.customId.startsWith('tk_open:')) {
   const parts = interaction.customId.split(':');
@@ -3960,6 +4237,32 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     return safeIReply(interaction, { content: visible ? `✅ Ticket created: <#${channel.id}>` : '✅ Ticket created.', flags: 64 });
   }
 
+  // --- PUBLISH SCHEMATIC: modal 1 submit -> save basics + refresh preview ---
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('publish_modal_basics:')) {
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
+    const subId = interaction.customId.split(':')[1];
+    const sub = await store.getSchematicSubmission(subId).catch(() => null);
+    if (!sub) return safeIReply(interaction, { content: 'Submission record missing.', flags: 64 });
+
+    const isOwner = String(interaction.user.id) === String(sub.submitterId);
+    if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
+      return safeIReply(interaction, { content: 'Only the submitter or a schematic manager can edit this submission.', flags: 64 });
+    }
+
+    const patch = {
+      name:      (interaction.fields.getTextInputValue('name')      || '').trim().slice(0, 256),
+      designers: (interaction.fields.getTextInputValue('designers') || '').trim(),
+      rates:     (interaction.fields.getTextInputValue('rates')     || '').trim(),
+      build:     (interaction.fields.getTextInputValue('build')     || '').trim(),
+      howto:     (interaction.fields.getTextInputValue('howto')     || '').trim(),
+      updatedAt: Date.now(),
+    };
+    const updated = await store.updateSchematicSubmission(subId, patch);
+    const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
+    if (channel) await postOrUpdateSchematicDraftPreview(channel, updated || { ...sub, ...patch }).catch(() => {});
+    return safeIReply(interaction, { content: '✅ Basics saved. Drop your `.litematic` to render, then a manager will `/publish post`.', flags: 64 });
+  }
+
   // --- TICKETS: modal submit -> create ticket channel ---
   if (interaction.isModalSubmit() && interaction.customId.startsWith("tk_modal:")) {
     await interaction.deferReply({ flags: 64 });
@@ -3986,7 +4289,63 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       answers[q.id] = v;
     }
     try {
-      const ch = await createTicketChannel({ interaction, panelId, buttonKey, btnCfg, answers });
+      const isPublishSchem = buttonKey === 'publish_schematic';
+      const ch = await createTicketChannel({
+        interaction, panelId, buttonKey, btnCfg, answers,
+        // For schematic tickets, the draft preview embed is the pinned anchor;
+        // skip pinning the welcome+controls message.
+        skipPinControl: isPublishSchem,
+      });
+
+      // Publish-schematic tickets get an extra welcome message inviting the
+      // user to start the submission flow.
+      if (isPublishSchem && ch) {
+        try {
+          const subId = ch.id; // 1-to-1 mapping: submission id == ticket channel id
+          await store.setSchematicSubmission(subId, {
+            id: subId,
+            ticketChannelId: ch.id,
+            guildId: ch.guildId,
+            submitterId: interaction.user.id,
+            status: 'DRAFT',
+            name: null,
+            designers: null,
+            credits: null,
+            rates: null,
+            consumes: null,
+            positives: null,
+            negatives: null,
+            build: null,
+            howto: null,
+            litematicUrl: null,
+            litematicName: null,
+            renderUrl: null,
+            renderMessageId: null,
+            draftMessageId: null,
+            forumThreadId: null,
+            forumStarterMessageId: null,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+          const startEmbed = new EmbedBuilder()
+            .setColor(0x08a4a7)
+            .setTitle('Ready to submit your schematic?')
+            .setDescription([
+              'Click **Start Submission** to fill in the basics (name, designers, rates, build instructions, how to use).',
+              '',
+              'Then drop your `.litematic` file in this channel — the bot will render it automatically.',
+              '',
+              'A schematic manager will review and publish your post to the forum.',
+            ].join('\n'));
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`publish_start:${subId}`).setLabel('Start Submission').setStyle(ButtonStyle.Primary).setEmoji('📦'),
+          );
+          await ch.send({ embeds: [startEmbed], components: [row] }).catch(() => {});
+        } catch (e) {
+          console.error('[publish_schematic] welcome error:', e?.message);
+        }
+      }
+
       const visible = !!(ch && ch.permissionsFor?.(interaction.user)?.has?.(PermissionsBitField.Flags.ViewChannel));
       return safeIReply(interaction, { content: visible && ch ? `✅ Ticket created: <#${ch.id}>` : '✅ Ticket created.', flags: 64 });
     } catch (e) {
@@ -6946,6 +7305,112 @@ ${E_TIME} Created ${created}`)
         await store.clearSpawnerPrice(type.key, action).catch(() => {});
         await refreshSpawnerPricesPanel(interaction.guild).catch(() => {});
         return interaction.editReply(`✅ Cleared **${type.label}** ${action.toUpperCase()} price.`);
+      }
+    }
+
+    // --- PUBLISH (schematic submission) ---
+    if (commandName === 'publish') {
+      await interaction.deferReply({ flags: 64 }).catch(() => {});
+      const channel = interaction.channel;
+      if (!channel || !isPublishSchematicTicketChannel(channel)) {
+        return safeIReply(interaction, { content: 'Run this inside a Publish Schematic ticket.', flags: 64 });
+      }
+      const sub = await store.findSchematicSubmissionByTicketChannel(channel.id).catch(() => null);
+      if (!sub) {
+        return safeIReply(interaction, { content: 'No submission record for this ticket. Click **Start Submission** first.', flags: 64 });
+      }
+      const isOwner = String(interaction.user.id) === String(sub.submitterId);
+      const isManager = canManageSchematicSubmission(interaction.member);
+      if (!isOwner && !isManager) {
+        return safeIReply(interaction, { content: 'Only the submitter or a schematic manager can use /publish here.', flags: 64 });
+      }
+      const sub_action = options.getSubcommand();
+
+      if (sub_action === 'basics') {
+        // Build modal directly here — interaction.showModal requires the original
+        // interaction object, not a deferred one. We undo the defer by following up.
+        return safeIReply(interaction, { content: 'Click the **Edit Basics** button on the pinned draft preview to reopen the form.', flags: 64 });
+      }
+
+      if (sub_action === 'render') {
+        if (!isManager) {
+          return safeIReply(interaction, { content: 'Schematic manager only.', flags: 64 });
+        }
+        const result = await regenerateSchematicRender(channel, sub);
+        if (!result.ok) return safeIReply(interaction, { content: `❌ ${result.reason}`, flags: 64 });
+        return safeIReply(interaction, { content: '✅ Re-rendered.', flags: 64 });
+      }
+
+      if (sub_action === 'post') {
+        if (!isManager) {
+          return safeIReply(interaction, { content: 'Schematic manager only.', flags: 64 });
+        }
+        // Required-field gate
+        const missing = [];
+        if (!sub.name)       missing.push('name');
+        if (!sub.designers || !parseDesignerLines(sub.designers).length) missing.push('designers');
+        if (!sub.build)      missing.push('build');
+        if (!sub.howto)      missing.push('how-to-use');
+        if (!sub.renderUrl)  missing.push('render (upload a .litematic)');
+        if (!sub.litematicUrl) missing.push('.litematic file');
+        if (missing.length) {
+          return safeIReply(interaction, { content: `❌ Cannot publish — missing: ${missing.join(', ')}.`, flags: 64 });
+        }
+
+        const forum = await interaction.guild.channels.fetch(SCHEMATIC_FORUM_CHANNEL_ID).catch(() => null);
+        if (!forum || forum.type !== ChannelType.GuildForum) {
+          return safeIReply(interaction, { content: `❌ Schematic forum <#${SCHEMATIC_FORUM_CHANNEL_ID}> is unreachable or not a forum channel.`, flags: 64 });
+        }
+
+        // Fetch the actual file bytes so the forum post owns its own copies
+        // (Discord CDN URLs from the original ticket can expire on attachment
+        // refresh, especially if the ticket is later closed).
+        let renderBuf = null;
+        let litematicBuf = null;
+        try {
+          renderBuf    = await downloadToBuffer(sub.renderUrl);
+          litematicBuf = await downloadToBuffer(sub.litematicUrl);
+        } catch (e) {
+          return safeIReply(interaction, { content: `❌ Could not fetch source files for the post: ${e?.message || e}`, flags: 64 });
+        }
+
+        const embed = buildSchematicEmbed(sub, { forPreview: false });
+        embed.setImage('attachment://render.png');
+
+        let thread;
+        try {
+          thread = await forum.threads.create({
+            name: sub.name.slice(0, 100),
+            autoArchiveDuration: SCHEMATIC_FORUM_AUTO_ARCHIVE_MIN,
+            message: {
+              embeds: [embed],
+              files: [
+                new AttachmentBuilder(renderBuf, { name: 'render.png' }),
+                new AttachmentBuilder(litematicBuf, { name: sub.litematicName || `${sub.id}.litematic` }),
+              ],
+            },
+          });
+        } catch (e) {
+          console.error('[publish post] forum create error:', e);
+          return safeIReply(interaction, { content: `❌ Forum post failed: ${e?.message || e}`, flags: 64 });
+        }
+
+        const starter = await thread.fetchStarterMessage().catch(() => null);
+        await store.updateSchematicSubmission(sub.id, {
+          status: 'PUBLISHED',
+          forumThreadId: thread.id,
+          forumStarterMessageId: starter?.id || null,
+          publishedAt: Date.now(),
+        }).catch(() => {});
+
+        await channel.send({
+          embeds: [new EmbedBuilder()
+            .setColor(0x08a4a7)
+            .setTitle('Published')
+            .setDescription(`This schematic has been published in <#${thread.id}>.`)],
+        }).catch(() => {});
+
+        return safeIReply(interaction, { content: `✅ Published to <#${thread.id}>.`, flags: 64 });
       }
     }
 
