@@ -1162,7 +1162,7 @@ async function importSchematicFromThread(guild, threadIdOrUrl, currentSub) {
   return { ok: true, partial: false };
 }
 
-const SCHEMATIC_GUIDELINES_TITLE = 'How to Submit a Schematic';
+const SCHEMATIC_GUIDELINES_TITLE = '📌 How to Submit a Schematic';
 
 async function ensureSchematicGuidelinesPost(guild) {
   try {
@@ -4425,8 +4425,8 @@ if (interaction.isUserSelectMenu?.() && (
   }
   return safeIReply(interaction, {
     content: userIds.length
-      ? `✅ ${isCredits ? 'Credits' : 'Designers'} set to ${userIds.length} user${userIds.length === 1 ? '' : 's'}.${republishNote}`
-      : `✅ ${isCredits ? 'Credits' : 'Designers'} cleared.${republishNote}`,
+      ? `${isCredits ? 'Credits' : 'Designers'} set to ${userIds.length} user${userIds.length === 1 ? '' : 's'}.${republishNote}`
+      : `${isCredits ? 'Credits' : 'Designers'} cleared.${republishNote}`,
     flags: 64,
   });
 }
@@ -4443,7 +4443,7 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_rerender:
   const ch = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
   if (!ch) return safeIReply(interaction, { content: 'Ticket channel not found.', flags: 64 });
   const res = await regenerateSchematicRender(ch, sub);
-  return safeIReply(interaction, { content: res.ok ? '✅ Re-rendered.' : `❌ ${res.reason}`, flags: 64 });
+  return safeIReply(interaction, { content: res.ok ? 'Re-rendered.' : res.reason, flags: 64 });
 }
 
 // --- PUBLISH SCHEMATIC: Publish-to-Forum button ---
@@ -4462,10 +4462,10 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_post:')) 
   if (!sub.howto) missing.push('how-to-use');
   if (!sub.renderUrl) missing.push('render');
   if (!sub.litematicUrl) missing.push('.litematic');
-  if (missing.length) return safeIReply(interaction, { content: `❌ Cannot publish — missing: ${missing.join(', ')}.`, flags: 64 });
+  if (missing.length) return safeIReply(interaction, { content: `Cannot publish — missing: ${missing.join(', ')}.`, flags: 64 });
 
   const res = await publishOrUpdateSchematicForumPost(interaction.guild, sub);
-  if (!res.ok) return safeIReply(interaction, { content: `❌ ${res.reason}`, flags: 64 });
+  if (!res.ok) return safeIReply(interaction, { content: res.reason, flags: 64 });
 
   const verb = res.updated ? 'Updated' : 'Published';
   const ch = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
@@ -4477,7 +4477,7 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_post:')) 
     const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
     await postOrUpdateSchematicDraftPreview(ch, fresh).catch(() => {});
   }
-  return safeIReply(interaction, { content: `✅ ${verb} → <#${res.thread.id}>`, flags: 64 });
+  return safeIReply(interaction, { content: `${verb} → <#${res.thread.id}>`, flags: 64 });
 }
 
 // --- TICKETS: panel button -> show modal (FAST) ---
@@ -4845,7 +4845,7 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       const res = await publishOrUpdateSchematicForumPost(interaction.guild, finalSub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
       republishNote = res?.ok ? ` Forum thread updated.` : `\n⚠️ Could not auto-update forum thread: ${res?.reason}`;
     }
-    return safeIReply(interaction, { content: `✅ Saved.${republishNote}`, flags: 64 });
+    return safeIReply(interaction, { content: `Saved.${republishNote}`, flags: 64 });
   }
 
   // --- TICKETS: modal submit -> create ticket channel ---
@@ -7649,8 +7649,8 @@ ${E_TIME} Created ${created}`)
 
       if (sub_action === 'render') {
         const result = await regenerateSchematicRender(channel, sub);
-        if (!result.ok) return safeIReply(interaction, { content: `❌ ${result.reason}`, flags: 64 });
-        return safeIReply(interaction, { content: '✅ Re-rendered.', flags: 64 });
+        if (!result.ok) return safeIReply(interaction, { content: result.reason, flags: 64 });
+        return safeIReply(interaction, { content: 'Re-rendered.', flags: 64 });
       }
 
       if (sub_action === 'post') {
@@ -7664,17 +7664,17 @@ ${E_TIME} Created ${created}`)
         if (!sub.renderUrl)    missing.push('render');
         if (!sub.litematicUrl) missing.push('.litematic');
         if (missing.length) {
-          return safeIReply(interaction, { content: `❌ Cannot publish — missing: ${missing.join(', ')}.`, flags: 64 });
+          return safeIReply(interaction, { content: `Cannot publish — missing: ${missing.join(', ')}.`, flags: 64 });
         }
         const res = await publishOrUpdateSchematicForumPost(interaction.guild, sub);
-        if (!res.ok) return safeIReply(interaction, { content: `❌ ${res.reason}`, flags: 64 });
+        if (!res.ok) return safeIReply(interaction, { content: res.reason, flags: 64 });
         const verb = res.updated ? 'Updated' : 'Published';
         await channel.send({
           embeds: [new EmbedBuilder().setColor(0x08a4a7).setTitle(verb).setDescription(`This schematic has been ${verb.toLowerCase()} in <#${res.thread.id}>.`)],
         }).catch(() => {});
         const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
         await postOrUpdateSchematicDraftPreview(channel, fresh).catch(() => {});
-        return safeIReply(interaction, { content: `✅ ${verb} → <#${res.thread.id}>`, flags: 64 });
+        return safeIReply(interaction, { content: `${verb} → <#${res.thread.id}>`, flags: 64 });
       }
 
       if (sub_action === 'unpost') {
@@ -7682,13 +7682,13 @@ ${E_TIME} Created ${created}`)
           return safeIReply(interaction, { content: 'Schematic manager only.', flags: 64 });
         }
         const res = await retireSchematicForumPost(interaction.guild, sub);
-        if (!res.ok) return safeIReply(interaction, { content: `❌ ${res.reason}`, flags: 64 });
+        if (!res.ok) return safeIReply(interaction, { content: res.reason, flags: 64 });
         await channel.send({
           embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Unposted').setDescription('Forum thread deleted. Submission reset to DRAFT.')],
         }).catch(() => {});
         const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
         await postOrUpdateSchematicDraftPreview(channel, fresh).catch(() => {});
-        return safeIReply(interaction, { content: '✅ Forum thread removed; submission reset to DRAFT.', flags: 64 });
+        return safeIReply(interaction, { content: 'Forum thread removed; submission reset to DRAFT.', flags: 64 });
       }
 
       if (sub_action === 'reject') {
@@ -7732,7 +7732,7 @@ ${E_TIME} Created ${created}`)
             .addFields({ name: 'Reason', value: reason.slice(0, 1024) || '—' })],
         }).catch(() => {});
 
-        return safeIReply(interaction, { content: '✅ Rejection logged. You can `/ticket close` when ready.', flags: 64 });
+        return safeIReply(interaction, { content: 'Rejection logged. You can `/ticket close` when ready.', flags: 64 });
       }
     }
 
