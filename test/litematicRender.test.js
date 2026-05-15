@@ -6,6 +6,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { ensureAssets } = require('../lib/litematicRender/setupAssets');
+const { getBrowserLaunchOptions } = require('../lib/litematicRender/renderer');
 
 const VIEWER_URL = pathToFileURL(path.join(__dirname, '..', 'lib', 'litematicRender', 'viewer.html')).href;
 
@@ -15,17 +16,7 @@ let page;
 async function launchViewer() {
   await ensureAssets();
   const puppeteer = require('puppeteer');
-  browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--enable-unsafe-swiftshader',
-      '--use-angle=swiftshader',
-      '--use-gl=angle',
-      '--enable-webgl',
-      '--ignore-gpu-blocklist',
-      '--allow-file-access-from-files',
-    ],
-  });
+  browser = await puppeteer.launch(await getBrowserLaunchOptions());
   page = await browser.newPage();
   page.on('pageerror', (err) => {
     throw err;
