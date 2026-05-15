@@ -3915,14 +3915,18 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       console.error('[spawner ticket] update record error:', e?.message);
     }
 
-    // Send price embed (or "not buying" notice) inside the ticket
+    // Send price embed (or "not buying" notice) inside the ticket.
+    // direction is from the CUSTOMER's perspective:
+    //   - direction='buy'  → customer buys from us → we sell → use shop's SELL price
+    //   - direction='sell' → customer sells to us  → we buy  → use shop's BUY price
     try {
       const prices = await store.getSpawnerPrices().catch(() => ({}));
-      const priceVal = prices?.[type.key]?.[direction];
+      const priceColumn = direction === 'buy' ? 'sell' : 'buy';
+      const priceVal = prices?.[type.key]?.[priceColumn];
       const priceStr = fmtSpawnerPrice(priceVal);
       let embed;
       if (priceStr) {
-        const verb = direction === 'buy' ? 'buying' : 'selling';
+        const verb = direction === 'buy' ? 'selling' : 'buying';
         embed = new EmbedBuilder()
           .setColor(0x08a4a7)
           .setTitle(`${type.label} — ${direction === 'buy' ? 'Buy' : 'Sell'} Price`)
@@ -3934,7 +3938,7 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
           )
           .setFooter({ text: 'Prices are not negotiable.' });
       } else {
-        const verbing = direction === 'buy' ? 'buying' : 'selling';
+        const verbing = direction === 'buy' ? 'selling' : 'buying';
         embed = new EmbedBuilder()
           .setColor(0x08a4a7)
           .setTitle(`${type.label} — No Active ${direction === 'buy' ? 'Buy' : 'Sell'} Price`)
