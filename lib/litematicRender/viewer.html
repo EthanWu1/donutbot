@@ -194,6 +194,7 @@
     window.__opaqueBlocks = OPAQUE_BLOCKS;
     window.__blockDefinitions = blockDefinitions;
     window.__blockstatesJson = blockstatesJson;
+    window.__blockModels = blockModels;
 
     const MISSING_REPORTED = new Set();
 
@@ -864,15 +865,13 @@
   }
 
   function itemFrameModel(glow) {
-    // Thin plate 16w × 16h × 1d. Default oriented as if hung on the SOUTH
-    // face of a block (plate's back at z=15). The render-side transform
-    // re-orients per the entity's Facing enum.
-    const tex = glow ? 'block/glow_item_frame' : 'block/item_frame';
-    const plate = {
-      from: [0, 0, 15], to: [16, 16, 16],
-      faces: CUBE_FACES_FULL(),
-    };
-    return new D.BlockModel(undefined, { 0: tex }, [plate]);
+    // Use the REAL vanilla item-frame block model (block/item_frame →
+    // template_item_frame): a 10×10 back panel + a birch-wood frame border,
+    // all at z=15..16 (mounted on the +Z / south face of the cell). This is
+    // pixel-accurate to MC instead of a hand-rolled plate. The render-side
+    // Facing transform rotates it onto the correct block face.
+    const key = glow ? 'minecraft:block/glow_item_frame' : 'minecraft:block/item_frame';
+    return (window.__blockModels && window.__blockModels[key]) || null;
   }
 
   function armorStandModel(small) {
@@ -978,15 +977,20 @@
   }
 
   // Map Litematica `Facing` enum (0=down, 1=up, 2=north, 3=south, 4=west, 5=east)
-  // into a yaw + pitch suitable for our plate-on-south-face base orientation.
-  // For item_frame and painting (both default hung on SOUTH face).
+  // to the rotation that moves the base plate (mounted on the +Z / SOUTH face)
+  // onto the target face. Derived from the rotation math:
+  //   rotateY(+90°): south(+Z) → east(+X)
+  //   rotateY(-90°): south(+Z) → west(-X)
+  //   rotateY(180°): south(+Z) → north(-Z)
+  //   rotateX(+90°): south(+Z) → down(-Y)
+  //   rotateX(-90°): south(+Z) → up(+Y)
   const FACING_TO_ROTATION = {
-    0: { rotX: -Math.PI / 2, rotY: 0 },               // down: floor frame
-    1: { rotX:  Math.PI / 2, rotY: 0 },               // up: ceiling frame
+    0: { rotX:  Math.PI / 2, rotY: 0 },               // down
+    1: { rotX: -Math.PI / 2, rotY: 0 },               // up
     2: { rotX: 0,            rotY: Math.PI },         // north
     3: { rotX: 0,            rotY: 0 },               // south (default)
-    4: { rotX: 0,            rotY:  Math.PI / 2 },    // west
-    5: { rotX: 0,            rotY: -Math.PI / 2 },    // east
+    4: { rotX: 0,            rotY: -Math.PI / 2 },    // west
+    5: { rotX: 0,            rotY:  Math.PI / 2 },    // east
   };
 
   function buildEntityMesh(entities, atlasOrResources) {
@@ -997,30 +1001,40 @@
       if (!model) continue;
       try {
         const m = model.getMesh(atlasOrResources, D.Cull.none());
-        // Local model coords are 0..16 (one block). Scale down to cell units (0..1).
+        // Model coords are 0..16 (one block). The transform matrix is built
+        // post-multiplied, so for a vertex v the applied order is right→left:
+        // SCALE first (16→1 cell units), then rotate, then translate.
         const t = mat4.create();
-        // Translate to entity world position. Entity coords are continuous —
-        // subtract 0.5 in xz to compensate for block-center vs corner offset
-        // is NOT needed because models start at origin (0,0,0) which is
-        // already the "block min corner".
-        mat4.translate(t, t, [e.x, e.y, e.z]);
-        // Apply rotations. Item-frame / painting use Facing enum; minecart /
-        // boat / armor_stand use Yaw.
-        const rotByFacing = (e.id === 'minecraft:item_frame' || e.id === 'minecraft:glow_item_frame' || e.id === 'minecraft:painting');
-        if (rotByFacing && typeof e.facing === 'number' && FACING_TO_ROTATION[e.facing]) {
-          const r = FACING_TO_ROTATION[e.facing];
-          // Rotate about the cell center so the plate orbits the block
-          mat4.translate(t, t, [0.5, 0.5, 0.5]);
-          mat4.rotateY(t, t, r.rotY);
-          mat4.rotateX(t, t, r.rotX);
-          mat4.translate(t, t, [-0.5, -0.5, -0.5]);
-        } else if (typeof e.yaw === 'number' && e.yaw !== 0) {
-          // Yaw degrees → radians. Rotate about model center.
-          mat4.translate(t, t, [0.5, 0.5, 0.5]);
-          mat4.rotateY(t, t, -e.yaw * Math.PI / 180);
-          mat4.translate(t, t, [-0.5, -0.5, -0.5]);
+        const isFrame = (e.id === 'minecraft:item_frame'
+          || e.id === 'minecraft:glow_item_frame'
+          || e.id === 'minecraft:painting');
+
+        if (isFrame && typeof e.tileX === 'number') {
+          // Item frame / painting: anchor the 0..16 model onto the ATTACH
+          // BLOCK cell (tileX, tileY, tileZ), NOT the entity Pos. The Pos is
+          // blockCenter − facing×0.46875 (an interior anchor) which is useless
+          // for placing the visible plate. The plate base sits on the SOUTH
+          // face of the cell; Facing rotates it onto the correct face.
+          mat4.translate(t, t, [e.tileX, e.tileY, e.tileZ]);
+          if (typeof e.facing === 'number' && FACING_TO_ROTATION[e.facing]) {
+            const r = FACING_TO_ROTATION[e.facing];
+            mat4.translate(t, t, [0.5, 0.5, 0.5]);
+            mat4.rotateY(t, t, r.rotY);
+            mat4.rotateX(t, t, r.rotX);
+            mat4.translate(t, t, [-0.5, -0.5, -0.5]);
+          }
+        } else {
+          // Minecart / boat / armor_stand: entity Pos is (center_x, bottom_y,
+          // center_z). The model's 0..16 origin is its MIN CORNER, so shift
+          // −0.5 cell in X/Z to put the model's horizontal center on the Pos.
+          // Y is left as-is (Pos.y is already the bottom of the entity).
+          mat4.translate(t, t, [e.x - 0.5, e.y, e.z - 0.5]);
+          if (typeof e.yaw === 'number' && e.yaw !== 0) {
+            mat4.translate(t, t, [0.5, 0.5, 0.5]);
+            mat4.rotateY(t, t, -e.yaw * Math.PI / 180);
+            mat4.translate(t, t, [-0.5, -0.5, -0.5]);
+          }
         }
-        // Scale model units (0..16) to cell units (0..1).
         mat4.scale(t, t, [0.0625, 0.0625, 0.0625]);
         out.merge(m.transform(t));
       } catch (err) {
