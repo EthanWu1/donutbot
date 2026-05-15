@@ -950,15 +950,14 @@ function parseDesignerUserIds(text) {
   return [...ids];
 }
 
-// Edit access for a submission: original submitter, any mentioned designer,
-// or a schematic manager. Lets designers fix typos / replace .litematics
-// straight from the forum thread after the ticket is closed.
+// Edit access for a submission: original submitter or schematic manager.
+// Mentioned designers no longer get edit rights — the submitter owns the
+// post. Managers still have access for moderation.
 function isAuthorizedToEditSubmission(member, sub) {
   if (!member || !sub) return false;
   if (canManageSchematicSubmission(member)) return true;
   if (String(member.user?.id || member.id) === String(sub.submitterId)) return true;
-  const designerIds = parseDesignerUserIds(sub.designers);
-  return designerIds.includes(String(member.user?.id || member.id));
+  return false;
 }
 
 // Publish a submission to the forum OR update the existing thread in place if
@@ -3691,6 +3690,30 @@ async function updateVouchboard(guild) {
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  // --- PUBLISH SCHEMATIC: strict author check for forum threads ---
+  // Every message in a tracked schematic forum thread must come from the
+  // submitter, a schematic manager, or the bot. Anything else gets deleted
+  // on sight so the post stays owned by the submitter.
+  try {
+    if (
+      message.guildId &&
+      !message.author?.bot &&
+      message.channel.isThread?.() &&
+      message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID
+    ) {
+      const guardSub = await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
+      if (guardSub) {
+        const authorMember = message.member;
+        const isSubmitter = String(message.author.id) === String(guardSub.submitterId);
+        const isManager = authorMember && canManageSchematicSubmission(authorMember);
+        if (!isSubmitter && !isManager) {
+          await message.delete().catch(() => {});
+          return;
+        }
+      }
+    }
+  } catch (e) { console.error('[schematic forum guard] error:', e?.message); }
 
   // --- PUBLISH SCHEMATIC: auto-render uploaded .litematic (ticket OR forum thread) ---
   try {
