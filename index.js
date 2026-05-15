@@ -933,8 +933,11 @@ async function safeUpdateTicketControls(channel, claimedById, rec) {
     }
     if (msg) {
       await msg.edit({ components: [ticketControlRow(claimedById)] }).catch(() => {});
-      // Keep the canonical control message pinned.
-      try { if (!msg.pinned) await msg.pin(); } catch {}
+      // Keep the canonical control message pinned — except in spawner tickets,
+      // where only the price/info embed should occupy the pinned slot.
+      if (!isSpawnerTicketChannel(channel)) {
+        try { if (!msg.pinned) await msg.pin(); } catch {}
+      }
       if (!rec?.controlMessageId || String(rec.controlMessageId) !== String(msg.id)) {
         await store.updateTicketRecord(channel.id, { controlMessageId: msg.id }).catch(() => {});
       }
@@ -1121,7 +1124,7 @@ function panelButtonEmoji(panelId, keyOrLabel) {
   return null;
 }
 
-async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, answers, extraTopLine, creatorUser, openerUser, nameOverride }) {
+async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, answers, extraTopLine, creatorUser, openerUser, nameOverride, skipPinControl }) {
   const guild = interaction.guild;
   const cfg = await store.getTicketConfig();
   const ticketNum = await store.nextTicketId();
@@ -1274,7 +1277,11 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
   });
 
   // Pin the control message so staff always interact with the correct controls.
-  try { await msg.pin(); } catch {}
+  // Spawner tickets opt out via skipPinControl — their price embed is pinned
+  // separately so the first thing in pinned messages is the price info.
+  if (!skipPinControl) {
+    try { await msg.pin(); } catch {}
+  }
 
   await store.createTicketRecord(liveChannel.id, {
     channelId: liveChannel.id, guildId: guild.id, creatorId: creator.id, openerId: opener.id, panelId, buttonId: buttonKey,
@@ -3814,6 +3821,9 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
         // in the price embed that follows, no need to duplicate.
         answers: {},
         nameOverride: desiredName,
+        // Don't pin the welcome+controls message; only the price embed below
+        // gets pinned so it stays prominent in the ticket.
+        skipPinControl: true,
       });
     } catch (e) {
       console.error('[spawner ticket] create error:', e);
