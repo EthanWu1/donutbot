@@ -6901,9 +6901,10 @@ ${E_TIME} Created ${created}`)
     // --- SPAWNER PRICES MANAGEMENT ---
     if (commandName === 'spawner') {
       await interaction.deferReply({ flags: 64 }).catch(() => {});
-      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)
-          && !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return safeIReply(interaction, { content: 'Manage Server only.', flags: 64 });
+      // Allow-list — only this single Discord user ID may run /spawner.
+      const SPAWNER_COMMAND_OWNER_ID = '508574921010577409';
+      if (interaction.user.id !== SPAWNER_COMMAND_OWNER_ID) {
+        return safeIReply(interaction, { content: 'You are not authorized to use this command.', flags: 64 });
       }
       const sub = options.getSubcommand();
 
