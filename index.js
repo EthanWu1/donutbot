@@ -3985,7 +3985,7 @@ if (interaction.isButton() && (interaction.customId.startsWith('publish_start:')
     { id: 'name',      label: 'Schematic Name',                style: TextInputStyle.Short,     required: true,  max: 80,   value: sub.name },
     { id: 'designers', label: 'Designers (one @mention/line)', style: TextInputStyle.Paragraph, required: true,  max: 500,  value: sub.designers },
     { id: 'rates',     label: 'Rates (one per line, optional)',style: TextInputStyle.Paragraph, required: false, max: 800,  value: sub.rates },
-    { id: 'build',     label: 'Build instructions',            style: TextInputStyle.Paragraph, required: true,  max: 1500, value: sub.build },
+    { id: 'build',     label: 'Build instructions (optional)', style: TextInputStyle.Paragraph, required: false, max: 1500, value: sub.build },
     { id: 'howto',     label: 'How to use',                    style: TextInputStyle.Paragraph, required: true,  max: 1500, value: sub.howto },
   ];
   for (const f of fields) {
@@ -7349,7 +7349,6 @@ ${E_TIME} Created ${created}`)
         const missing = [];
         if (!sub.name)       missing.push('name');
         if (!sub.designers || !parseDesignerLines(sub.designers).length) missing.push('designers');
-        if (!sub.build)      missing.push('build');
         if (!sub.howto)      missing.push('how-to-use');
         if (!sub.renderUrl)  missing.push('render (upload a .litematic)');
         if (!sub.litematicUrl) missing.push('.litematic file');
