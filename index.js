@@ -714,11 +714,27 @@ function buildSchematicEmbed(sub, { forPreview = false } = {}) {
     .setColor(0x08a4a7)
     .setTitle(sub.name || 'Untitled Schematic');
   const body = buildSchematicBody(sub);
-  if (body) eb.setDescription(body);
+
+  if (forPreview) {
+    // Prominent upload-status header so submitters can see at a glance
+    // whether they still need to drop a .litematic. Sits above the body
+    // because Discord renders embed description top-to-bottom.
+    const litematicLine = sub.litematicUrl
+      ? `📎 **Schematic File** ✅ \`${sub.litematicName || 'uploaded.litematic'}\``
+      : `📎 **Schematic File** ❌ Drop a \`.litematic\` in this channel to upload`;
+    const renderLine = sub.renderUrl
+      ? `🖼️ **Render** ✅ Ready`
+      : `🖼️ **Render** ⏳ Awaiting \`.litematic\` upload`;
+    const header = `${litematicLine}\n${renderLine}\n\n───\n\n`;
+    eb.setDescription((header + (body || '')).slice(0, 4000));
+  } else if (body) {
+    eb.setDescription(body);
+  }
+
   if (sub.renderUrl) eb.setImage(sub.renderUrl);
   if (forPreview) {
-    const charCount = body.length;
-    eb.setFooter({ text: `Draft • ${charCount}/${SCHEMATIC_MAX_BODY_CHARS} chars${sub.renderUrl ? ' • render ready' : ' • awaiting .litematic upload'}` });
+    const charCount = (body || '').length;
+    eb.setFooter({ text: `Draft • body ${charCount}/${SCHEMATIC_MAX_BODY_CHARS} chars${sub.renderUrl ? ' • render ready' : ''}` });
   }
   return eb;
 }
@@ -4322,30 +4338,6 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_edit_foru
   return;
 }
 
-// --- PUBLISH SCHEMATIC: Update Existing button -> import modal ---
-if (interaction.isButton() && interaction.customId.startsWith('publish_import:')) {
-  const subId = interaction.customId.split(':')[1];
-  const sub = await store.getSchematicSubmission(subId).catch(() => null);
-  if (!sub) return interaction.reply({ content: 'Submission record missing.', flags: 64 }).catch(() => {});
-  const isOwner = String(interaction.user.id) === String(sub.submitterId);
-  if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
-    return interaction.reply({ content: 'Only the submitter or a schematic manager can import a schematic here.', flags: 64 }).catch(() => {});
-  }
-  const modal = new ModalBuilder()
-    .setCustomId(`publish_modal_import:${sub.id}`)
-    .setTitle('Update Existing Schematic')
-    .addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId('thread')
-        .setLabel('Forum thread URL or ID')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(120),
-    ));
-  await interaction.showModal(modal).catch(() => {});
-  return;
-}
-
 // --- PUBLISH SCHEMATIC: Re-render button ---
 if (interaction.isButton() && interaction.customId.startsWith('publish_rerender:')) {
   const subId = interaction.customId.split(':')[1];
@@ -4670,28 +4662,6 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     return safeIReply(interaction, { content: `✅ Basics saved.${republishNote}`, flags: 64 });
   }
 
-  // --- PUBLISH SCHEMATIC: import modal submit -> clone existing thread into current ticket ---
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('publish_modal_import:')) {
-    await interaction.deferReply({ flags: 64 }).catch(() => {});
-    const subId = interaction.customId.split(':')[1];
-    const sub = await store.getSchematicSubmission(subId).catch(() => null);
-    if (!sub) return safeIReply(interaction, { content: 'Submission record missing.', flags: 64 });
-    const isOwner = String(interaction.user.id) === String(sub.submitterId);
-    if (!isOwner && !canManageSchematicSubmission(interaction.member)) {
-      return safeIReply(interaction, { content: 'Only the submitter or a schematic manager can import.', flags: 64 });
-    }
-    const threadInput = (interaction.fields.getTextInputValue('thread') || '').trim();
-    const res = await importSchematicFromThread(interaction.guild, threadInput, sub);
-    if (!res.ok) return safeIReply(interaction, { content: `❌ ${res.reason}`, flags: 64 });
-    const updated = await store.getSchematicSubmission(subId).catch(() => sub);
-    const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
-    if (channel) await postOrUpdateSchematicDraftPreview(channel, updated).catch(() => {});
-    const msg = res.partial
-      ? `⚠️ Imported partial data: ${res.warning}`
-      : '✅ Imported existing schematic. Edit and click **Update Forum Post** when ready.';
-    return safeIReply(interaction, { content: msg, flags: 64 });
-  }
-
   // --- PUBLISH SCHEMATIC: modal 2 submit -> save extras + refresh preview ---
   if (interaction.isModalSubmit() && interaction.customId.startsWith('publish_modal_extras:')) {
     await interaction.deferReply({ flags: 64 }).catch(() => {});
@@ -4798,13 +4768,10 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
               '',
               'A schematic manager will review and publish your post to the forum.',
               '',
-              '— or —',
-              '',
-              'Click **Update Existing** to fix a schematic that is already in the forum.',
+              `**Already have a schematic published?** Go to your post in <#${SCHEMATIC_FORUM_CHANNEL_ID}> and click the **✏️ Edit** button on it instead of opening this ticket.`,
             ].join('\n'));
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`publish_start:${subId}`).setLabel('Start Submission').setStyle(ButtonStyle.Primary).setEmoji('📦'),
-            new ButtonBuilder().setCustomId(`publish_import:${subId}`).setLabel('Update Existing').setStyle(ButtonStyle.Secondary).setEmoji('🔄'),
           );
           await ch.send({ embeds: [startEmbed], components: [row] }).catch(() => {});
         } catch (e) {
@@ -7519,25 +7486,6 @@ ${E_TIME} Created ${created}`)
       }
       const sub_action = options.getSubcommand();
 
-      if (sub_action === 'import') {
-        // Mirror the modal shown by the welcome-message button so /publish
-        // import works without scrolling up. Submitter OR manager allowed.
-        const modal = new ModalBuilder()
-          .setCustomId(`publish_modal_import:${sub.id}`)
-          .setTitle('Update Existing Schematic')
-          .addComponents(new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId('thread')
-              .setLabel('Forum thread URL or ID')
-              .setStyle(TextInputStyle.Short)
-              .setRequired(true)
-              .setMaxLength(120),
-          ));
-        await interaction.showModal(modal).catch(() => {});
-        return;
-      }
-
-      // Everything below does async work — defer now.
       await interaction.deferReply({ flags: 64 }).catch(() => {});
 
       if (sub_action === 'render') {

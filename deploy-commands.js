@@ -336,9 +336,7 @@ new SlashCommandBuilder()
   .addSubcommand(s => s.setName('post').setDescription('Publish — or update — this submission in the schematic forum'))
   .addSubcommand(s => s.setName('unpost').setDescription('Delete the forum thread and flip the submission back to DRAFT'))
   .addSubcommand(s => s.setName('reject').setDescription('Reject this submission and DM the submitter')
-    .addStringOption(o => o.setName('reason').setDescription('Why the submission is being rejected').setRequired(true)))
-  .addSubcommand(s => s.setName('import').setDescription('Import an existing forum schematic into this ticket so it can be updated')
-    .addStringOption(o => o.setName('thread').setDescription('Forum thread URL or ID').setRequired(true))),
+    .addStringOption(o => o.setName('reason').setDescription('Why the submission is being rejected').setRequired(true))),
 
 // --- KELP FARM CATALOG ---
 new SlashCommandBuilder()
