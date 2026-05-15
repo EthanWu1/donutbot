@@ -760,7 +760,6 @@ function buildSchematicPreviewComponents(sub) {
   const editRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`publish_edit:${sub.id}`).setLabel('Edit').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`publish_edit_details:${sub.id}`).setLabel('Details').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`publish_rerender:${sub.id}`).setLabel('Re-render').setStyle(ButtonStyle.Secondary),
   );
   // UserSelectMenu rows let editors PICK actual Discord users — the picked
   // users become real <@id> mentions in the post that ping on first publish.
@@ -805,28 +804,24 @@ function buildModalFromFields(customId, title, fields) {
   return modal;
 }
 
-// Essentials modal — Schematic Name + Designers + Rates + Instructions + Stats.
-// Discord caps modals at 5 inputs; the remaining fields live in the Details
-// modal below.
+// Essentials modal — Schematic Name + Rates + Instructions + Stats.
+// Designers + Credits are picked via UserSelectMenu on the draft preview,
+// so they aren't in the modal anymore.
 function buildSchematicModal(sub) {
   return buildModalFromFields(`publish_modal:${sub.id}`, 'Edit Schematic', [
-    { id: 'name',      label: 'Schematic Name',         style: TextInputStyle.Short,     required: true,  max: 80,   value: sub.name },
-    { id: 'designers', label: 'Designers',              style: TextInputStyle.Paragraph, required: true,  max: 800,  value: sub.designers,
-      placeholder: '@iEtZ\n@OtherDesigner' },
-    { id: 'rates',     label: 'Rates (one per line)',   style: TextInputStyle.Paragraph, required: false, max: 800,  value: sub.rates,
+    { id: 'name',  label: 'Schematic Name',         style: TextInputStyle.Short,     required: true,  max: 80,   value: sub.name },
+    { id: 'rates', label: 'Rates (one per line)',   style: TextInputStyle.Paragraph, required: false, max: 800,  value: sub.rates,
       placeholder: 'Sweet Berries: 1.6m/h' },
-    { id: 'howto',     label: 'Instructions',           style: TextInputStyle.Paragraph, required: true,  max: 1800, value: sub.howto,
+    { id: 'howto', label: 'Instructions',           style: TextInputStyle.Paragraph, required: true,  max: 1800, value: sub.howto,
       placeholder: '1. Place the farm at y=64\n2. Hook up bone meal\n3. Press the wooden button to start' },
-    { id: 'stats',     label: 'Stats (revenue / profit)', style: TextInputStyle.Paragraph, required: false, max: 600, value: sub.stats,
+    { id: 'stats', label: 'Stats (revenue / profit)', style: TextInputStyle.Paragraph, required: false, max: 600, value: sub.stats,
       placeholder: 'Revenue: $40m/h\nProfit: $12m/h' },
   ]);
 }
 
-// Details modal — credits / consumes / positives / negatives. All optional.
+// Details modal — consumes / positives / negatives. All optional.
 function buildSchematicDetailsModal(sub) {
   return buildModalFromFields(`publish_modal_details:${sub.id}`, 'Edit Schematic Details', [
-    { id: 'credits',   label: 'Credits',    style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.credits,
-      placeholder: '@HelperUser: On/off switch help' },
     { id: 'consumes',  label: 'Consumes',   style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.consumes,
       placeholder: 'Bone Blocks: 280k/h\nBlaze Rods: 220k/h' },
     { id: 'positives', label: 'Positives',  style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.positives,
@@ -4528,7 +4523,7 @@ if (interaction.isButton() && interaction.customId.startsWith('tk_open:')) {
             createdAt: Date.now(), updatedAt: Date.now(),
           });
           const startEmbed = new EmbedBuilder()
-            .setColor(schematicStatusColor({ status: 'DRAFT' }))
+            .setColor(0x08a4a7)
             .setTitle('Ready to submit your schematic?')
             .setDescription([
               'Click **Start Submission** to fill in the basics (name, designers, rates, instructions).',
@@ -4758,19 +4753,19 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     interaction.customId.startsWith('publish_modal:') ||
     interaction.customId.startsWith('publish_modal_details:')
   )) {
-    await interaction.deferReply({ flags: 64 }).catch(() => {});
     const isDetails = interaction.customId.startsWith('publish_modal_details:');
     const subId = interaction.customId.split(':')[1];
     const sub = await store.getSchematicSubmission(subId).catch(() => null);
-    if (!sub) return safeIReply(interaction, { content: 'Submission record missing.', flags: 64 });
+    if (!sub) {
+      return interaction.reply({ content: 'Submission record missing.', flags: 64 }).catch(() => {});
+    }
 
     if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
-      return safeIReply(interaction, { content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 });
+      return interaction.reply({ content: 'Only the submitter, a listed designer, or a schematic manager can edit this submission.', flags: 64 }).catch(() => {});
     }
 
     const patch = isDetails
       ? {
-          credits:   (interaction.fields.getTextInputValue('credits')   || '').trim(),
           consumes:  (interaction.fields.getTextInputValue('consumes')  || '').trim(),
           positives: (interaction.fields.getTextInputValue('positives') || '').trim(),
           negatives: (interaction.fields.getTextInputValue('negatives') || '').trim(),
@@ -4778,7 +4773,6 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
         }
       : {
           name:      (interaction.fields.getTextInputValue('name')      || '').trim().slice(0, 256),
-          designers: (interaction.fields.getTextInputValue('designers') || '').trim(),
           rates:     (interaction.fields.getTextInputValue('rates')     || '').trim(),
           howto:     (interaction.fields.getTextInputValue('howto')     || '').trim(),
           stats:     (interaction.fields.getTextInputValue('stats')     || '').trim(),
@@ -4788,19 +4782,45 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     const updated = await store.updateSchematicSubmission(subId, patch);
     const finalSub = updated || { ...sub, ...patch };
 
-    // If the ticket is still open, refresh the pinned draft preview.
+    // After the Essentials modal, chain straight into the Details modal so
+    // the submitter doesn't have to click an extra button. (Modal submits
+    // CAN return another modal as their first response.)
+    if (!isDetails) {
+      try {
+        await interaction.showModal(buildSchematicDetailsModal(finalSub));
+      } catch (e) {
+        // Fallback: reply with a button to open Details if showModal failed.
+        await interaction.reply({
+          content: '✅ Saved. Click below to add credits, consumes, positives, or negatives.',
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`publish_edit_details:${sub.id}`).setLabel('Continue to Details').setStyle(ButtonStyle.Primary),
+          )],
+          flags: 64,
+        }).catch(() => {});
+      }
+      // Background work: refresh preview + auto-republish on Modal 1 save
+      // alone (in case the submitter cancels Details). The next modal submit
+      // will refresh again.
+      (async () => {
+        const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
+        if (channel) await postOrUpdateSchematicDraftPreview(channel, finalSub).catch(() => {});
+        if (finalSub.status === 'PUBLISHED' && finalSub.forumThreadId) {
+          await publishOrUpdateSchematicForumPost(interaction.guild, finalSub).catch(() => {});
+        }
+      })().catch(() => {});
+      return;
+    }
+
+    // Details modal — last step in the chain. Defer + send a regular reply.
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
     const channel = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
     if (channel) await postOrUpdateSchematicDraftPreview(channel, finalSub).catch(() => {});
 
-    // If the schem is already published, auto-sync the forum thread starter.
     let republishNote = '';
     if (finalSub.status === 'PUBLISHED' && finalSub.forumThreadId) {
       const res = await publishOrUpdateSchematicForumPost(interaction.guild, finalSub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-      republishNote = res?.ok
-        ? ` Forum thread updated.`
-        : `\n⚠️ Could not auto-update forum thread: ${res?.reason}`;
+      republishNote = res?.ok ? ` Forum thread updated.` : `\n⚠️ Could not auto-update forum thread: ${res?.reason}`;
     }
-
     return safeIReply(interaction, { content: `✅ Saved.${republishNote}`, flags: 64 });
   }
 
