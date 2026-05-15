@@ -617,8 +617,8 @@ function buildSpawnerPricesEmbed(prices) {
 
 function buildSpawnerPanelComponents() {
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('spawner_open:buy').setLabel('Buy Spawners').setStyle(ButtonStyle.Secondary).setEmoji('📤'),
-    new ButtonBuilder().setCustomId('spawner_open:sell').setLabel('Sell Spawners').setStyle(ButtonStyle.Secondary).setEmoji('📥'),
+    new ButtonBuilder().setCustomId('spawner_open:buy').setLabel('Buy Spawners').setStyle(ButtonStyle.Secondary).setEmoji('📥'),
+    new ButtonBuilder().setCustomId('spawner_open:sell').setLabel('Sell Spawners').setStyle(ButtonStyle.Secondary).setEmoji('📤'),
   );
   return [row];
 }
@@ -2565,7 +2565,20 @@ client.once('clientReady', async () => {
   try {
     const panel = await store.getTicketPanel('ticket_center').catch(() => null);
     if (panel?.components) {
+      const beforeEmbed = JSON.stringify(panel.embed || {});
       const before = JSON.stringify(panel.components);
+
+      // Canonical embed copy — title, description, color.
+      panel.embed = panel.embed || {};
+      panel.embed.title = 'Ticket Center';
+      panel.embed.description = [
+        'Choose the service you need and a staff member will assist you shortly.',
+        '',
+        '- Open only **ONE** of each ticket at a time',
+        '- Be respectful, detailed, and patient',
+        '- Abuse = blacklist from future services',
+      ].join('\n');
+      panel.embed.color = 0x08a4a7;
 
       // Reset components to the canonical layout. Existing button configs
       // (categoryId, welcome, etc.) are preserved by reusing prior values.
@@ -2633,10 +2646,44 @@ client.once('clientReady', async () => {
       panel.components = row2.length ? [row1, row2] : [row1];
 
       const after = JSON.stringify(panel.components);
-      if (before !== after) {
+      const afterEmbed = JSON.stringify(panel.embed);
+      if (before !== after || beforeEmbed !== afterEmbed) {
         await store.setTicketPanel('ticket_center', panel).catch(() => {});
       }
     }
+
+    // Applications panel — title/description/color migration. Components are
+    // left alone; /application close/open handles those.
+    const appPanel = await store.getTicketPanel('applications').catch(() => null);
+    if (appPanel) {
+      const beforeAppEmbed = JSON.stringify(appPanel.embed || {});
+      appPanel.embed = appPanel.embed || {};
+      appPanel.embed.title = 'Applications';
+      appPanel.embed.description = [
+        '> **Staff Applicants**:',
+        '• Enforce rules fairly and consistently',
+        '• Prioritize community culture over authority',
+        '• Act professionally in all situations',
+        '',
+        '> **Builder Applicants**:',
+        '• Understand DonutSMP mechanics',
+        '• Can use schematics',
+        '• Build farms in a timely manner',
+        '',
+        '> **Before Applying**',
+        'Ensure that:',
+        '• You meet activity expectations',
+        '• You can commit time daily',
+        '',
+        'Low-effort or troll applications will be denied automatically.',
+      ].join('\n');
+      appPanel.embed.color = 0x08a4a7;
+      const afterAppEmbed = JSON.stringify(appPanel.embed);
+      if (beforeAppEmbed !== afterAppEmbed) {
+        await store.setTicketPanel('applications', appPanel).catch(() => {});
+      }
+    }
+
     const staffType = await store.getAppType('staff').catch(() => null);
     if (staffType?.questions) {
       staffType.questions = sanitizeStaffApplicationQuestions(staffType.questions);
@@ -6733,7 +6780,9 @@ ${E_TIME} Created ${created}`)
         const embed = new EmbedBuilder()
           .setTitle(panel.embed?.title || panel.id)
           .setDescription(panel.embed?.description || "")
-          .setColor(ticketColor(panel.embed?.colorName || "Blue"));
+          .setColor(typeof panel.embed?.color === 'number'
+            ? panel.embed.color
+            : ticketColor(panel.embed?.colorName || "Blue"));
 
         const rows = [];
         const components = Array.isArray(panel.components) ? panel.components : [];
@@ -6854,7 +6903,9 @@ ${E_TIME} Created ${created}`)
               const embed = new EmbedBuilder()
                 .setTitle(panel.embed?.title || 'Applications')
                 .setDescription(panel.embed?.description || '')
-                .setColor(ticketColor(panel.embed?.colorName || 'Green'));
+                .setColor(typeof panel.embed?.color === 'number'
+                  ? panel.embed.color
+                  : ticketColor(panel.embed?.colorName || 'Green'));
               const rows = [];
               const closedMap = await store.listAppClosed().catch(() => ({}));
               for (const rowDef of (panel.components || [])) {
