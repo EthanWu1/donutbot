@@ -737,70 +737,85 @@
   // (50, 14) → face.uv (8, 0, 12.5, 7). down face at pixel (14, 0) to
   // (32, 14) → face.uv (3.5, 0, 8, 7).
   function _minecartBodyElement() {
-    // Body 14w × 6h × 16d at y=1..7 (cart sits low in cell).
+    // Vanilla MinecartEntityModel: 16w × 8h × 16d body. Top = inside floor
+    // visible from iso, sides = wall panel (16×8 = pixel (2, 12) to (18, 20)
+    // of the 64×32 sprite, face.uv [0.5, 6, 4.5, 10]).
     return {
-      from: [1, 1, 0], to: [15, 7, 16],
+      from: [0, 0, 0], to: [16, 8, 16],
       faces: {
-        // Top: cart inside floor (visible from iso top-down).
         up:    { uv: [8, 0, 12.5, 7], texture: '#cart' },
-        // Bottom: cart underside.
         down:  { uv: [3.5, 0, 8, 7], texture: '#cart' },
-        // Long sides (N/S, 16w × 8h faces clamped to 14 wide × 6 tall here):
-        // use the wall side panel UV.
         north: { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
         south: { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
-        // Short ends (E/W): use the same wall side panel — texture compresses
-        // slightly but reads as cart wood.
         east:  { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
         west:  { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
       },
     };
   }
 
-  // Chest body uses vanilla chest_normal.png net layout (64×64). Bottom
-  // cuboid 14×10×14 at uv (0, 19), lid cuboid 14×4×14 at uv (0, 0) — same
-  // UV math as wideChestModel above.
+  // Chest cargo elements: full vanilla chest model (body + lid + lock) copied
+  // VERBATIM from deepslate's SpecialRenderers.chestRenderer source so we
+  // know the UVs / face names / rotations match exactly. Bumped to a fixed
+  // y-offset to sit on top of the cart body.
   function _chestCargoElements(yBase) {
-    const body = {
-      from: [3, yBase, 3], to: [13, yBase + 7, 13],  // 10w × 7h × 10d
-      faces: {
-        down:  { uv: [3.5, 4.75, 7, 8.25], texture: '#chest' },
-        up:    { uv: [7, 4.75, 10.5, 8.25], texture: '#chest' },
-        west:  { uv: [0, 8.25, 3.5, 10.75], texture: '#chest', rotation: 180 },
-        north: { uv: [3.5, 8.25, 7, 10.75], texture: '#chest', rotation: 180 },
-        east:  { uv: [7, 8.25, 10.5, 10.75], texture: '#chest', rotation: 180 },
-        south: { uv: [10.5, 8.25, 14, 10.75], texture: '#chest', rotation: 180 },
+    return [
+      {
+        from: [1, yBase, 1],
+        to: [15, yBase + 10, 15],
+        faces: {
+          north: { uv: [10.5, 8.25, 14, 10.75], rotation: 180, texture: '#chest' },
+          east:  { uv: [7, 8.25, 10.5, 10.75], rotation: 180, texture: '#chest' },
+          south: { uv: [3.5, 8.25, 7, 10.75], rotation: 180, texture: '#chest' },
+          west:  { uv: [0, 8.25, 3.5, 10.75], rotation: 180, texture: '#chest' },
+          up:    { uv: [7, 4.75, 10.5, 8.25], texture: '#chest' },
+          down:  { uv: [3.5, 4.75, 7, 8.25], texture: '#chest' },
+        },
       },
-    };
-    const lid = {
-      from: [3, yBase + 7, 3], to: [13, yBase + 10, 13],  // lid 3 tall
-      faces: {
-        down:  { uv: [3.5, 0, 7, 3.5], texture: '#chest' },
-        up:    { uv: [7, 0, 10.5, 3.5], texture: '#chest' },
-        west:  { uv: [0, 3.5, 3.5, 4.5], texture: '#chest', rotation: 180 },
-        north: { uv: [3.5, 3.5, 7, 4.5], texture: '#chest', rotation: 180 },
-        east:  { uv: [7, 3.5, 10.5, 4.5], texture: '#chest', rotation: 180 },
-        south: { uv: [10.5, 3.5, 14, 4.5], texture: '#chest', rotation: 180 },
+      {
+        from: [1, yBase + 10, 1],
+        to: [15, yBase + 14, 15],
+        faces: {
+          north: { uv: [10.5, 3.75, 14, 4.75], rotation: 180, texture: '#chest' },
+          east:  { uv: [7, 3.75, 10.5, 4.75], rotation: 180, texture: '#chest' },
+          south: { uv: [3.5, 3.75, 7, 4.75], rotation: 180, texture: '#chest' },
+          west:  { uv: [0, 3.75, 3.5, 4.75], rotation: 180, texture: '#chest' },
+          up:    { uv: [7, 0, 10.5, 3.5], texture: '#chest' },
+          down:  { uv: [3.5, 0, 7, 3.5], texture: '#chest' },
+        },
       },
-    };
-    return [body, lid];
+      {
+        from: [7, yBase + 7, 0],
+        to: [9, yBase + 11, 2],
+        faces: {
+          north: { uv: [0.25, 0.25, 0.75, 1.25], rotation: 180, texture: '#chest' },
+          east:  { uv: [0, 0.25, 0.25, 1.25], rotation: 180, texture: '#chest' },
+          south: { uv: [1, 0.25, 1.5, 1.25], rotation: 180, texture: '#chest' },
+          west:  { uv: [0.75, 0.25, 1, 1.25], rotation: 180, texture: '#chest' },
+          up:    { uv: [0.25, 0, 0.75, 0.25], rotation: 180, texture: '#chest' },
+          down:  { uv: [0.75, 0, 1.25, 0.25], rotation: 180, texture: '#chest' },
+        },
+      },
+    ];
   }
 
-  // Variant cargo using simple block textures (full-UV per face — fine for
-  // 16×16 block textures since they tile cleanly).
+  // Variant cargo: smaller box on top of cart, textured with a single block.
+  // 12×8×12 cargo sitting at yBase..yBase+8, edges set in 2 from each side.
   function _blockCargoElement(yBase) {
     return {
-      from: [3, yBase, 3], to: [13, yBase + 8, 13],
+      from: [2, yBase, 2], to: [14, yBase + 8, 14],
       faces: {
-        down:  { uv: [0, 0, 10, 10], texture: '#cargo' },
-        up:    { uv: [0, 0, 10, 10], texture: '#cargo' },
-        north: { uv: [0, 0, 10, 8], texture: '#cargo' },
-        south: { uv: [0, 0, 10, 8], texture: '#cargo' },
-        east:  { uv: [0, 0, 10, 8], texture: '#cargo' },
-        west:  { uv: [0, 0, 10, 8], texture: '#cargo' },
+        down:  { uv: [0, 0, 12, 12], texture: '#cargo' },
+        up:    { uv: [0, 0, 12, 12], texture: '#cargo' },
+        north: { uv: [0, 0, 12, 8], texture: '#cargo' },
+        south: { uv: [0, 0, 12, 8], texture: '#cargo' },
+        east:  { uv: [0, 0, 12, 8], texture: '#cargo' },
+        west:  { uv: [0, 0, 12, 8], texture: '#cargo' },
       },
     };
   }
+
+  // Cargo sits directly on top of the 8-tall cart body.
+  const CART_TOP_Y = 8;
 
   function minecartModel() {
     return new D.BlockModel(undefined, { cart: 'entity/minecart/minecart' }, [_minecartBodyElement()]);
@@ -809,42 +824,42 @@
     return new D.BlockModel(
       undefined,
       { cart: 'entity/minecart/minecart', chest: 'entity/chest/normal' },
-      [_minecartBodyElement(), ..._chestCargoElements(7)]
+      [_minecartBodyElement(), ..._chestCargoElements(CART_TOP_Y)]
     );
   }
   function hopperMinecartModel() {
     return new D.BlockModel(
       undefined,
       { cart: 'entity/minecart/minecart', cargo: 'block/hopper_outside' },
-      [_minecartBodyElement(), _blockCargoElement(7)]
+      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
     );
   }
   function furnaceMinecartModel() {
     return new D.BlockModel(
       undefined,
       { cart: 'entity/minecart/minecart', cargo: 'block/furnace_side' },
-      [_minecartBodyElement(), _blockCargoElement(7)]
+      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
     );
   }
   function tntMinecartModel() {
     return new D.BlockModel(
       undefined,
       { cart: 'entity/minecart/minecart', cargo: 'block/tnt_side' },
-      [_minecartBodyElement(), _blockCargoElement(7)]
+      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
     );
   }
   function commandBlockMinecartModel() {
     return new D.BlockModel(
       undefined,
       { cart: 'entity/minecart/minecart', cargo: 'block/command_block_side' },
-      [_minecartBodyElement(), _blockCargoElement(7)]
+      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
     );
   }
   function spawnerMinecartModel() {
     return new D.BlockModel(
       undefined,
       { cart: 'entity/minecart/minecart', cargo: 'block/spawner' },
-      [_minecartBodyElement(), _blockCargoElement(7)]
+      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
     );
   }
 
