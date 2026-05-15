@@ -330,10 +330,15 @@ new SlashCommandBuilder()
 new SlashCommandBuilder()
   .setName('publish')
   .setDescription('Manage a schematic submission in this Publish Schematic ticket')
-  .addSubcommand(s => s.setName('basics').setDescription('Re-open the basics modal prefilled with current values'))
-  .addSubcommand(s => s.setName('extras').setDescription('Open the extras modal (credits, consumes, positives, negatives)'))
   .addSubcommand(s => s.setName('render').setDescription('Force a fresh render from the latest .litematic'))
-  .addSubcommand(s => s.setName('post').setDescription('Publish this submission to the schematic forum')),
+  .addSubcommand(s => s.setName('image').setDescription('Override the render with a custom image')
+    .addAttachmentOption(o => o.setName('attachment').setDescription('PNG/JPG to use instead of the auto-render').setRequired(true)))
+  .addSubcommand(s => s.setName('post').setDescription('Publish — or update — this submission in the schematic forum'))
+  .addSubcommand(s => s.setName('unpost').setDescription('Delete the forum thread and flip the submission back to DRAFT'))
+  .addSubcommand(s => s.setName('reject').setDescription('Reject this submission and DM the submitter')
+    .addStringOption(o => o.setName('reason').setDescription('Why the submission is being rejected').setRequired(true)))
+  .addSubcommand(s => s.setName('import').setDescription('Import an existing forum schematic into this ticket so it can be updated')
+    .addStringOption(o => o.setName('thread').setDescription('Forum thread URL or ID').setRequired(true))),
 
 // --- KELP FARM CATALOG ---
 new SlashCommandBuilder()

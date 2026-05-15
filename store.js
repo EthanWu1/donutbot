@@ -1352,6 +1352,10 @@ async function findSchematicSubmissionByTicketChannel(channelId) {
   const all = Object.values(dataStore().schematicSubmissions || {});
   return all.find(s => String(s.ticketChannelId || '') === String(channelId)) || null;
 }
+async function listSchematicSubmissions() {
+  await ensureDb();
+  return { ...(dataStore().schematicSubmissions || {}) };
+}
 async function getSchematicGuidelinesRef() {
   await ensureDb();
   return dataStore().schematicGuidelinesRef || null;
@@ -1428,6 +1432,7 @@ getSpawnerPrices, setSpawnerPrice, clearSpawnerPrice, getSpawnerPanelRef, setSpa
 getAppClosed, setAppClosed, listAppClosed,
 getTicketPanelRef, setTicketPanelRef,
 getSchematicSubmission, setSchematicSubmission, updateSchematicSubmission, findSchematicSubmissionByTicketChannel,
+listSchematicSubmissions,
 getSchematicGuidelinesRef, setSchematicGuidelinesRef,
 addTimedRole, getActiveTimedRole, revokeTimedRole, listTimedRoles, listExpiredTimedRoles,
 };
