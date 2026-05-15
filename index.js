@@ -529,15 +529,15 @@ const STAFF_CHANGE_LOG_CHANNEL_ID = C.CHANNEL_STAFF_CHANGE_LOG || '1483225252292
 // and ticket-creation flow. `key` is the slug used for ticket names and DB
 // lookups (zombified_piglin slugifies to "piglin" per request).
 const SPAWNER_TYPES = [
-  { key: 'skeleton',         label: 'Skeleton',         shortName: 'skeleton', emoji: '<:skeleton:1491774177693143231>' },
-  { key: 'creeper',          label: 'Creeper',          shortName: 'creeper',  emoji: '<:Creeper:1491635122586259477>' },
-  { key: 'zombified_piglin', label: 'Zombified Piglin', shortName: 'piglin',   emoji: '🐷' },
-  { key: 'cow',              label: 'Cow',              shortName: 'cow',      emoji: '🐮' },
-  { key: 'pig',              label: 'Pig',              shortName: 'pig',      emoji: '🐖' },
-  { key: 'spider',           label: 'Spider',           shortName: 'spider',   emoji: '🕷️' },
-  { key: 'zombie',           label: 'Zombie',           shortName: 'zombie',   emoji: '🧟' },
+  { key: 'skeleton',         label: 'Skeleton',         shortName: 'skeleton',   emoji: '<:skeleton:1491774177693143231>' },
+  { key: 'creeper',          label: 'Creeper',          shortName: 'creeper',    emoji: '<:Creeper:1491635122586259477>' },
+  { key: 'zombified_piglin', label: 'Zombified Piglin', shortName: 'piglin',     emoji: '<:piglin:1504843201641451640>' },
+  { key: 'cow',              label: 'Cow',              shortName: 'cow',        emoji: '<:cows:1504843396898885642>' },
+  { key: 'pig',              label: 'Pig',              shortName: 'pig',        emoji: '<:pigs:1504843413189558474>' },
+  { key: 'spider',           label: 'Spider',           shortName: 'spider',     emoji: '<:spiders:1504843581171433607>' },
+  { key: 'zombie',           label: 'Zombie',           shortName: 'zombie',     emoji: '🧟' },
   { key: 'iron_golem',       label: 'Iron Golem',       shortName: 'iron-golem', emoji: '🤖' },
-  { key: 'blaze',            label: 'Blaze',            shortName: 'blaze',    emoji: '🔥' },
+  { key: 'blaze',            label: 'Blaze',            shortName: 'blaze',      emoji: '<:blaze:1484299548015984650>' },
 ];
 
 function getSpawnerType(key) {
