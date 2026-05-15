@@ -698,56 +698,67 @@
     west:  { uv: [0, 0, 16, 16], texture: '#0' },
   });
 
-  // Minecart helpers. Body uses the entity/minecart sprite, top "cargo" box
-  // uses the variant-specific texture. Two-texture model — BlockModel maps
-  // textures by index, so body refers to #0 and top refers to #1.
-  function _minecartCommonElements(includeTop) {
+  // Minecart helpers. Body uses block/iron_block (uniform gray "iron cart"
+  // look — vanilla minecart entity texture is a 64x32 sprite atlas that can't
+  // be cleanly mapped to a cube without per-face UV regions matching the
+  // entity model's box-by-box layout, and full-UV per face produces visible
+  // garbage. Solid iron reads as a recognizable cart from iso top-down.
+  // Cargo top swaps in a variant-specific block texture.
+  function _minecartCommonElements(includeTop, height = 6) {
+    // Body: 14×height×16 — slightly shorter and wider than tall (vanilla
+    // minecart proportions). Sits at y=0.5..(0.5+height/16).
     const body = {
-      from: [1, 1, 0], to: [15, 9, 16],
+      from: [1, 1, 0], to: [15, 1 + height, 16],
       faces: {
-        down:  { uv: [0, 0, 16, 16], texture: '#0' },
-        up:    { uv: [0, 0, 16, 16], texture: '#0' },
-        north: { uv: [0, 0, 16, 16], texture: '#0' },
-        south: { uv: [0, 0, 16, 16], texture: '#0' },
-        east:  { uv: [0, 0, 16, 16], texture: '#0' },
-        west:  { uv: [0, 0, 16, 16], texture: '#0' },
+        down:  { uv: [0, 0, 14, 16], texture: '#0' },
+        up:    { uv: [0, 0, 14, 16], texture: '#0' },
+        north: { uv: [0, 0, 14, height], texture: '#0' },
+        south: { uv: [0, 0, 14, height], texture: '#0' },
+        east:  { uv: [0, 0, 16, height], texture: '#0' },
+        west:  { uv: [0, 0, 16, height], texture: '#0' },
       },
     };
     if (!includeTop) return [body];
+    // Cargo box: smaller box on top, ~10w × 6h × 10d.
+    const cargoY0 = 1 + height;
+    const cargoY1 = cargoY0 + 6;
     const top = {
-      from: [2, 9, 2], to: [14, 15, 14],
+      from: [3, cargoY0, 3], to: [13, cargoY1, 13],
       faces: {
-        down:  { uv: [0, 0, 16, 16], texture: '#1' },
-        up:    { uv: [0, 0, 16, 16], texture: '#1' },
-        north: { uv: [0, 0, 16, 16], texture: '#1' },
-        south: { uv: [0, 0, 16, 16], texture: '#1' },
-        east:  { uv: [0, 0, 16, 16], texture: '#1' },
-        west:  { uv: [0, 0, 16, 16], texture: '#1' },
+        down:  { uv: [0, 0, 10, 10], texture: '#1' },
+        up:    { uv: [0, 0, 10, 10], texture: '#1' },
+        north: { uv: [0, 0, 10, 6], texture: '#1' },
+        south: { uv: [0, 0, 10, 6], texture: '#1' },
+        east:  { uv: [0, 0, 10, 6], texture: '#1' },
+        west:  { uv: [0, 0, 10, 6], texture: '#1' },
       },
     };
     return [body, top];
   }
-  const MINECART_TEX = 'entity/minecart/minecart';
+  const CART_BODY_TEX = 'block/iron_block';
   function minecartModel() {
-    return new D.BlockModel(undefined, { 0: MINECART_TEX }, _minecartCommonElements(false));
+    return new D.BlockModel(undefined, { 0: CART_BODY_TEX }, _minecartCommonElements(false));
   }
   function chestMinecartModel() {
-    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'entity/chest/normal' }, _minecartCommonElements(true));
+    // Use oak_planks for chest cargo — chest entity texture is a net layout
+    // and doesn't tile across simple cube faces. Plain oak reads as "wooden
+    // chest box on rails" without UV warping.
+    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/oak_planks' }, _minecartCommonElements(true));
   }
   function hopperMinecartModel() {
-    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/hopper_outside' }, _minecartCommonElements(true));
+    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/hopper_outside' }, _minecartCommonElements(true));
   }
   function furnaceMinecartModel() {
-    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/furnace_front' }, _minecartCommonElements(true));
+    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/furnace_side' }, _minecartCommonElements(true));
   }
   function tntMinecartModel() {
-    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/tnt_side' }, _minecartCommonElements(true));
+    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/tnt_side' }, _minecartCommonElements(true));
   }
   function commandBlockMinecartModel() {
-    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/command_block_side' }, _minecartCommonElements(true));
+    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/command_block_side' }, _minecartCommonElements(true));
   }
   function spawnerMinecartModel() {
-    return new D.BlockModel(undefined, { 0: MINECART_TEX, 1: 'block/spawner' }, _minecartCommonElements(true));
+    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/spawner' }, _minecartCommonElements(true));
   }
 
   function itemFrameModel(glow) {
@@ -783,24 +794,49 @@
   }
 
   // Boat: ~24w × 6h × 12d hull, occupies more than one cell horizontally.
-  // Vanilla boat is 1.375 wide × 0.5625 tall × 0.5625 deep — close enough.
+  // Vanilla boat entity sprite is a 128×64 net atlas — full-UV per face
+  // produces garbage. Use the matching planks block texture instead so each
+  // wood-type boat reads as its species (oak_planks, mangrove_planks, etc.).
   function boatModel(wood) {
+    const tex = `block/${wood}_planks`;
     const hull = {
       from: [-4, 0, 2], to: [20, 6, 14],
-      faces: CUBE_FACES_FULL(),
+      faces: {
+        down:  { uv: [0, 0, 16, 12], texture: '#0' },
+        up:    { uv: [0, 0, 16, 12], texture: '#0' },
+        north: { uv: [0, 0, 16, 6], texture: '#0' },
+        south: { uv: [0, 0, 16, 6], texture: '#0' },
+        east:  { uv: [0, 0, 12, 6], texture: '#0' },
+        west:  { uv: [0, 0, 12, 6], texture: '#0' },
+      },
     };
-    return new D.BlockModel(undefined, { 0: `entity/boat/${wood}` }, [hull]);
+    return new D.BlockModel(undefined, { 0: tex }, [hull]);
   }
   function chestBoatModel(wood) {
+    const tex = `block/${wood}_planks`;
     const hull = {
       from: [-4, 0, 2], to: [20, 6, 14],
-      faces: CUBE_FACES_FULL(),
+      faces: {
+        down:  { uv: [0, 0, 16, 12], texture: '#0' },
+        up:    { uv: [0, 0, 16, 12], texture: '#0' },
+        north: { uv: [0, 0, 16, 6], texture: '#0' },
+        south: { uv: [0, 0, 16, 6], texture: '#0' },
+        east:  { uv: [0, 0, 12, 6], texture: '#0' },
+        west:  { uv: [0, 0, 12, 6], texture: '#0' },
+      },
     };
     const chest = {
       from: [4, 6, 4], to: [12, 12, 12],
-      faces: CUBE_FACES_FULL(),
+      faces: {
+        down:  { uv: [0, 0, 8, 8], texture: '#0' },
+        up:    { uv: [0, 0, 8, 8], texture: '#0' },
+        north: { uv: [0, 0, 8, 6], texture: '#0' },
+        south: { uv: [0, 0, 8, 6], texture: '#0' },
+        east:  { uv: [0, 0, 8, 6], texture: '#0' },
+        west:  { uv: [0, 0, 8, 6], texture: '#0' },
+      },
     };
-    return new D.BlockModel(undefined, { 0: `entity/chest_boat/${wood}` }, [hull, chest]);
+    return new D.BlockModel(undefined, { 0: tex }, [hull, chest]);
   }
 
   // Painting: variable-size flat plate. Default 1×1 — render-side reads
