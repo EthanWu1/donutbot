@@ -617,8 +617,8 @@ function buildSpawnerPricesEmbed(prices) {
 
 function buildSpawnerPanelComponents() {
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('spawner_open:buy').setLabel('Buy Spawners').setStyle(ButtonStyle.Secondary).setEmoji('💀'),
-    new ButtonBuilder().setCustomId('spawner_open:sell').setLabel('Sell Spawners').setStyle(ButtonStyle.Secondary).setEmoji('💰'),
+    new ButtonBuilder().setCustomId('spawner_open:buy').setLabel('Buy Spawners').setStyle(ButtonStyle.Secondary).setEmoji('📤'),
+    new ButtonBuilder().setCustomId('spawner_open:sell').setLabel('Sell Spawners').setStyle(ButtonStyle.Secondary).setEmoji('📥'),
   );
   return [row];
 }
@@ -1111,7 +1111,7 @@ function panelButtonEmoji(panelId, keyOrLabel) {
   if (p === 'schematic_purchase' && /purchase/.test(s)) return '💰';
 
   // Global ticket panel emojis
-  if (/^other$/.test(s) || /support/.test(s)) return '❓';
+  if (/^other$/.test(s) || /support/.test(s)) return '⚠️';
   if (/spawner/.test(s) && /(buy|sell)/.test(s)) return '💀';
   if ((/giveaway|gw/.test(p) || /giveaway|gw/.test(s)) && /claim/.test(s)) return '🎊';
   if (/farm.*help/.test(s)) return '🌱';
@@ -2582,7 +2582,7 @@ client.once('clientReady', async () => {
       };
 
       const otherBtn = supportLikeButton(
-        'support', 'Other', '❓',
+        'support', 'Other', '⚠️',
         C.TICKET_CATEGORIES.SUPPORT,
         'Welcome {userMention}, thank you for reaching out!\nPlease describe your issue and we will get back to you as soon as possible.',
       );
