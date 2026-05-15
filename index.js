@@ -1427,6 +1427,35 @@ async function closeTicket({ guild, channel, closerId, reason }) {
 async function cleanupTranscriptsOnBoot() {}
 
 const appSessions = new Map(); // userId -> session
+
+// Build the action-row(s) for an application review embed.
+//   ticketChannelId   — when set, the "Open Ticket" button is replaced with
+//                       a "View Ticket" Discord link (no interaction needed).
+//   includeDecisionButtons — false after the decision has been made;
+//                       only the View Ticket link (if any) survives.
+function buildAppReviewActionRows({ appId, ticketChannelId, guildId, includeDecisionButtons }) {
+  const ticketUrl = (ticketChannelId && guildId)
+    ? `https://discord.com/channels/${guildId}/${ticketChannelId}`
+    : null;
+
+  if (!includeDecisionButtons) {
+    if (!ticketUrl) return [];
+    return [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setLabel('View Ticket').setStyle(ButtonStyle.Link).setURL(ticketUrl),
+    )];
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`app_decide:accept:${appId}`).setLabel('Accept').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`app_decide:deny:${appId}`).setLabel('Deny').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`app_decide:accept_reason:${appId}`).setLabel('Accept with reason').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`app_decide:deny_reason:${appId}`).setLabel('Deny with reason').setStyle(ButtonStyle.Danger),
+    ticketUrl
+      ? new ButtonBuilder().setLabel('View Ticket').setStyle(ButtonStyle.Link).setURL(ticketUrl)
+      : new ButtonBuilder().setCustomId(`app_open_ticket:${appId}`).setLabel('Open Ticket').setStyle(ButtonStyle.Secondary),
+  );
+  return [row];
+}
 const acceptedStaffInfoSessions = new Map(); // userId -> accepted staff/builder IGN collection
 
 async function getApplicationCooldown(userId, typeId) {
@@ -1821,14 +1850,13 @@ async function sendNextAppQuestion(userId) {
 
     let m = null;
     if (reviewCh && reviewCh.isTextBased()) {
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`app_decide:accept:${appId}`).setLabel("Accept").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`app_decide:deny:${appId}`).setLabel("Deny").setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId(`app_decide:accept_reason:${appId}`).setLabel("Accept with reason").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`app_decide:deny_reason:${appId}`).setLabel("Deny with reason").setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId(`app_open_ticket:${appId}`).setLabel("Open Ticket").setStyle(ButtonStyle.Secondary)
-      );
-      m = await reviewCh.send({ embeds: [eb], components: [row] }).catch(() => null);
+      const rows = buildAppReviewActionRows({
+        appId,
+        guildId: reviewCh.guildId,
+        ticketChannelId: null,
+        includeDecisionButtons: true,
+      });
+      m = await reviewCh.send({ embeds: [eb], components: rows }).catch(() => null);
     }
 
     await store.createAppSubmission(appId, {
@@ -4272,7 +4300,14 @@ Only the ticket creator can continue.`);
       const baseTitle = (interaction.message.embeds[0]?.title || "Application").replace(/\s+[—-]\s+(Accepted|Denied)$/i, '').trim();
       const eb = baseEmbed.setColor(color).setTitle(`${baseTitle} - ${title}`);
       if (typeof eb.clearFooter === 'function') eb.clearFooter();
-      await interaction.message.edit({ embeds: [eb], components: [] }).catch(()=>{});
+      // Preserve the View Ticket link after a decision, if a ticket was opened.
+      const survivingRows = buildAppReviewActionRows({
+        appId,
+        ticketChannelId: sub.ticketChannelId || null,
+        guildId: interaction.guildId,
+        includeDecisionButtons: false,
+      });
+      await interaction.message.edit({ embeds: [eb], components: survivingRows }).catch(()=>{});
       if (status === "ACCEPTED") {
         await grantApplicationAcceptanceRoles({
           guild: interaction.guild,
@@ -4324,10 +4359,30 @@ Only the ticket creator can continue.`);
       const supportQuestion = `Application Request
 ${sourceLink}`;
       const result = await createSupportTicketForUser({ interaction, targetUser, supportQuestion });
+      const ticketChannelId = result?.channel?.id || null;
+
+      // Persist the linked ticket channel on the submission so the review
+      // embed survives bot restarts and an Accept/Deny later keeps the link.
+      if (ticketChannelId) {
+        await store.updateAppSubmission(appId, { ticketChannelId }).catch(() => {});
+        try {
+          const stillPending = String(sub.status || 'PENDING').toUpperCase() === 'PENDING';
+          const newRows = buildAppReviewActionRows({
+            appId,
+            ticketChannelId,
+            guildId: interaction.guildId,
+            includeDecisionButtons: stillPending,
+          });
+          await interaction.message.edit({ components: newRows }).catch(() => {});
+        } catch (e) {
+          console.error('[app_open_ticket] review-row edit error:', e?.message);
+        }
+      }
+
       if (result?.duplicate) {
-        await interaction.editReply({ content: `A support ticket is already open for this applicant: <#${result.channel.id}>` }).catch(() => {});
+        await interaction.editReply({ content: `A support ticket is already open for this applicant: <#${ticketChannelId}>` }).catch(() => {});
       } else {
-        await interaction.editReply({ content: `✅ Support ticket created: <#${result.channel.id}>` }).catch(() => {});
+        await interaction.editReply({ content: `✅ Support ticket created: <#${ticketChannelId}>` }).catch(() => {});
       }
     } catch (e) {
       await interaction.editReply({ content: e?.message || 'Could not create the support ticket.' }).catch(() => {});
@@ -4358,7 +4413,13 @@ ${sourceLink}`;
         const baseTitle = (msg.embeds[0]?.title || "Application").replace(/\s+[—-]\s+(Accepted|Denied)$/i, '').trim();
         const eb = EmbedBuilder.from(msg.embeds[0]).setColor(color).setTitle(`${baseTitle} - ${title}`).addFields({ name: "Reason", value: formatApplicationReason(reason) });
         if (typeof eb.clearFooter === 'function') eb.clearFooter();
-        await msg.edit({ embeds: [eb], components: [] }).catch(()=>{});
+        const survivingRows = buildAppReviewActionRows({
+          appId,
+          ticketChannelId: sub.ticketChannelId || null,
+          guildId: interaction.guildId,
+          includeDecisionButtons: false,
+        });
+        await msg.edit({ embeds: [eb], components: survivingRows }).catch(()=>{});
       }
     } catch {}
     if (status === "ACCEPTED") {
