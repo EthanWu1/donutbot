@@ -6269,7 +6269,12 @@ Only the ticket creator can continue.`);
         const price = parseNumber(priceRaw);
         if (!price || price <= 0) return interaction.editReply('Invalid price. Use formats like `5m`, `500k`.');
         const receiverDiscordId = null;
-        const receiverIgn = C.DEFAULT_RECEIVER_IGN || C.STAFF_PAY_RECEIVER_IGN || 'iEtZ';
+        // Allow-listed receiver IGNs the builder can pick at /build start time.
+        const RECEIVER_CHOICES = new Set(['iEtZ', 'Vi2910NC']);
+        const receiverOpt = options.getString('receiver');
+        const receiverIgn = RECEIVER_CHOICES.has(receiverOpt)
+          ? receiverOpt
+          : (C.DEFAULT_RECEIVER_IGN || C.STAFF_PAY_RECEIVER_IGN || 'iEtZ');
 
         const buildId = generateId();
         const createdAt = Date.now();

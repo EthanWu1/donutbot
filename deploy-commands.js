@@ -225,7 +225,12 @@ const commands = [
       .addStringOption(o => o.setName('customer_ign').setDescription('Customer IGN').setRequired(true))
       .addStringOption(o => o.setName('builder_ign').setDescription('Builder IGN (your IGN)').setRequired(true))
       .addUserOption(o => o.setName('customer_discord').setDescription('Customer Discord user').setRequired(true))
-      .addStringOption(o => o.setName('price').setDescription('Total build price (e.g. 5m, 500k)').setRequired(true)))
+      .addStringOption(o => o.setName('price').setDescription('Total build price (e.g. 5m, 500k)').setRequired(true))
+      .addStringOption(o => o.setName('receiver').setDescription('Payment receiver IGN (default iEtZ)').setRequired(false)
+        .addChoices(
+          { name: 'iEtZ',     value: 'iEtZ' },
+          { name: 'Vi2910NC', value: 'Vi2910NC' },
+        )))
     .addSubcommand(s => s.setName('edit').setDescription('Edit an active build job (price, builder, IGNs, build name)')
       .addStringOption(o => o.setName('build_id').setDescription('Build ID to edit (shown in embed footer)').setRequired(true))
       .addStringOption(o => o.setName('price').setDescription('New total price — creates additional paywatch for the difference').setRequired(false))
