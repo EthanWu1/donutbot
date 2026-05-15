@@ -351,6 +351,25 @@
         (x + w) / atlasSize, (y + h) / atlasSize,
       ];
     }
+    // Entity sprite atlases are NON-SQUARE (minecart 64x32, boats 128x64) and
+    // the default min(w,h) clamp in the loop above only exposes the LEFT
+    // square portion of each, which is unusable for accurate per-face UV
+    // mapping of entity models. Override these specific keys to use the FULL
+    // atlas region so face.uv can address every pixel of the sprite.
+    const ENTITY_FULL_REGION_TEXTURES = ['entity/minecart/minecart'];
+    for (const wood of ['oak','spruce','birch','jungle','acacia','dark_oak','mangrove','cherry','bamboo','pale_oak']) {
+      ENTITY_FULL_REGION_TEXTURES.push(`entity/boat/${wood}`);
+      ENTITY_FULL_REGION_TEXTURES.push(`entity/chest_boat/${wood}`);
+    }
+    for (const tex of ENTITY_FULL_REGION_TEXTURES) {
+      const region = atlasIdx[tex];
+      if (!region) continue;
+      const [x, y, w, h] = region;
+      uvMap[Identifier.parse(tex).toString()] = [
+        x / atlasSize, y / atlasSize,
+        (x + w) / atlasSize, (y + h) / atlasSize,
+      ];
+    }
     const atlas = new TextureAtlas(atlasData, uvMap);
 
     const fallbackModel = BlockModel.fromJson({
@@ -698,67 +717,135 @@
     west:  { uv: [0, 0, 16, 16], texture: '#0' },
   });
 
-  // Minecart helpers. Body uses block/iron_block (uniform gray "iron cart"
-  // look — vanilla minecart entity texture is a 64x32 sprite atlas that can't
-  // be cleanly mapped to a cube without per-face UV regions matching the
-  // entity model's box-by-box layout, and full-UV per face produces visible
-  // garbage. Solid iron reads as a recognizable cart from iso top-down.
-  // Cargo top swaps in a variant-specific block texture.
-  function _minecartCommonElements(includeTop, height = 6) {
-    // Body: 14×height×16 — slightly shorter and wider than tall (vanilla
-    // minecart proportions). Sits at y=0.5..(0.5+height/16).
-    const body = {
-      from: [1, 1, 0], to: [15, 1 + height, 16],
+  // Minecart helpers. Uses the actual vanilla entity/minecart/minecart sprite
+  // (64×32) with per-face UV regions matching MinecraftClient's
+  // MinecartEntityModel layout: 16×8×2 wall cuboid at texture UV (0, 10) for
+  // the four rotated side panels, 18×2×14 floor cuboid at texture UV (0, 0)
+  // for the inside floor.
+  //
+  // face.uv is normalized to atlas region [0..16]. For the minecart sprite
+  // overridden to its full 64×32 region, 1 pixel = 16/64 = 0.25 in U and
+  // 16/32 = 0.5 in V. So pixel (x, y) → face.uv (x*0.25, y*0.5).
+  //
+  // Vanilla cuboid 16×8×2 at (0, 10) has its 16×8 visible side wall on the
+  // "north" face at pixel (2, 12) to (18, 20) → face.uv (0.5, 6, 4.5, 10).
+  // The 2×8 short end is at pixel (0, 12) to (2, 20) → face.uv (0, 6, 0.5, 10).
+  // The 16×2 floor strip (down face of wall) is at pixel (2, 10) to (18, 12)
+  // → face.uv (0.5, 5, 4.5, 6).
+  //
+  // Vanilla floor cuboid 18×2×14 at (0, 0): up face at pixel (32, 0) to
+  // (50, 14) → face.uv (8, 0, 12.5, 7). down face at pixel (14, 0) to
+  // (32, 14) → face.uv (3.5, 0, 8, 7).
+  function _minecartBodyElement() {
+    // Body 14w × 6h × 16d at y=1..7 (cart sits low in cell).
+    return {
+      from: [1, 1, 0], to: [15, 7, 16],
       faces: {
-        down:  { uv: [0, 0, 14, 16], texture: '#0' },
-        up:    { uv: [0, 0, 14, 16], texture: '#0' },
-        north: { uv: [0, 0, 14, height], texture: '#0' },
-        south: { uv: [0, 0, 14, height], texture: '#0' },
-        east:  { uv: [0, 0, 16, height], texture: '#0' },
-        west:  { uv: [0, 0, 16, height], texture: '#0' },
+        // Top: cart inside floor (visible from iso top-down).
+        up:    { uv: [8, 0, 12.5, 7], texture: '#cart' },
+        // Bottom: cart underside.
+        down:  { uv: [3.5, 0, 8, 7], texture: '#cart' },
+        // Long sides (N/S, 16w × 8h faces clamped to 14 wide × 6 tall here):
+        // use the wall side panel UV.
+        north: { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
+        south: { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
+        // Short ends (E/W): use the same wall side panel — texture compresses
+        // slightly but reads as cart wood.
+        east:  { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
+        west:  { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
       },
     };
-    if (!includeTop) return [body];
-    // Cargo box: smaller box on top, ~10w × 6h × 10d.
-    const cargoY0 = 1 + height;
-    const cargoY1 = cargoY0 + 6;
-    const top = {
-      from: [3, cargoY0, 3], to: [13, cargoY1, 13],
-      faces: {
-        down:  { uv: [0, 0, 10, 10], texture: '#1' },
-        up:    { uv: [0, 0, 10, 10], texture: '#1' },
-        north: { uv: [0, 0, 10, 6], texture: '#1' },
-        south: { uv: [0, 0, 10, 6], texture: '#1' },
-        east:  { uv: [0, 0, 10, 6], texture: '#1' },
-        west:  { uv: [0, 0, 10, 6], texture: '#1' },
-      },
-    };
-    return [body, top];
   }
-  const CART_BODY_TEX = 'block/iron_block';
+
+  // Chest body uses vanilla chest_normal.png net layout (64×64). Bottom
+  // cuboid 14×10×14 at uv (0, 19), lid cuboid 14×4×14 at uv (0, 0) — same
+  // UV math as wideChestModel above.
+  function _chestCargoElements(yBase) {
+    const body = {
+      from: [3, yBase, 3], to: [13, yBase + 7, 13],  // 10w × 7h × 10d
+      faces: {
+        down:  { uv: [3.5, 4.75, 7, 8.25], texture: '#chest' },
+        up:    { uv: [7, 4.75, 10.5, 8.25], texture: '#chest' },
+        west:  { uv: [0, 8.25, 3.5, 10.75], texture: '#chest', rotation: 180 },
+        north: { uv: [3.5, 8.25, 7, 10.75], texture: '#chest', rotation: 180 },
+        east:  { uv: [7, 8.25, 10.5, 10.75], texture: '#chest', rotation: 180 },
+        south: { uv: [10.5, 8.25, 14, 10.75], texture: '#chest', rotation: 180 },
+      },
+    };
+    const lid = {
+      from: [3, yBase + 7, 3], to: [13, yBase + 10, 13],  // lid 3 tall
+      faces: {
+        down:  { uv: [3.5, 0, 7, 3.5], texture: '#chest' },
+        up:    { uv: [7, 0, 10.5, 3.5], texture: '#chest' },
+        west:  { uv: [0, 3.5, 3.5, 4.5], texture: '#chest', rotation: 180 },
+        north: { uv: [3.5, 3.5, 7, 4.5], texture: '#chest', rotation: 180 },
+        east:  { uv: [7, 3.5, 10.5, 4.5], texture: '#chest', rotation: 180 },
+        south: { uv: [10.5, 3.5, 14, 4.5], texture: '#chest', rotation: 180 },
+      },
+    };
+    return [body, lid];
+  }
+
+  // Variant cargo using simple block textures (full-UV per face — fine for
+  // 16×16 block textures since they tile cleanly).
+  function _blockCargoElement(yBase) {
+    return {
+      from: [3, yBase, 3], to: [13, yBase + 8, 13],
+      faces: {
+        down:  { uv: [0, 0, 10, 10], texture: '#cargo' },
+        up:    { uv: [0, 0, 10, 10], texture: '#cargo' },
+        north: { uv: [0, 0, 10, 8], texture: '#cargo' },
+        south: { uv: [0, 0, 10, 8], texture: '#cargo' },
+        east:  { uv: [0, 0, 10, 8], texture: '#cargo' },
+        west:  { uv: [0, 0, 10, 8], texture: '#cargo' },
+      },
+    };
+  }
+
   function minecartModel() {
-    return new D.BlockModel(undefined, { 0: CART_BODY_TEX }, _minecartCommonElements(false));
+    return new D.BlockModel(undefined, { cart: 'entity/minecart/minecart' }, [_minecartBodyElement()]);
   }
   function chestMinecartModel() {
-    // Use oak_planks for chest cargo — chest entity texture is a net layout
-    // and doesn't tile across simple cube faces. Plain oak reads as "wooden
-    // chest box on rails" without UV warping.
-    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/oak_planks' }, _minecartCommonElements(true));
+    return new D.BlockModel(
+      undefined,
+      { cart: 'entity/minecart/minecart', chest: 'entity/chest/normal' },
+      [_minecartBodyElement(), ..._chestCargoElements(7)]
+    );
   }
   function hopperMinecartModel() {
-    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/hopper_outside' }, _minecartCommonElements(true));
+    return new D.BlockModel(
+      undefined,
+      { cart: 'entity/minecart/minecart', cargo: 'block/hopper_outside' },
+      [_minecartBodyElement(), _blockCargoElement(7)]
+    );
   }
   function furnaceMinecartModel() {
-    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/furnace_side' }, _minecartCommonElements(true));
+    return new D.BlockModel(
+      undefined,
+      { cart: 'entity/minecart/minecart', cargo: 'block/furnace_side' },
+      [_minecartBodyElement(), _blockCargoElement(7)]
+    );
   }
   function tntMinecartModel() {
-    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/tnt_side' }, _minecartCommonElements(true));
+    return new D.BlockModel(
+      undefined,
+      { cart: 'entity/minecart/minecart', cargo: 'block/tnt_side' },
+      [_minecartBodyElement(), _blockCargoElement(7)]
+    );
   }
   function commandBlockMinecartModel() {
-    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/command_block_side' }, _minecartCommonElements(true));
+    return new D.BlockModel(
+      undefined,
+      { cart: 'entity/minecart/minecart', cargo: 'block/command_block_side' },
+      [_minecartBodyElement(), _blockCargoElement(7)]
+    );
   }
   function spawnerMinecartModel() {
-    return new D.BlockModel(undefined, { 0: CART_BODY_TEX, 1: 'block/spawner' }, _minecartCommonElements(true));
+    return new D.BlockModel(
+      undefined,
+      { cart: 'entity/minecart/minecart', cargo: 'block/spawner' },
+      [_minecartBodyElement(), _blockCargoElement(7)]
+    );
   }
 
   function itemFrameModel(glow) {
