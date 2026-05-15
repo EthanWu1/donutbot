@@ -6609,9 +6609,10 @@ if (commandName === 'giveaway') {
 
     // --- LITEMATIC RENDER ---
     if (commandName === 'render') {
-      return handleRenderCommand(interaction, {
+      await handleRenderCommand(interaction, {
         renderLitematic: (buf, opts) => getLitematicRender().renderLitematic(buf, opts),
       });
+      return;
     }
 
     // --- SERVER INFO ---

@@ -79,7 +79,7 @@ test('render command renders litematic attachment with transparent background op
     setInFlight: () => {},
   });
 
-  assert.deepEqual(calls[0], ['getAttachment', 'litematic', true]);
+  assert.deepEqual(calls[0], ['getAttachment', 'litematic', false]);
   assert.deepEqual(calls[1], ['deferReply']);
   assert.deepEqual(calls[2], ['fetch', 'https://cdn.example/farm.litematic', true]);
   assert.deepEqual(calls[3], ['render', true, { width: 1024, height: 1024, transparentBackground: true }]);
@@ -90,6 +90,68 @@ test('render command renders litematic attachment with transparent background op
   assert.equal(embed.fields[0].value, '`17/24`');
   assert.equal(embed.fields[1].value, '`2 x 3 x 4`');
   assert.equal(embed.image.url, `attachment://${reply[1].files[0].name}`);
+});
+
+test('render command supports the previously deployed file attachment option', async () => {
+  const calls = [];
+  const interaction = {
+    user: { id: 'user-1' },
+    options: {
+      getAttachment(name, required) {
+        calls.push(['getAttachment', name, required]);
+        if (name === 'file') return { name: 'legacy.litematic', size: 12, url: 'https://cdn.example/legacy.litematic' };
+        return null;
+      },
+    },
+    async deferReply() { calls.push(['deferReply']); },
+    async editReply(payload) { calls.push(['editReply', payload]); },
+  };
+
+  await handleRenderCommand(interaction, {
+    fetchImpl: async () => ({
+      ok: true,
+      headers: { get: () => '12' },
+      async arrayBuffer() { return Buffer.from('litematic'); },
+    }),
+    renderLitematic: async () => ({
+      png: Buffer.from('png'),
+      meta: { name: 'Legacy', size: { x: 1, y: 1, z: 1 }, blockCount: 1 },
+    }),
+    cooldowns: new Map(),
+    getInFlight: () => 0,
+    setInFlight: () => {},
+  });
+
+  assert.deepEqual(calls[0], ['getAttachment', 'litematic', false]);
+  assert.deepEqual(calls[1], ['getAttachment', 'file', false]);
+  assert.equal(calls.at(-1)[0], 'editReply');
+});
+
+test('render command replies instead of throwing when no attachment option is present', async () => {
+  const calls = [];
+  const interaction = {
+    user: { id: 'user-1' },
+    options: {
+      getAttachment(name, required) {
+        calls.push(['getAttachment', name, required]);
+        return null;
+      },
+    },
+    async reply(payload) { calls.push(['reply', payload]); },
+  };
+
+  await handleRenderCommand(interaction, {
+    fetchImpl: async () => { throw new Error('should not fetch'); },
+    renderLitematic: async () => { throw new Error('should not render'); },
+    cooldowns: new Map(),
+    getInFlight: () => 0,
+    setInFlight: () => {},
+  });
+
+  assert.deepEqual(calls.at(-1), [
+    'reply',
+    { content: 'Attach a `.litematic` file to render.', ephemeral: true },
+  ]);
 });
 
 test('render command rejects non-litematic attachments', async () => {
