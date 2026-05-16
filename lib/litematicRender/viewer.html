@@ -798,6 +798,15 @@
       if (BED_NAMES.has(name)) {
         return new D.Mesh();
       }
+      // Underwater plants: deepslate treats kelp / seagrass as inherently
+      // waterlogged, so getBlockMesh merges a water cube that buries the
+      // plant. With opts.noImplicitWater, suppress the special mesh entirely
+      // so only the plant's cross block model renders (single-block icons).
+      if ((window.__renderOpts && window.__renderOpts.noImplicitWater)
+          && (name === 'minecraft:kelp' || name === 'minecraft:kelp_plant'
+              || name === 'minecraft:seagrass' || name === 'minecraft:tall_seagrass')) {
+        return new D.Mesh();
+      }
       // Signs (standing / wall / hanging / wall-hanging): deepslate's
       // SpecialRenderers.signRenderer draws an entity sign using
       // entity/signs/<type> textures that aren't in our atlas → a
@@ -806,6 +815,30 @@
       // renders.
       if (name.endsWith('_sign')) {
         return new D.Mesh();
+      }
+      // Uncolored shulker_box: deepslate's ShulkerBoxRenderers map only keys
+      // the 16 dyed variants, so plain minecraft:shulker_box renders empty.
+      // Render it here with the default entity/shulker/shulker texture,
+      // mirroring deepslate's own shulker transform (facing + 1/16 scale).
+      if (name === 'minecraft:shulker_box') {
+        const mesh = new D.Mesh();
+        const facing = block.getProperties()?.facing || 'up';
+        const t = mat4.create();
+        mat4.translate(t, t, [8, 8, 8]);
+        if (facing === 'down') {
+          mat4.rotateX(t, t, Math.PI);
+        } else if (facing !== 'up') {
+          mat4.rotateY(t, t, facing === 'east' ? Math.PI / 2
+            : facing === 'north' ? Math.PI
+            : facing === 'west' ? Math.PI * 3 / 2 : 0);
+          mat4.rotateX(t, t, Math.PI / 2);
+        }
+        mat4.translate(t, t, [-8, -8, -8]);
+        const shulkerMesh = D.SpecialRenderers.shulkerBoxRenderer(Identifier.create('shulker'))(atlas);
+        mesh.merge(shulkerMesh.transform(t));
+        const scaleM = mat4.create();
+        mat4.scale(scaleM, scaleM, [0.0625, 0.0625, 0.0625]);
+        return mesh.transform(scaleM);
       }
       // Surgical top-face cull: a block has fluid directly above. Force
       // cull.up=true so its top quad doesn't z-fight with the fluid's bottom.
@@ -1238,7 +1271,7 @@
     return window.__opaqueBlocks.has(name.replace(/^minecraft:/, ''));
   }
 
-  function buildStructure(payload) {
+  function buildStructure(payload, opts = {}) {
     const { blocks, size } = payload;
     const waterCoveredTopCulledBlocks = new Set();
     let waterCoveredTopCullCount = 0;
@@ -1247,9 +1280,13 @@
     // (bubble_column, kelp, waterlogged glass panes etc). The phantoms ride
     // alongside the real block so preprocessFluid sees them as water and the
     // SpecialRenderer can also generate a water mesh at the cell.
-    for (const b of blocks) {
-      if (blockImpliesWater(b)) {
-        b.__implicitWater = true;
+    // opts.noImplicitWater skips this so an isolated kelp/seagrass block
+    // renders as a bare plant (used for single-block icon renders).
+    if (!opts.noImplicitWater) {
+      for (const b of blocks) {
+        if (blockImpliesWater(b)) {
+          b.__implicitWater = true;
+        }
       }
     }
     preprocessWater(blocks);
@@ -1362,20 +1399,22 @@
     return boundsFromSize(boundsOrSize);
   }
 
-  function isoView(boundsOrSize) {
+  // yaw defaults to ISO_Y; callers pass a rotated yaw to spin the camera
+  // around the build (used for 360° turntable renders).
+  function isoView(boundsOrSize, yaw = ISO_Y) {
     const bounds = normalizedRenderBounds(boundsOrSize);
     const size = bounds.size;
     const m = mat4.create();
     const dist = (size.x + size.y + size.z) * 2;
     mat4.translate(m, m, [0, 0, -dist]);
     mat4.rotateX(m, m, ISO_X);
-    mat4.rotateY(m, m, ISO_Y);
+    mat4.rotateY(m, m, yaw);
     mat4.translate(m, m, [-bounds.center.x, -bounds.center.y, -bounds.center.z]);
     return m;
   }
 
-  function projectIso(x, y, z) {
-    const c = Math.cos(ISO_Y), s = Math.sin(ISO_Y);
+  function projectIso(x, y, z, yaw = ISO_Y) {
+    const c = Math.cos(yaw), s = Math.sin(yaw);
     const cx = Math.cos(ISO_X), sx = Math.sin(ISO_X);
     const x1 = c * x - s * z;
     const z1 = s * x + c * z;
@@ -1383,7 +1422,7 @@
     return { sx: x1, sy: y1 };
   }
 
-  function isoProj(boundsOrSize, width, height, padding = 1.18) {
+  function isoProj(boundsOrSize, width, height, padding = 1.18, yaw = ISO_Y) {
     const bounds = normalizedRenderBounds(boundsOrSize);
     const center = bounds.center;
     // 1.18 = ~15% margin so the build "floats" with breathing room like
@@ -1392,7 +1431,7 @@
     for (const cx of [bounds.minX - center.x, bounds.maxX - center.x])
     for (const cy of [bounds.minY - center.y, bounds.maxY - center.y])
     for (const cz of [bounds.minZ - center.z, bounds.maxZ - center.z]) {
-      const { sx, sy } = projectIso(cx, cy, cz);
+      const { sx, sy } = projectIso(cx, cy, cz, yaw);
       if (sx < minX) minX = sx;
       if (sx > maxX) maxX = sx;
       if (sy < minY) minY = sy;
@@ -1490,6 +1529,9 @@
   }
 
   async function render(payload, opts = {}) {
+    // Expose opts to the patched SpecialRenderers.getBlockMesh (which has no
+    // opts parameter) — used to suppress the kelp/seagrass water cube.
+    window.__renderOpts = opts;
     const width = opts.width || 1024;
     const height = opts.height || 1024;
     const transparentBackground = !!opts.transparentBackground;
@@ -1509,7 +1551,7 @@
     }
 
     window.__fluidFaceStats = createFluidFaceStats();
-    const buildRes = buildStructure(payload);
+    const buildRes = buildStructure(payload, opts);
     const { structure, added, skipped, skipReasons } = buildRes;
     const entityPrep = prepareRenderableEntities(payload.entities || []);
     const renderBounds = renderBoundsFor(payload.size);
@@ -1562,8 +1604,13 @@
         yawDegrees: ISO_Y / DEG_TO_RAD,
       },
     };
-    const view = isoView(renderBounds);
-    const proj = isoProj(renderBounds, width, height);
+    // yawDegrees rotates the camera around the build (360° turntable frames).
+    // frameYawDegrees fixes the framing yaw independently so a spinning build
+    // keeps a constant on-screen scale instead of pulsing per frame.
+    const viewYaw = ISO_Y + (Number(opts.yawDegrees) || 0) * DEG_TO_RAD;
+    const frameYaw = ISO_Y + (Number(opts.frameYawDegrees ?? opts.yawDegrees) || 0) * DEG_TO_RAD;
+    const view = isoView(renderBounds, viewYaw);
+    const proj = isoProj(renderBounds, width, height, Number(opts.padding) || 1.18, frameYaw);
 
     gl.viewport(0, 0, width, height);
     // Dark navy backdrop (matches Discord dark theme + SchematicPreview's framing).
