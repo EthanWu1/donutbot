@@ -1362,9 +1362,6 @@ const SCHEMATIC_GUIDELINES_TITLE = '📌 How to Submit a Schematic';
 // Litematica logo shown on the how-to post. Optional — if the asset is absent
 // the post is created/kept without an image rather than failing.
 const SCHEMATIC_GUIDELINES_LOGO = path.join(__dirname, 'lib', 'assets', 'litematica_logo.png');
-// Bump when the how-to post's embed/logo changes — an existing post is
-// refreshed once when its stored revision no longer matches.
-const SCHEMATIC_GUIDELINES_REV = 2;
 
 // Build the how-to post payload. When the Litematica logo asset is present it
 // is attached and shown as the embed thumbnail — a thumbnail displays small
@@ -1396,16 +1393,26 @@ function buildSchematicGuidelinesMessage() {
   return { embeds: [embed], files };
 }
 
-// Rewrite the existing how-to post's starter message with the current embed
-// and logo. Used to roll out post/logo changes (e.g. a resized logo) to a
-// post that already exists.
+// Bring the existing how-to post in line with buildSchematicGuidelinesMessage.
+// Self-healing: edits the starter only when it isn't already in the desired
+// state — logo shown as a small thumbnail, never as an oversized embed image.
+// Safe to run every boot; it's a no-op once the post is correct, so a failed
+// edit simply retries next restart instead of getting stuck.
 async function refreshSchematicGuidelinesPost(thread, message) {
   const starter = await thread.fetchStarterMessage().catch(() => null);
   if (!starter) return;
+  const emb = starter.embeds?.[0];
+  const wantsLogo = message.files.length > 0;
+  const hasThumb = !!emb?.thumbnail?.url;
+  const hasImage = !!emb?.image?.url;
+  // Already correct: with a logo it's a thumbnail and not a big image;
+  // without one, neither. Nothing to do.
+  if (wantsLogo ? (hasThumb && !hasImage) : (!hasThumb && !hasImage)) return;
   const wasArchived = thread.archived;
   if (wasArchived) { try { await thread.setArchived(false); } catch {} }
   try {
-    await starter.edit({ embeds: message.embeds, files: message.files });
+    // attachments: [] drops the stale logo attachment so files don't pile up.
+    await starter.edit({ embeds: message.embeds, files: message.files, attachments: [] });
   } catch (e) {
     console.error('[schematic guidelines] refresh error:', e?.message);
   }
@@ -1426,13 +1433,7 @@ async function ensureSchematicGuidelinesPost(guild) {
       const existing = await forum.threads.fetch(ref.threadId).catch(() => null);
       if (existing) {
         if (existing.name === SCHEMATIC_GUIDELINES_TITLE) {
-          // Refresh the post once whenever its stored revision is behind.
-          if (ref.rev !== SCHEMATIC_GUIDELINES_REV) {
-            await refreshSchematicGuidelinesPost(existing, message);
-            await store.setSchematicGuidelinesRef({
-              guildId: guild.id, threadId: existing.id, rev: SCHEMATIC_GUIDELINES_REV,
-            }).catch(() => {});
-          }
+          await refreshSchematicGuidelinesPost(existing, message);
           return;
         }
         try { await existing.delete('Schematic guidelines post being remade'); } catch (e) { console.error('[schematic guidelines] delete stale error:', e?.message); }
@@ -1447,7 +1448,7 @@ async function ensureSchematicGuidelinesPost(guild) {
     if (!thread) return;
     try { await thread.pin(); } catch (e) { console.error('[schematic guidelines] pin error:', e?.message); }
     await store.setSchematicGuidelinesRef({
-      guildId: guild.id, threadId: thread.id, rev: SCHEMATIC_GUIDELINES_REV,
+      guildId: guild.id, threadId: thread.id,
     }).catch(() => {});
   } catch (e) {
     console.error('[schematic guidelines] ensure error:', e?.message);
