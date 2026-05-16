@@ -2145,11 +2145,18 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
 
   // Ping routing follows the viewer allowlist — except Publish Schematic
   // tickets, which ping only the submitter so the schematic staff/helper
-  // roles aren't pulled in on every submission.
+  // roles aren't pulled in on every submission. Owner / admin roles keep
+  // channel access but are never @pinged on any ticket open.
   const isSchematicTicket = String(buttonKey) === 'publish_schematic';
+  const noPingRoleIds = new Set(
+    [C.ROLE_OWNER, C.ROLE_CO_OWNER, C.ROLE_ADMIN].filter(Boolean).map(String)
+  );
   let staffPing = null;
   if (!isSchematicTicket) {
-    staffPing = viewerRoleIds.map(r => `<@&${r}>`).join(' ') || null;
+    staffPing = viewerRoleIds
+      .filter(r => !noPingRoleIds.has(String(r)))
+      .map(r => `<@&${r}>`)
+      .join(' ') || null;
   }
 
   // Two-panel opener: Info, then Q&A (no numbering)
@@ -4901,13 +4908,18 @@ if (interaction.isButton() && interaction.customId.startsWith('schempend:')) {
 
   if (action === 'confirm') {
     await interaction.deferReply({ flags: 64 }).catch(() => {});
-    // The preview message's current PNG attachment is the chosen render.
-    const renderAtt = [...interaction.message.attachments.values()].find(a => /\.png$/i.test(a.name || ''));
-    if (!renderAtt) return safeIReply(interaction, { content: 'Could not find the preview render — upload the `.litematic` again.', flags: 64 });
+    // The chosen render is the preview message's embed image. After an edit
+    // (rotation) the PNG is consumed into the embed and no longer shows up in
+    // message.attachments, so read the embed image URL — fall back to the
+    // attachment list for a never-rotated preview.
+    const renderUrl = interaction.message.embeds?.[0]?.image?.url
+      || interaction.message.attachments?.find?.(a => /\.png$/i.test(a.name || ''))?.url
+      || null;
+    if (!renderUrl) return safeIReply(interaction, { content: 'Could not find the preview render — upload the `.litematic` again.', flags: 64 });
     await store.updateSchematicSubmission(subId, {
       litematicUrl: pr.litematicUrl,
       litematicName: pr.litematicName,
-      renderUrl: renderAtt.url,
+      renderUrl,
       rotation: Number(pr.rotation) || 0,
       size: pr.size || sub.size || null,
       blockCount: pr.blockCount || sub.blockCount || null,
