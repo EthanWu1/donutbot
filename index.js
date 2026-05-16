@@ -37,7 +37,7 @@ const store = require('./store');
 const { getUserBalance } = require('./donutsApi');
 const { parseNumber, parseDuration, getLevelFromXp, getXpForLevel, sanitizeDisplayName } = require('./utils');
 const { generateRankCard } = require('./rankCard');
-const { handleRenderCommand } = require('./lib/litematicRenderCommand');
+const { handleRenderCommand, schematicVolume } = require('./lib/litematicRenderCommand');
 const {
   APPLICATION_COOLDOWN_MS,
   buildBuilderLeaderboardLine,
@@ -679,6 +679,32 @@ function parseDesignerLines(text) {
   });
 }
 
+// Size & Volume footer for a schematic post. `sub.size` is the litematic's
+// bounding box {x,y,z}; volume is reported as placed-blocks/bounding-cells,
+// matching the /render command's embed. Returns '' when dimensions are
+// unknown so the section is simply omitted.
+function buildSchematicSizeSection(sub) {
+  const s = sub && sub.size;
+  if (!s || !(s.x > 0) || !(s.y > 0) || !(s.z > 0)) return '';
+  const fmt = (n) => Number(n || 0).toLocaleString('en-US');
+  const bounding = schematicVolume(s);
+  const sizeStr = `${fmt(s.x)} x ${fmt(s.y)} x ${fmt(s.z)}`;
+  const volStr = sub.blockCount > 0 ? `${fmt(sub.blockCount)}/${fmt(bounding)}` : fmt(bounding);
+  return `**Size & Volume**\n• Size: \`${sizeStr}\`\n• Volume: \`${volStr}\``;
+}
+
+// Append the Size & Volume section to post content, trimming the existing
+// text first if the combined result would exceed Discord's 2000-char limit.
+function appendSchematicSizeSection(content, sizeSection) {
+  if (!sizeSection) return String(content || '');
+  const base = String(content || '');
+  const cap = SCHEMATIC_MAX_BODY_CHARS - sizeSection.length - 2;
+  const trimmed = base.length > cap
+    ? base.slice(0, Math.max(0, cap - 1)).trimEnd() + '…'
+    : base;
+  return trimmed ? `${trimmed}\n\n${sizeSection}` : sizeSection;
+}
+
 function buildSchematicBody(sub) {
   const sections = [];
   const designers = parseDesignerLines(sub.designers || '');
@@ -712,7 +738,12 @@ function buildSchematicBody(sub) {
   }
 
   let body = sections.join('\n\n');
-  if (body.length > SCHEMATIC_MAX_BODY_CHARS) {
+  // The Size & Volume footer is pinned to the bottom and protected from
+  // truncation — appendSchematicSizeSection reserves room for it.
+  const sizeSection = buildSchematicSizeSection(sub);
+  if (sizeSection) {
+    body = appendSchematicSizeSection(body, sizeSection);
+  } else if (body.length > SCHEMATIC_MAX_BODY_CHARS) {
     body = body.slice(0, SCHEMATIC_MAX_BODY_CHARS - 1).trimEnd() + '…';
   }
   return body;
@@ -883,13 +914,28 @@ async function downloadToBuffer(url) {
 }
 
 // Run the existing litematic renderer on a .litematic buffer; returns the PNG
-// buffer. Throws on failure.
+// buffer plus the parsed size and block count. Throws on failure.
 async function renderLitematicToPng(buffer) {
   const renderer = getLitematicRender();
   // Transparent PNG so the render blends into Discord's surface — looks
   // cleaner in both the embed preview and the published forum post.
-  const { png } = await renderer.renderLitematic(buffer, { transparentBackground: true });
-  return png;
+  const { png, size, blockCount } = await renderer.renderLitematic(buffer, { transparentBackground: true });
+  return { png, size, blockCount };
+}
+
+// Parse a .litematic buffer for its bounding-box size {x,y,z} and placed-block
+// count. Returns null if the file can't be read — callers then omit the
+// Size & Volume footer.
+async function readLitematicMeta(buffer) {
+  try {
+    const { readLitematic } = require('./lib/litematicRender/litematicReader');
+    const parsed = await readLitematic(buffer);
+    const s = parsed && parsed.size;
+    if (s && s.x > 0 && s.y > 0 && s.z > 0) {
+      return { size: { x: s.x, y: s.y, z: s.z }, blockCount: Number(parsed.blockCount) || 0 };
+    }
+  } catch {}
+  return null;
 }
 
 // Re-render the .litematic uploaded in this ticket, attach the PNG to the
@@ -900,7 +946,8 @@ async function regenerateSchematicRender(channel, sub) {
   if (!found) return { ok: false, reason: 'No .litematic file found in this ticket. Upload one first.' };
   try {
     const litematicBuf = await downloadToBuffer(found.url);
-    const renderBuf = await renderLitematicToPng(litematicBuf);
+    const rendered = await renderLitematicToPng(litematicBuf);
+    const renderBuf = rendered.png;
     // Upload render as a fresh message attachment so we get a stable Discord CDN URL.
     const renderMsg = await channel.send({
       files: [new AttachmentBuilder(renderBuf, { name: 'render.png' })],
@@ -911,6 +958,8 @@ async function regenerateSchematicRender(channel, sub) {
       renderMessageId: renderMsg?.id || null,
       litematicUrl: found.url,
       litematicName: found.name,
+      size: rendered.size || sub.size || null,
+      blockCount: Number(rendered.blockCount) || sub.blockCount || null,
       updatedAt: Date.now(),
     });
     await postOrUpdateSchematicDraftPreview(channel, updated || sub).catch(() => {});
@@ -981,6 +1030,14 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     return { ok: false, reason: `Could not fetch source files: ${e?.message || e}` };
   }
 
+  // Parse the schematic's dimensions from the .litematic so every post
+  // carries a Size & Volume footer. Falls back to stored values on failure.
+  const meta = await readLitematicMeta(litematicBuf);
+  if (meta) {
+    sub.size = meta.size;
+    sub.blockCount = meta.blockCount;
+  }
+
   // Build the starter as a plain message (bulleted sections) with the
   // render PNG attached inline and the .litematic last so the file chip
   // sits at the bottom of the post. No heading — the thread title is
@@ -1038,6 +1095,8 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
           updatedAt: Date.now(),
           renderUrl: renderAtt?.url || sub.renderUrl,
           litematicUrl: litematicAtt?.url || sub.litematicUrl,
+          size: sub.size || null,
+          blockCount: sub.blockCount || null,
         }).catch(() => {});
         return { ok: true, thread, updated: true };
       } catch (e) {
@@ -1078,9 +1137,94 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     updatedAt: Date.now(),
     renderUrl: renderNew?.url || sub.renderUrl,
     litematicUrl: litematicNew?.url || sub.litematicUrl,
+    size: sub.size || null,
+    blockCount: sub.blockCount || null,
   }).catch(() => {});
 
   return { ok: true, thread, updated: false };
+}
+
+// One-time backfill: walk every thread in the schematic forum and append a
+// Size & Volume footer to any starter message that lacks one, reading the
+// dimensions from the .litematic attached to that post. Runs in the
+// background on boot, guarded by a per-guild flag so it only does the full
+// pass once; it is idempotent regardless (posts already carrying the footer
+// are skipped). Archived threads are briefly un-archived to allow the edit
+// and then re-archived to restore their state.
+async function backfillSchematicSizes(client) {
+  const forum = await client.channels.fetch(SCHEMATIC_FORUM_CHANNEL_ID).catch(() => null);
+  if (!forum || forum.type !== ChannelType.GuildForum || !forum.guild) return;
+  const guildId = forum.guild.id;
+  if (await store.getConfigValue(guildId, 'schematicSizeBackfilled').catch(() => null)) return;
+
+  // Collect active threads plus every page of archived public threads.
+  // Dedupe by id and stop once a page yields nothing new — guards against a
+  // pagination cursor that fails to advance.
+  const threads = [];
+  const seen = new Set();
+  const collect = (t) => { if (t && !seen.has(t.id)) { seen.add(t.id); threads.push(t); return true; } return false; };
+  try {
+    const active = await forum.threads.fetchActive();
+    for (const t of active.threads.values()) collect(t);
+  } catch {}
+  let before;
+  for (let page = 0; page < 50; page++) {
+    let batch;
+    try {
+      batch = await forum.threads.fetchArchived({ type: 'public', limit: 100, before });
+    } catch { break; }
+    let added = 0;
+    for (const t of batch.threads.values()) { if (collect(t)) added += 1; }
+    if (!batch.hasMore || added === 0) break;
+    before = batch.threads.last();
+    if (!before) break;
+  }
+
+  const MARKER = '**Size & Volume**';
+  let updated = 0, failed = 0;
+  for (const thread of threads) {
+    try {
+      const wasArchived = thread.archived;
+      const starter = await thread.fetchStarterMessage().catch(() => null);
+      if (!starter) continue;
+      if ((starter.content || '').includes(MARKER)) continue;
+      const litematicAtt = [...starter.attachments.values()]
+        .find(a => /\.litematic$/i.test(a.name || ''));
+      if (!litematicAtt) continue;
+
+      const buf = await downloadToBuffer(litematicAtt.url).catch(() => null);
+      if (!buf) { failed += 1; continue; }
+      const meta = await readLitematicMeta(buf);
+      if (!meta) { failed += 1; continue; }
+
+      const content = appendSchematicSizeSection(
+        starter.content,
+        buildSchematicSizeSection(meta),
+      );
+      if (wasArchived) { try { await thread.setArchived(false); } catch {} }
+      await starter.edit({ content });
+      if (wasArchived) { try { await thread.setArchived(true); } catch {} }
+
+      const matchSub = await store.findSchematicSubmissionByForumThread(thread.id).catch(() => null);
+      if (matchSub) {
+        await store.updateSchematicSubmission(matchSub.id, {
+          size: meta.size,
+          blockCount: meta.blockCount,
+        }).catch(() => {});
+      }
+      updated += 1;
+      await new Promise(r => setTimeout(r, 1200)); // stay gentle on the rate limiter
+    } catch {
+      failed += 1;
+    }
+  }
+
+  console.log(`[schematic-size] backfill: ${updated} updated, ${failed} failed, ${threads.length} scanned`);
+  // Only mark done when nothing failed, so a later restart retries the
+  // stragglers (already-updated posts are skipped via the marker check).
+  if (failed === 0) {
+    await store.setConfigValue(guildId, 'schematicSizeBackfilled', true).catch(() => {});
+  }
 }
 
 // Delete the forum thread and reset publication state on the submission.
@@ -8394,6 +8538,9 @@ client.once(Events.ClientReady, async () => {
   await ensureLoaReactionPanel().catch(() => {});
 
   cleanupTranscriptsOnBoot().catch(() => {});
+
+  // Backfill Size & Volume footers onto existing schematic posts (one-shot).
+  backfillSchematicSizes(client).catch(() => {});
 
   // Builder board auto-updates
   const tick = async () => {
