@@ -37,7 +37,7 @@ const store = require('./store');
 const { getUserBalance } = require('./donutsApi');
 const { parseNumber, parseDuration, getLevelFromXp, getXpForLevel, sanitizeDisplayName } = require('./utils');
 const { generateRankCard } = require('./rankCard');
-const { handleRenderCommand, schematicVolume } = require('./lib/litematicRenderCommand');
+const { handleRenderCommand, handleRenderRotation, schematicVolume } = require('./lib/litematicRenderCommand');
 const {
   APPLICATION_COOLDOWN_MS,
   buildBuilderLeaderboardLine,
@@ -791,9 +791,34 @@ function buildSchematicEmbed(sub, { forPreview = false } = {}) {
   if (forPreview) {
     const charCount = (body || '').length;
     const statusLabel = String(sub.status || 'DRAFT').toUpperCase();
-    eb.setFooter({ text: `${statusLabel} • body ${charCount}/${SCHEMATIC_MAX_BODY_CHARS} chars` });
+    const rotation = (((Number(sub.rotation) || 0) % 360) + 360) % 360;
+    eb.setFooter({ text: `${statusLabel} • body ${charCount}/${SCHEMATIC_MAX_BODY_CHARS} chars • rotation ${rotation}°` });
   }
   return eb;
+}
+
+// Rotation arrows shared by the in-ticket draft preview and the in-post
+// confirm flow. Each click spins the render 90°. `prefix` selects which
+// handler picks up the click — `schemrot` for the ticket draft, `schempend`
+// for the in-post pending render.
+function buildRotateRow(prefix, subId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`${prefix}:${subId}:l`).setLabel('Rotate ⟲').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`${prefix}:${subId}:r`).setLabel('Rotate ⟳').setStyle(ButtonStyle.Secondary),
+  );
+}
+
+// Rotate arrows + Confirm/Discard for the in-post render preview message.
+// These never live on the published starter — only on the temporary preview
+// the bot posts after a submitter re-uploads a .litematic.
+function buildForumPendingComponents(subId) {
+  return [
+    buildRotateRow('schempend', subId),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`schempend:${subId}:confirm`).setLabel('Confirm & Update Post').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`schempend:${subId}:discard`).setLabel('Discard').setStyle(ButtonStyle.Danger),
+    ),
+  ];
 }
 
 function buildSchematicPreviewComponents(sub) {
@@ -817,6 +842,9 @@ function buildSchematicPreviewComponents(sub) {
       .setMinValues(0)
       .setMaxValues(10),
   );
+  // Rotation arrows always sit on the draft preview — whatever rotation is
+  // set when Publish is clicked is what the forum post is rendered at.
+  const rotateRow = buildRotateRow('schemrot', sub.id);
   const isPublished = sub.status === 'PUBLISHED';
   const publishRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -824,7 +852,7 @@ function buildSchematicPreviewComponents(sub) {
       .setLabel(isPublished ? 'Update Forum Post' : 'Publish to Forum')
       .setStyle(isPublished ? ButtonStyle.Secondary : ButtonStyle.Success),
   );
-  return [editRow, designersRow, creditsRow, publishRow];
+  return [editRow, rotateRow, designersRow, creditsRow, publishRow];
 }
 
 // Build a modal with the given field config and prefill values.
@@ -925,8 +953,10 @@ const SCHEMATIC_RENDER_WIDTH = 1280;
 const SCHEMATIC_RENDER_HEIGHT = 800;
 
 // Run the existing litematic renderer on a .litematic buffer; returns the PNG
-// buffer plus the parsed size and block count. Throws on failure.
-async function renderLitematicToPng(buffer) {
+// buffer plus the parsed size and block count. `yawDegrees` rotates the camera
+// (90° steps) so callers can re-render the same build at a chosen orientation.
+// Throws on failure.
+async function renderLitematicToPng(buffer, yawDegrees = 0) {
   const renderer = getLitematicRender();
   // Transparent PNG so the render blends into Discord's surface — looks
   // cleaner in both the embed preview and the published forum post.
@@ -934,6 +964,7 @@ async function renderLitematicToPng(buffer) {
     transparentBackground: true,
     width: SCHEMATIC_RENDER_WIDTH,
     height: SCHEMATIC_RENDER_HEIGHT,
+    yawDegrees: Number(yawDegrees) || 0,
   });
   return { png, size: meta?.size || null, blockCount: meta?.blockCount || null };
 }
@@ -961,7 +992,7 @@ async function regenerateSchematicRender(channel, sub) {
   if (!found) return { ok: false, reason: 'No .litematic file found in this ticket. Upload one first.' };
   try {
     const litematicBuf = await downloadToBuffer(found.url);
-    const rendered = await renderLitematicToPng(litematicBuf);
+    const rendered = await renderLitematicToPng(litematicBuf, Number(sub.rotation) || 0);
     const renderBuf = rendered.png;
     // Upload render as a fresh message attachment so we get a stable Discord CDN URL.
     const renderMsg = await channel.send({
@@ -982,6 +1013,68 @@ async function regenerateSchematicRender(channel, sub) {
   } catch (e) {
     return { ok: false, reason: `Render failed: ${e?.message || e}` };
   }
+}
+
+// A submitter re-uploaded a .litematic inside their published forum thread.
+// Instead of swapping the post immediately, render the new file and post a
+// temporary preview message with rotation arrows + a Confirm button. The post
+// itself is untouched until the submitter confirms. `pendingRender` on the
+// submission tracks the live preview so the arrows/Confirm handler can find it.
+async function startForumRenderConfirm(uploadMessage, sub) {
+  const thread = uploadMessage.channel;
+  const found = [...uploadMessage.attachments.values()]
+    .find(a => /\.litematic$/i.test(a.name || a.url || ''));
+  if (!found) return;
+
+  // Only one confirm flow at a time — clear a stale preview if one is open.
+  if (sub.pendingRender?.previewMessageId) {
+    const prev = await thread.messages.fetch(sub.pendingRender.previewMessageId).catch(() => null);
+    if (prev) await prev.delete().catch(() => {});
+  }
+
+  let png, size, blockCount;
+  try {
+    const buf = await downloadToBuffer(found.url);
+    const rendered = await renderLitematicToPng(buf, 0);
+    png = rendered.png;
+    size = rendered.size;
+    blockCount = rendered.blockCount;
+  } catch (e) {
+    await thread.send({ content: `Render failed: ${e?.message || e}`, allowedMentions: { parse: [] } }).catch(() => {});
+    return;
+  }
+
+  const previewEmbed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle('New render — confirm to update the post')
+    .setDescription([
+      `<@${uploadMessage.author.id}> uploaded a new \`.litematic\`.`,
+      'Use the arrows to rotate it 90°, then press **Confirm & Update Post**.',
+      'The post is not changed until you confirm.',
+    ].join('\n'))
+    .setImage('attachment://render.png')
+    .setFooter({ text: 'Rotation: 0°' });
+
+  const previewMsg = await thread.send({
+    embeds: [previewEmbed],
+    files: [new AttachmentBuilder(png, { name: 'render.png' })],
+    components: buildForumPendingComponents(sub.id),
+    allowedMentions: { users: [uploadMessage.author.id] },
+  }).catch(() => null);
+  if (!previewMsg) return;
+
+  await store.updateSchematicSubmission(sub.id, {
+    pendingRender: {
+      litematicUrl: found.url,
+      litematicName: found.name || 'schematic.litematic',
+      rotation: 0,
+      size: size || null,
+      blockCount: blockCount || null,
+      previewMessageId: previewMsg.id,
+      uploadMessageId: uploadMessage.id,
+    },
+    updatedAt: Date.now(),
+  }).catch(() => {});
 }
 
 // Returns true if the channel is in the Publish Schematic ticket category.
@@ -2050,9 +2143,14 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
   if (extraTopLine) fields.push({ name: "Selection", value: extraTopLine.slice(0,1024) });
   if (fields.length) eb.addFields(fields.slice(0, 25));
 
-  // Ping routing follows the viewer allowlist.
+  // Ping routing follows the viewer allowlist — except Publish Schematic
+  // tickets, which ping only the submitter so the schematic staff/helper
+  // roles aren't pulled in on every submission.
+  const isSchematicTicket = String(buttonKey) === 'publish_schematic';
   let staffPing = null;
-  staffPing = viewerRoleIds.map(r => `<@&${r}>`).join(' ') || null;
+  if (!isSchematicTicket) {
+    staffPing = viewerRoleIds.map(r => `<@&${r}>`).join(' ') || null;
+  }
 
   // Two-panel opener: Info, then Q&A (no numbering)
   const infoEmbed = eb;
@@ -2085,7 +2183,10 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
   const msg = await sendWithChannelRetry(guild, liveChannel, {
     content: [ `<@${creator.id}>`, staffPing ].filter(Boolean).join(" "),
     embeds: qaLines.length ? [infoEmbed, qaEmbed] : [infoEmbed],
-    components: [ticketControlRow(null)]
+    components: [ticketControlRow(null)],
+    // Schematic tickets ping only the submitter — suppress role pings even if
+    // a role mention slips into the content.
+    ...(isSchematicTicket ? { allowedMentions: { users: [creator.id] } } : {}),
   });
 
   // Pin the control message so staff always interact with the correct controls.
@@ -3971,60 +4072,33 @@ client.on('messageCreate', async (message) => {
     if (message.guildId && message.attachments?.size) {
       const litematicAttachment = [...message.attachments.values()].find(a => /\.litematic$/i.test(a.name || a.url || ''));
       if (litematicAttachment) {
-        // Both branches share the same "auto-rerender" flow. They differ in
-        // whether to delete the user's upload message and whether to auto-
-        // republish the forum post.
-        const handleLitematicDrop = async (sub, opts = {}) => {
-          const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-          if (!result?.ok) {
-            await message.channel.send({ content: `Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
-            return;
-          }
-          // Tidy the channel only in forum threads — designers can see what
-          // they replaced as a comment chain. In tickets, keep the original
-          // .litematic message so reviewers can audit what was uploaded.
-          if (opts.deleteSourceMessage) {
-            await message.delete().catch(() => {});
-          }
-
-          if (opts.republishWhenPublished) {
-            const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
-            if (fresh.status === 'PUBLISHED' && fresh.forumThreadId) {
-              const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-              if (!pubRes?.ok) {
-                await message.channel.send({ content: `Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
-              }
-            }
-          } else if (opts.alwaysRepublish) {
-            const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
-            const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
-            if (!pubRes?.ok) {
-              await message.channel.send({ content: `Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
-            }
-          }
-        };
-
         // Case A: ticket-channel upload during the original submission flow.
-        // Keep the submitter's .litematic visible (reviewers may want to
-        // audit). Only auto-republish if the schem is already published.
+        // Render in-ticket, keep the submitter's .litematic visible (reviewers
+        // may want to audit), and auto-republish only if already published.
         if (isPublishSchematicTicketChannel(message.channel)) {
           const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
-          if (sub) await handleLitematicDrop(sub, {
-            deleteSourceMessage: false,
-            republishWhenPublished: true,
-          });
+          if (sub) {
+            const result = await regenerateSchematicRender(message.channel, sub).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+            if (!result?.ok) {
+              await message.channel.send({ content: `Render failed: ${result?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+            } else {
+              const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
+              if (fresh.status === 'PUBLISHED' && fresh.forumThreadId) {
+                const pubRes = await publishOrUpdateSchematicForumPost(message.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+                if (!pubRes?.ok) {
+                  await message.channel.send({ content: `Could not update forum post: ${pubRes?.reason || 'Unknown error.'}`, allowedMentions: { parse: [] } }).catch(() => {});
+                }
+              }
+            }
+          }
         }
-        // Case B: replacement upload inside a forum thread we own. Used by
-        // designers to swap a .litematic on an already-published schem.
-        // Delete the upload message — the new .litematic gets re-attached
-        // to the starter, so leaving the source around is just noise.
+        // Case B: replacement upload inside a forum thread we own. Render the
+        // new file into a temporary preview with rotation arrows + a Confirm
+        // button — the post stays untouched until the submitter confirms.
         else if (message.channel.isThread?.() && message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID) {
           const sub = await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
           if (sub && message.member && isAuthorizedToEditSubmission(message.member, sub)) {
-            await handleLitematicDrop(sub, {
-              deleteSourceMessage: true,
-              alwaysRepublish: true,
-            });
+            await startForumRenderConfirm(message, sub).catch(e => console.error('[publish_schematic] confirm flow error:', e?.message));
           }
         }
       }
@@ -4746,6 +4820,115 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_rerender:
   return safeIReply(interaction, { content: res.ok ? 'Re-rendered.' : res.reason, flags: 64 });
 }
 
+// --- LITEMATIC RENDER: rotation arrows on a /render reply ---
+if (interaction.isButton() && interaction.customId.startsWith('renderrot:')) {
+  await handleRenderRotation(interaction, {
+    renderLitematic: (buf, opts) => getLitematicRender().renderLitematic(buf, opts),
+  });
+  return;
+}
+
+// --- PUBLISH SCHEMATIC: rotation arrows on the in-ticket draft preview ---
+if (interaction.isButton() && interaction.customId.startsWith('schemrot:')) {
+  const [, subId, dir] = interaction.customId.split(':');
+  const sub = await store.getSchematicSubmission(subId).catch(() => null);
+  if (!sub) return interaction.reply({ content: 'Submission record missing.', flags: 64 }).catch(() => {});
+  if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
+    return interaction.reply({ content: 'Only the submitter or a schematic manager can rotate this.', flags: 64 }).catch(() => {});
+  }
+  await interaction.deferReply({ flags: 64 }).catch(() => {});
+  const newRotation = (((Number(sub.rotation) || 0) + (dir === 'l' ? -90 : 90)) % 360 + 360) % 360;
+  await store.updateSchematicSubmission(subId, { rotation: newRotation, updatedAt: Date.now() }).catch(() => {});
+  const ch = await interaction.guild.channels.fetch(sub.ticketChannelId).catch(() => null);
+  if (!ch) return safeIReply(interaction, { content: 'Ticket channel not found.', flags: 64 });
+  const fresh = await store.getSchematicSubmission(subId).catch(() => ({ ...sub, rotation: newRotation }));
+  const res = await regenerateSchematicRender(ch, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+  if (!res.ok) return safeIReply(interaction, { content: res.reason, flags: 64 });
+  // A published schem keeps its forum render in sync with the ticket rotation.
+  let note = '';
+  const updated = await store.getSchematicSubmission(subId).catch(() => fresh);
+  if (updated.status === 'PUBLISHED' && updated.forumThreadId) {
+    const pub = await publishOrUpdateSchematicForumPost(interaction.guild, updated).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+    note = pub?.ok ? ' Forum post updated.' : `\n⚠️ ${pub?.reason}`;
+  }
+  return safeIReply(interaction, { content: `Rotated to ${newRotation}°.${note}`, flags: 64 });
+}
+
+// --- PUBLISH SCHEMATIC: in-post render confirm flow (rotate / confirm / discard) ---
+if (interaction.isButton() && interaction.customId.startsWith('schempend:')) {
+  const [, subId, action] = interaction.customId.split(':');
+  const sub = await store.getSchematicSubmission(subId).catch(() => null);
+  if (!sub) return interaction.reply({ content: 'Submission record missing.', flags: 64 }).catch(() => {});
+  if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
+    return interaction.reply({ content: 'Only the submitter or a schematic manager can do this.', flags: 64 }).catch(() => {});
+  }
+  const pr = sub.pendingRender;
+  if (!pr) return interaction.reply({ content: 'This render preview is no longer active — upload the `.litematic` again.', flags: 64 }).catch(() => {});
+
+  if (action === 'l' || action === 'r') {
+    await interaction.deferUpdate().catch(() => {});
+    const newRotation = (((Number(pr.rotation) || 0) + (action === 'l' ? -90 : 90)) % 360 + 360) % 360;
+    try {
+      const buf = await downloadToBuffer(pr.litematicUrl);
+      const rendered = await renderLitematicToPng(buf, newRotation);
+      const baseEmbed = interaction.message.embeds?.[0]
+        ? EmbedBuilder.from(interaction.message.embeds[0])
+        : new EmbedBuilder().setColor(0xfee75c).setTitle('New render — confirm to update the post');
+      baseEmbed.setImage('attachment://render.png').setFooter({ text: `Rotation: ${newRotation}°` });
+      await interaction.message.edit({
+        embeds: [baseEmbed],
+        files: [new AttachmentBuilder(rendered.png, { name: 'render.png' })],
+        attachments: [],
+        components: buildForumPendingComponents(subId),
+      }).catch(() => {});
+      await store.updateSchematicSubmission(subId, {
+        pendingRender: { ...pr, rotation: newRotation, size: rendered.size || pr.size, blockCount: rendered.blockCount || pr.blockCount },
+      }).catch(() => {});
+    } catch (e) {
+      await interaction.followUp({ content: `Render failed: ${e?.message || e}`, flags: 64 }).catch(() => {});
+    }
+    return;
+  }
+
+  if (action === 'discard') {
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
+    const up = await interaction.channel.messages.fetch(pr.uploadMessageId).catch(() => null);
+    if (up) await up.delete().catch(() => {});
+    await interaction.message.delete().catch(() => {});
+    await store.updateSchematicSubmission(subId, { pendingRender: null, updatedAt: Date.now() }).catch(() => {});
+    return safeIReply(interaction, { content: 'Discarded — the post was not changed.', flags: 64 });
+  }
+
+  if (action === 'confirm') {
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
+    // The preview message's current PNG attachment is the chosen render.
+    const renderAtt = [...interaction.message.attachments.values()].find(a => /\.png$/i.test(a.name || ''));
+    if (!renderAtt) return safeIReply(interaction, { content: 'Could not find the preview render — upload the `.litematic` again.', flags: 64 });
+    await store.updateSchematicSubmission(subId, {
+      litematicUrl: pr.litematicUrl,
+      litematicName: pr.litematicName,
+      renderUrl: renderAtt.url,
+      rotation: Number(pr.rotation) || 0,
+      size: pr.size || sub.size || null,
+      blockCount: pr.blockCount || sub.blockCount || null,
+      updatedAt: Date.now(),
+    }).catch(() => {});
+    const fresh = await store.getSchematicSubmission(subId).catch(() => sub);
+    const res = await publishOrUpdateSchematicForumPost(interaction.guild, fresh).catch(e => ({ ok: false, reason: e?.message || String(e) }));
+    if (!res?.ok) {
+      return safeIReply(interaction, { content: `Could not update the post: ${res?.reason || 'Unknown error.'}`, flags: 64 });
+    }
+    // Confirmed — wipe the preview and the user's upload message, the post now
+    // carries the new render.
+    const up = await interaction.channel.messages.fetch(pr.uploadMessageId).catch(() => null);
+    if (up) await up.delete().catch(() => {});
+    await interaction.message.delete().catch(() => {});
+    await store.updateSchematicSubmission(subId, { pendingRender: null, updatedAt: Date.now() }).catch(() => {});
+    return safeIReply(interaction, { content: 'Post updated with the new render.', flags: 64 });
+  }
+  return;
+}
+
 // --- PUBLISH SCHEMATIC: Publish-to-Forum button ---
 if (interaction.isButton() && interaction.customId.startsWith('publish_post:')) {
   const subId = interaction.customId.split(':')[1];
@@ -5207,6 +5390,8 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
             renderUrl: null,
             renderMessageId: null,
             draftMessageId: null,
+            rotation: 0,
+            pendingRender: null,
             forumThreadId: null,
             forumStarterMessageId: null,
             createdAt: Date.now(),
