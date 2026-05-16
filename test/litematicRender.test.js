@@ -50,6 +50,19 @@ async function pixelAlpha(dataUrl, x, y) {
   return ctx.getImageData(x, y, 1, 1).data[3];
 }
 
+async function countPixels(dataUrl, predicate) {
+  const image = await loadImage(dataUrl);
+  const canvas = createCanvas(image.width, image.height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(image, 0, 0);
+  const pixels = ctx.getImageData(0, 0, image.width, image.height).data;
+  let count = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (predicate(pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3])) count += 1;
+  }
+  return count;
+}
+
 test('culls the top face of ice when water sits directly on it', async () => {
   const result = await renderPayload({
     name: 'water on ice',
@@ -282,6 +295,25 @@ test('keeps dense chunk meshes below the 16-bit WebGL index limit', async () => 
   assert.equal(result.diag.oversizedMeshCount, 0);
   assert.ok(result.diag.maxMeshQuadVertices > 0);
   assert.ok(result.diag.maxMeshQuadVertices < 65536);
+});
+
+test('renders red beds with saturated block textures instead of washed out entity overlay', async () => {
+  const result = await renderPayload({
+    name: 'red bed',
+    author: 'test',
+    size: { x: 3, y: 2, z: 4 },
+    blockCount: 2,
+    blocks: [
+      { x: 1, y: 0, z: 1, name: 'minecraft:red_bed', properties: { facing: 'south', part: 'foot', occupied: 'false' } },
+      { x: 1, y: 0, z: 2, name: 'minecraft:red_bed', properties: { facing: 'south', part: 'head', occupied: 'false' } },
+    ],
+  }, { width: 256, height: 256 });
+
+  const redPixels = await countPixels(
+    result.dataUrl,
+    (r, g, b, a) => a > 220 && r > 120 && r - g > 55 && r - b > 55
+  );
+  assert.ok(redPixels > 80, `expected saturated red bed pixels, got ${redPixels}`);
 });
 
 test('skips entity rendering while preserving entity diagnostics', async () => {

@@ -506,6 +506,12 @@
     'minecraft:waxed_copper_chest', 'minecraft:waxed_exposed_copper_chest',
     'minecraft:waxed_weathered_copper_chest', 'minecraft:waxed_oxidized_copper_chest',
   ]);
+  const BED_NAMES = new Set([
+    'minecraft:white_bed', 'minecraft:orange_bed', 'minecraft:magenta_bed', 'minecraft:light_blue_bed',
+    'minecraft:yellow_bed', 'minecraft:lime_bed', 'minecraft:pink_bed', 'minecraft:gray_bed',
+    'minecraft:light_gray_bed', 'minecraft:cyan_bed', 'minecraft:purple_bed', 'minecraft:blue_bed',
+    'minecraft:brown_bed', 'minecraft:green_bed', 'minecraft:red_bed', 'minecraft:black_bed',
+  ]);
   function chestVariantTexture(name) {
     if (name === 'minecraft:chest') return 'normal';
     if (name === 'minecraft:trapped_chest') return 'trapped';
@@ -789,6 +795,9 @@
     if (!orig) return;
     D.SpecialRenderers.getBlockMesh = function(block, nbt, atlas, cull) {
       const name = block.getName().toString();
+      if (BED_NAMES.has(name)) {
+        return new D.Mesh();
+      }
       // Surgical top-face cull: a block has fluid directly above. Force
       // cull.up=true so its top quad doesn't z-fight with the fluid's bottom.
       // No water-opaque flag needed → glass / iron_bars next to water still
