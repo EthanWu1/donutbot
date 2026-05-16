@@ -798,6 +798,15 @@
       if (BED_NAMES.has(name)) {
         return new D.Mesh();
       }
+      // Signs (standing / wall / hanging / wall-hanging): deepslate's
+      // SpecialRenderers.signRenderer draws an entity sign using
+      // entity/signs/<type> textures that aren't in our atlas → a
+      // washed-out gray overlay. Suppress it so only the blockstate
+      // model (sign_rot_* / wall_sign with block/<type>_sign textures)
+      // renders.
+      if (name.endsWith('_sign')) {
+        return new D.Mesh();
+      }
       // Surgical top-face cull: a block has fluid directly above. Force
       // cull.up=true so its top quad doesn't z-fight with the fluid's bottom.
       // No water-opaque flag needed → glass / iron_bars next to water still

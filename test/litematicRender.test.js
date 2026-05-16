@@ -316,6 +316,34 @@ test('renders red beds with saturated block textures instead of washed out entit
   assert.ok(redPixels > 80, `expected saturated red bed pixels, got ${redPixels}`);
 });
 
+test('renders signs without the washed-out gray entity overlay', async () => {
+  const result = await renderPayload({
+    name: 'oak sign',
+    author: 'test',
+    size: { x: 3, y: 3, z: 3 },
+    blockCount: 1,
+    blocks: [
+      { x: 1, y: 1, z: 1, name: 'minecraft:oak_sign', properties: { rotation: '0' } },
+    ],
+  }, { width: 256, height: 256 });
+
+  // The deepslate sign entity renderer drew a flat mid-gray overlay
+  // (r≈g≈b≈160) on top of the block model. The blockstate model alone
+  // is warm oak wood with no neutral-gray pixels.
+  const grayOverlayPixels = await countPixels(
+    result.dataUrl,
+    (r, g, b, a) => a > 220 && r > 130 && r < 210
+      && Math.max(r, g, b) - Math.min(r, g, b) < 22
+  );
+  assert.ok(grayOverlayPixels < 60, `expected no gray sign overlay, got ${grayOverlayPixels}`);
+
+  const woodPixels = await countPixels(
+    result.dataUrl,
+    (r, g, b, a) => a > 220 && r > g && g >= b && r - b > 25
+  );
+  assert.ok(woodPixels > 400, `expected the sign block model to render, got ${woodPixels}`);
+});
+
 test('skips entity rendering while preserving entity diagnostics', async () => {
   const result = await renderPayload({
     name: 'entities disabled',
