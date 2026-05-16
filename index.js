@@ -1402,10 +1402,10 @@ const CATEGORY_EXTRA_VIEWER_ROLES = {
   [C.TICKET_CATEGORIES.MOD_2]: [..._MOD_AND_ABOVE, C.ROLE_TRIAL_MOD].filter(Boolean),
   // Builder category — all builder roles + Trial Mod and above
   [C.TICKET_CATEGORIES.BUILDING]: [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, ..._MOD_AND_ABOVE].filter(Boolean),
-  // Spawner categories — full staff chain (incl. Support/Trial Mod) plus the
-  // dedicated spawner-ticket access role.
-  [C.TICKET_CATEGORIES.SPAWNER_BUY]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, _TRIAL_MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
-  [C.TICKET_CATEGORIES.SPAWNER_SELL]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, _TRIAL_MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
+  // Spawner categories — mod-and-above plus the dedicated spawner-ticket
+  // access role. Support/staff roles should not see spawner tickets.
+  [C.TICKET_CATEGORIES.SPAWNER_BUY]: [C.ROLE_OWNER, C.ROLE_CO_OWNER, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
+  [C.TICKET_CATEGORIES.SPAWNER_SELL]: [C.ROLE_OWNER, C.ROLE_CO_OWNER, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
   // Farm Help + Publish Schematic — staff + schematic-helper + schematic-viewer roles
   [C.TICKET_CATEGORIES.FARM_HELP]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID, SCHEMATIC_VIEWER_ROLE_ID].filter(Boolean),
   [C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC]: [_STAFF_ROLE, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SCHEMATIC_HELPER_ROLE_ID, SCHEMATIC_VIEWER_ROLE_ID].filter(Boolean),
@@ -1757,7 +1757,15 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
     config: C,
   }), guild.roles);
   if (isSpawnerButton(buttonKey)) {
-    const spawnerDenyRoleIds = filterCachedRoleIds([staffId, C.ROLE_STAFF, ...(cfg?.staffRoleIds || [])], guild.roles)
+    const supportId = await store.getConfigValue(guild.id, 'ROLE_SUPPORT').catch(() => null) || C.ROLE_SUPPORT || C.ROLE_TRIAL_MOD;
+    const spawnerDenyRoleIds = filterCachedRoleIds([
+      staffId,
+      supportId,
+      C.ROLE_STAFF,
+      C.ROLE_SUPPORT,
+      C.ROLE_TRIAL_MOD,
+      ...(cfg?.staffRoleIds || []),
+    ], guild.roles)
       .filter(rid => !viewerRoleIds.includes(rid));
     for (const rid of spawnerDenyRoleIds) {
       const role = guild.roles.cache.get(rid);
@@ -3335,7 +3343,15 @@ client.once('clientReady', async () => {
               .map(ow => ow.id);
             // Remove roles that should NOT have access in this category
             const configuredStaffId = await store.getConfigValue(guild.id, 'ROLE_STAFF').catch(() => null);
-            const globalStaffIds = filterCachedRoleIds([...(cfg?.staffRoleIds || []), configuredStaffId, C.ROLE_STAFF], guild.roles);
+            const configuredSupportId = await store.getConfigValue(guild.id, 'ROLE_SUPPORT').catch(() => null);
+            const globalStaffIds = filterCachedRoleIds([
+              ...(cfg?.staffRoleIds || []),
+              configuredStaffId,
+              configuredSupportId,
+              C.ROLE_STAFF,
+              C.ROLE_SUPPORT,
+              C.ROLE_TRIAL_MOD,
+            ], guild.roles);
             for (const rid of rolesWithAccess) {
               if (rid === guild.roles.everyone.id) continue; // keep @everyone deny
               const isAllowed = cachedAllowedRoles.includes(rid);

@@ -283,3 +283,87 @@ test('keeps dense chunk meshes below the 16-bit WebGL index limit', async () => 
   assert.ok(result.diag.maxMeshQuadVertices > 0);
   assert.ok(result.diag.maxMeshQuadVertices < 65536);
 });
+
+test('skips entity rendering while preserving entity diagnostics', async () => {
+  const result = await renderPayload({
+    name: 'entities disabled',
+    author: 'test',
+    size: { x: 3, y: 3, z: 3 },
+    blockCount: 1,
+    blocks: [
+      { x: 1, y: 0, z: 1, name: 'minecraft:rail', properties: { shape: 'north_south', waterlogged: 'false' } },
+    ],
+    entities: [
+      { id: 'minecraft:chest_minecart', x: 1.5, y: 1.0625, z: 1.5, yaw: 0, pitch: 0 },
+      { id: 'minecraft:chest_minecart', x: 1.5, y: 1.0625, z: 1.5, yaw: 0, pitch: 0 },
+      { id: 'minecraft:chest_minecart', x: 1.5, y: 1.0625, z: 1.5, yaw: 0, pitch: 0 },
+      { id: 'minecraft:hopper_minecart', x: 1.5, y: 1.0625, z: 1.5, yaw: 0, pitch: 0 },
+    ],
+  });
+
+  const entityDiag = result.diag.entityRendering;
+  assert.equal(entityDiag.inputCount, 4);
+  assert.equal(entityDiag.renderedCount, 0);
+  assert.equal(entityDiag.disabled, true);
+  assert.equal(entityDiag.skippedDisabled, 4);
+  assert.equal(entityDiag.collapsedDuplicateMinecarts, 0);
+  assert.equal(entityDiag.byId['minecraft:chest_minecart'].inputCount, 3);
+  assert.equal(entityDiag.byId['minecraft:chest_minecart'].renderedCount, 0);
+  assert.equal(entityDiag.byId['minecraft:chest_minecart'].skippedDisabled, 3);
+  assert.equal(entityDiag.textures.length, 0);
+});
+
+test('renderer receives no entities for static renders', async () => {
+  const { buildStaticRenderPayload } = require('../lib/litematicRender/renderer');
+  const payload = buildStaticRenderPayload({
+    name: 'entity scrub',
+    author: 'test',
+    size: { x: 1, y: 1, z: 1 },
+    blockCount: 1,
+    entityCount: 1,
+    blocks: [
+      { x: 0, y: 0, z: 0, name: 'minecraft:stone', properties: {} },
+    ],
+    entities: [
+      { id: 'minecraft:chest_minecart', x: 0.5, y: 1, z: 0.5 },
+    ],
+  });
+
+  assert.equal(payload.entityCount, 0);
+  assert.equal(payload.sourceEntityCount, 1);
+  assert.deepEqual(payload.entities, []);
+});
+
+test('disabled entity rendering does not expand render bounds', async () => {
+  const result = await renderPayload({
+    name: 'armor stand bounds',
+    author: 'test',
+    size: { x: 1, y: 1, z: 1 },
+    blockCount: 1,
+    blocks: [
+      { x: 0, y: 0, z: 0, name: 'minecraft:stone', properties: {} },
+    ],
+    entities: [
+      { id: 'minecraft:armor_stand', x: 0.5, y: 1, z: 0.5, yaw: 90, pitch: 0 },
+    ],
+  });
+
+  assert.deepEqual(result.diag.renderBounds.size, { x: 1, y: 1, z: 1 });
+  assert.equal(result.diag.entityRendering.disabled, true);
+  assert.equal(result.diag.entityRendering.byId['minecraft:armor_stand'].renderedCount, 0);
+});
+
+test('uses a slightly off-axis isometric camera angle', async () => {
+  const result = await renderPayload({
+    name: 'camera angle',
+    author: 'test',
+    size: { x: 2, y: 2, z: 2 },
+    blockCount: 1,
+    blocks: [
+      { x: 0, y: 0, z: 0, name: 'minecraft:stone', properties: {} },
+    ],
+  });
+
+  assert.notEqual(result.diag.cameraAngles.yawDegrees, 45);
+  assert.notEqual(result.diag.cameraAngles.pitchDegrees.toFixed(3), '35.264');
+});

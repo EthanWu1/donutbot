@@ -701,347 +701,87 @@
     };
   }
 
-  // === Entity models ===
-  // Litematica schematics carry an Entities list with positions, rotations,
-  // and type-specific fields (item-frame Facing, painting Variant etc.).
-  // We render a small subset: minecarts (all variants), item_frame /
-  // glow_item_frame, armor_stand, boat / chest_boat (all wood types), and
-  // painting. Static-pose only; no animation. Models are intentionally
-  // approximate — recognizable silhouettes, not pixel-perfect MC entity meshes.
+  // === Entity diagnostics ===
+  // Entity drawing is intentionally disabled for static schematic renders.
+  // Keep lightweight diagnostics so callers can see what was skipped without
+  // running any entity model or mesh code.
 
-  const CUBE_FACES_FULL = () => ({
-    down:  { uv: [0, 0, 16, 16], texture: '#0' },
-    up:    { uv: [0, 0, 16, 16], texture: '#0' },
-    north: { uv: [0, 0, 16, 16], texture: '#0' },
-    south: { uv: [0, 0, 16, 16], texture: '#0' },
-    east:  { uv: [0, 0, 16, 16], texture: '#0' },
-    west:  { uv: [0, 0, 16, 16], texture: '#0' },
-  });
+  const ENTITY_RENDERING_ENABLED = false;
 
-  // Minecart helpers. Uses the actual vanilla entity/minecart/minecart sprite
-  // (64×32) with per-face UV regions matching MinecraftClient's
-  // MinecartEntityModel layout: 16×8×2 wall cuboid at texture UV (0, 10) for
-  // the four rotated side panels, 18×2×14 floor cuboid at texture UV (0, 0)
-  // for the inside floor.
-  //
-  // face.uv is normalized to atlas region [0..16]. For the minecart sprite
-  // overridden to its full 64×32 region, 1 pixel = 16/64 = 0.25 in U and
-  // 16/32 = 0.5 in V. So pixel (x, y) → face.uv (x*0.25, y*0.5).
-  //
-  // Vanilla cuboid 16×8×2 at (0, 10) has its 16×8 visible side wall on the
-  // "north" face at pixel (2, 12) to (18, 20) → face.uv (0.5, 6, 4.5, 10).
-  // The 2×8 short end is at pixel (0, 12) to (2, 20) → face.uv (0, 6, 0.5, 10).
-  // The 16×2 floor strip (down face of wall) is at pixel (2, 10) to (18, 12)
-  // → face.uv (0.5, 5, 4.5, 6).
-  //
-  // Vanilla floor cuboid 18×2×14 at (0, 0): up face at pixel (32, 0) to
-  // (50, 14) → face.uv (8, 0, 12.5, 7). down face at pixel (14, 0) to
-  // (32, 14) → face.uv (3.5, 0, 8, 7).
-  function _minecartBodyElement() {
-    // Vanilla MinecartEntityModel: 16w × 8h × 16d body. Top = inside floor
-    // visible from iso, sides = wall panel (16×8 = pixel (2, 12) to (18, 20)
-    // of the 64×32 sprite, face.uv [0.5, 6, 4.5, 10]).
+  function normalizedEntityId(id) {
+    let out = String(id || '').trim().toLowerCase();
+    if (!out) return '';
+    if (!out.includes(':')) out = `minecraft:${out}`;
+    const aliases = {
+      'minecraft:minecart_chest': 'minecraft:chest_minecart',
+      'minecraft:minecart_hopper': 'minecraft:hopper_minecart',
+      'minecraft:minecart_furnace': 'minecraft:furnace_minecart',
+      'minecraft:minecart_tnt': 'minecraft:tnt_minecart',
+      'minecraft:minecart_command_block': 'minecraft:command_block_minecart',
+      'minecraft:commandblock_minecart': 'minecraft:command_block_minecart',
+      'minecraft:minecart_spawner': 'minecraft:spawner_minecart',
+    };
+    return aliases[out] || out;
+  }
+
+  function createEntityDiag(inputCount) {
     return {
-      from: [0, 0, 0], to: [16, 8, 16],
-      faces: {
-        up:    { uv: [8, 0, 12.5, 7], texture: '#cart' },
-        down:  { uv: [3.5, 0, 8, 7], texture: '#cart' },
-        north: { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
-        south: { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
-        east:  { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
-        west:  { uv: [0.5, 6, 4.5, 10], texture: '#cart' },
-      },
+      inputCount,
+      disabled: !ENTITY_RENDERING_ENABLED,
+      renderedCount: 0,
+      unsupportedCount: 0,
+      invisibleSkipped: 0,
+      skippedDisabled: 0,
+      collapsedDuplicateMinecarts: 0,
+      separatedMinecartOverlaps: 0,
+      meshQuadCount: 0,
+      textures: [],
+      byId: {},
     };
   }
 
-  // Chest cargo elements: full vanilla chest model (body + lid + lock) copied
-  // VERBATIM from deepslate's SpecialRenderers.chestRenderer source so we
-  // know the UVs / face names / rotations match exactly. Bumped to a fixed
-  // y-offset to sit on top of the cart body.
-  function _chestCargoElements(yBase) {
-    return [
-      {
-        from: [1, yBase, 1],
-        to: [15, yBase + 10, 15],
-        faces: {
-          north: { uv: [10.5, 8.25, 14, 10.75], rotation: 180, texture: '#chest' },
-          east:  { uv: [7, 8.25, 10.5, 10.75], rotation: 180, texture: '#chest' },
-          south: { uv: [3.5, 8.25, 7, 10.75], rotation: 180, texture: '#chest' },
-          west:  { uv: [0, 8.25, 3.5, 10.75], rotation: 180, texture: '#chest' },
-          up:    { uv: [7, 4.75, 10.5, 8.25], texture: '#chest' },
-          down:  { uv: [3.5, 4.75, 7, 8.25], texture: '#chest' },
-        },
-      },
-      {
-        from: [1, yBase + 10, 1],
-        to: [15, yBase + 14, 15],
-        faces: {
-          north: { uv: [10.5, 3.75, 14, 4.75], rotation: 180, texture: '#chest' },
-          east:  { uv: [7, 3.75, 10.5, 4.75], rotation: 180, texture: '#chest' },
-          south: { uv: [3.5, 3.75, 7, 4.75], rotation: 180, texture: '#chest' },
-          west:  { uv: [0, 3.75, 3.5, 4.75], rotation: 180, texture: '#chest' },
-          up:    { uv: [7, 0, 10.5, 3.5], texture: '#chest' },
-          down:  { uv: [3.5, 0, 7, 3.5], texture: '#chest' },
-        },
-      },
-      {
-        from: [7, yBase + 7, 0],
-        to: [9, yBase + 11, 2],
-        faces: {
-          north: { uv: [0.25, 0.25, 0.75, 1.25], rotation: 180, texture: '#chest' },
-          east:  { uv: [0, 0.25, 0.25, 1.25], rotation: 180, texture: '#chest' },
-          south: { uv: [1, 0.25, 1.5, 1.25], rotation: 180, texture: '#chest' },
-          west:  { uv: [0.75, 0.25, 1, 1.25], rotation: 180, texture: '#chest' },
-          up:    { uv: [0.25, 0, 0.75, 0.25], rotation: 180, texture: '#chest' },
-          down:  { uv: [0.75, 0, 1.25, 0.25], rotation: 180, texture: '#chest' },
-        },
-      },
-    ];
-  }
-
-  // Variant cargo: smaller box on top of cart, textured with a single block.
-  // 12×8×12 cargo sitting at yBase..yBase+8, edges set in 2 from each side.
-  function _blockCargoElement(yBase) {
-    return {
-      from: [2, yBase, 2], to: [14, yBase + 8, 14],
-      faces: {
-        down:  { uv: [0, 0, 12, 12], texture: '#cargo' },
-        up:    { uv: [0, 0, 12, 12], texture: '#cargo' },
-        north: { uv: [0, 0, 12, 8], texture: '#cargo' },
-        south: { uv: [0, 0, 12, 8], texture: '#cargo' },
-        east:  { uv: [0, 0, 12, 8], texture: '#cargo' },
-        west:  { uv: [0, 0, 12, 8], texture: '#cargo' },
-      },
-    };
-  }
-
-  // Cargo sits directly on top of the 8-tall cart body.
-  const CART_TOP_Y = 8;
-
-  function minecartModel() {
-    return new D.BlockModel(undefined, { cart: 'entity/minecart/minecart' }, [_minecartBodyElement()]);
-  }
-  function chestMinecartModel() {
-    return new D.BlockModel(
-      undefined,
-      { cart: 'entity/minecart/minecart', chest: 'entity/chest/normal' },
-      [_minecartBodyElement(), ..._chestCargoElements(CART_TOP_Y)]
-    );
-  }
-  function hopperMinecartModel() {
-    return new D.BlockModel(
-      undefined,
-      { cart: 'entity/minecart/minecart', cargo: 'block/hopper_outside' },
-      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
-    );
-  }
-  function furnaceMinecartModel() {
-    return new D.BlockModel(
-      undefined,
-      { cart: 'entity/minecart/minecart', cargo: 'block/furnace_side' },
-      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
-    );
-  }
-  function tntMinecartModel() {
-    return new D.BlockModel(
-      undefined,
-      { cart: 'entity/minecart/minecart', cargo: 'block/tnt_side' },
-      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
-    );
-  }
-  function commandBlockMinecartModel() {
-    return new D.BlockModel(
-      undefined,
-      { cart: 'entity/minecart/minecart', cargo: 'block/command_block_side' },
-      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
-    );
-  }
-  function spawnerMinecartModel() {
-    return new D.BlockModel(
-      undefined,
-      { cart: 'entity/minecart/minecart', cargo: 'block/spawner' },
-      [_minecartBodyElement(), _blockCargoElement(CART_TOP_Y)]
-    );
-  }
-
-  function itemFrameModel(glow) {
-    // Use the REAL vanilla item-frame block model (block/item_frame →
-    // template_item_frame): a 10×10 back panel + a birch-wood frame border,
-    // all at z=15..16 (mounted on the +Z / south face of the cell). This is
-    // pixel-accurate to MC instead of a hand-rolled plate. The render-side
-    // Facing transform rotates it onto the correct block face.
-    const key = glow ? 'minecraft:block/glow_item_frame' : 'minecraft:block/item_frame';
-    return (window.__blockModels && window.__blockModels[key]) || null;
-  }
-
-  function armorStandModel(small) {
-    // Approximation: oak-plank base + central post + crossbar arms + head box.
-    // Small armor stand scaled down vertically.
-    const tex = 'block/stripped_oak_log';
-    const s = small ? 0.5 : 1.0;
-    const baseY = 0;
-    const baseTop = baseY + 1;
-    const postTop = baseTop + Math.round(14 * s);
-    const armsBottom = baseTop + Math.round(10 * s);
-    const armsTop = armsBottom + 2;
-    const headTop = postTop + Math.round(4 * s);
-    const elems = [
-      { from: [4, baseY, 4], to: [12, baseTop, 12], faces: CUBE_FACES_FULL() },             // base
-      { from: [7, baseTop, 7], to: [9, postTop, 9], faces: CUBE_FACES_FULL() },             // post
-      { from: [2, armsBottom, 7], to: [14, armsTop, 9], faces: CUBE_FACES_FULL() },         // arms
-      { from: [6, postTop, 6], to: [10, headTop, 10], faces: CUBE_FACES_FULL() },           // head
-    ];
-    return new D.BlockModel(undefined, { 0: tex }, elems);
-  }
-
-  // Boat: ~24w × 6h × 12d hull, occupies more than one cell horizontally.
-  // Vanilla boat entity sprite is a 128×64 net atlas — full-UV per face
-  // produces garbage. Use the matching planks block texture instead so each
-  // wood-type boat reads as its species (oak_planks, mangrove_planks, etc.).
-  function boatModel(wood) {
-    const tex = `block/${wood}_planks`;
-    const hull = {
-      from: [-4, 0, 2], to: [20, 6, 14],
-      faces: {
-        down:  { uv: [0, 0, 16, 12], texture: '#0' },
-        up:    { uv: [0, 0, 16, 12], texture: '#0' },
-        north: { uv: [0, 0, 16, 6], texture: '#0' },
-        south: { uv: [0, 0, 16, 6], texture: '#0' },
-        east:  { uv: [0, 0, 12, 6], texture: '#0' },
-        west:  { uv: [0, 0, 12, 6], texture: '#0' },
-      },
-    };
-    return new D.BlockModel(undefined, { 0: tex }, [hull]);
-  }
-  function chestBoatModel(wood) {
-    const tex = `block/${wood}_planks`;
-    const hull = {
-      from: [-4, 0, 2], to: [20, 6, 14],
-      faces: {
-        down:  { uv: [0, 0, 16, 12], texture: '#0' },
-        up:    { uv: [0, 0, 16, 12], texture: '#0' },
-        north: { uv: [0, 0, 16, 6], texture: '#0' },
-        south: { uv: [0, 0, 16, 6], texture: '#0' },
-        east:  { uv: [0, 0, 12, 6], texture: '#0' },
-        west:  { uv: [0, 0, 12, 6], texture: '#0' },
-      },
-    };
-    const chest = {
-      from: [4, 6, 4], to: [12, 12, 12],
-      faces: {
-        down:  { uv: [0, 0, 8, 8], texture: '#0' },
-        up:    { uv: [0, 0, 8, 8], texture: '#0' },
-        north: { uv: [0, 0, 8, 6], texture: '#0' },
-        south: { uv: [0, 0, 8, 6], texture: '#0' },
-        east:  { uv: [0, 0, 8, 6], texture: '#0' },
-        west:  { uv: [0, 0, 8, 6], texture: '#0' },
-      },
-    };
-    return new D.BlockModel(undefined, { 0: tex }, [hull, chest]);
-  }
-
-  // Painting: variable-size flat plate. Default 1×1 — render-side reads
-  // entity.variant (or motive) and re-sizes; we don't bind individual
-  // painting art (not in the block atlas), so use oak_planks as a frame.
-  function paintingModel(widthBlocks, heightBlocks) {
-    const w = Math.max(1, widthBlocks | 0) * 16;
-    const h = Math.max(1, heightBlocks | 0) * 16;
-    const plate = {
-      from: [0, 0, 15], to: [w, h, 16],
-      faces: CUBE_FACES_FULL(),
-    };
-    return new D.BlockModel(undefined, { 0: 'block/oak_planks' }, [plate]);
-  }
-
-  const BOAT_WOODS = new Set(['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'bamboo', 'pale_oak']);
-
-  function entityModelFor(entity) {
-    const id = entity.id || '';
-    if (id === 'minecraft:minecart')              return minecartModel();
-    if (id === 'minecraft:chest_minecart')        return chestMinecartModel();
-    if (id === 'minecraft:hopper_minecart')       return hopperMinecartModel();
-    if (id === 'minecraft:furnace_minecart')      return furnaceMinecartModel();
-    if (id === 'minecraft:tnt_minecart')          return tntMinecartModel();
-    if (id === 'minecraft:command_block_minecart')return commandBlockMinecartModel();
-    if (id === 'minecraft:spawner_minecart')      return spawnerMinecartModel();
-    if (id === 'minecraft:item_frame')            return itemFrameModel(false);
-    if (id === 'minecraft:glow_item_frame')       return itemFrameModel(true);
-    if (id === 'minecraft:armor_stand')           return armorStandModel(entity.small);
-    if (id === 'minecraft:painting')              return paintingModel(1, 1);
-    // Boats: minecraft:<wood>_boat / minecraft:<wood>_chest_boat
-    let m = id.match(/^minecraft:(\w+)_chest_boat$/);
-    if (m && BOAT_WOODS.has(m[1])) return chestBoatModel(m[1]);
-    m = id.match(/^minecraft:(\w+)_boat$/);
-    if (m && BOAT_WOODS.has(m[1])) return boatModel(m[1]);
-    return null;
-  }
-
-  // Map Litematica `Facing` enum (0=down, 1=up, 2=north, 3=south, 4=west, 5=east)
-  // to the rotation that moves the base plate (mounted on the +Z / SOUTH face)
-  // onto the target face. Derived from the rotation math:
-  //   rotateY(+90°): south(+Z) → east(+X)
-  //   rotateY(-90°): south(+Z) → west(-X)
-  //   rotateY(180°): south(+Z) → north(-Z)
-  //   rotateX(+90°): south(+Z) → down(-Y)
-  //   rotateX(-90°): south(+Z) → up(+Y)
-  const FACING_TO_ROTATION = {
-    0: { rotX:  Math.PI / 2, rotY: 0 },               // down
-    1: { rotX: -Math.PI / 2, rotY: 0 },               // up
-    2: { rotX: 0,            rotY: Math.PI },         // north
-    3: { rotX: 0,            rotY: 0 },               // south (default)
-    4: { rotX: 0,            rotY: -Math.PI / 2 },    // west
-    5: { rotX: 0,            rotY:  Math.PI / 2 },    // east
-  };
-
-  function buildEntityMesh(entities, atlasOrResources) {
-    const out = new D.Mesh();
-    if (!entities || entities.length === 0) return out;
-    for (const e of entities) {
-      const model = entityModelFor(e);
-      if (!model) continue;
-      try {
-        const m = model.getMesh(atlasOrResources, D.Cull.none());
-        // Model coords are 0..16 (one block). The transform matrix is built
-        // post-multiplied, so for a vertex v the applied order is right→left:
-        // SCALE first (16→1 cell units), then rotate, then translate.
-        const t = mat4.create();
-        const isFrame = (e.id === 'minecraft:item_frame'
-          || e.id === 'minecraft:glow_item_frame'
-          || e.id === 'minecraft:painting');
-
-        if (isFrame && typeof e.tileX === 'number') {
-          // Item frame / painting: anchor the 0..16 model onto the ATTACH
-          // BLOCK cell (tileX, tileY, tileZ), NOT the entity Pos. The Pos is
-          // blockCenter − facing×0.46875 (an interior anchor) which is useless
-          // for placing the visible plate. The plate base sits on the SOUTH
-          // face of the cell; Facing rotates it onto the correct face.
-          mat4.translate(t, t, [e.tileX, e.tileY, e.tileZ]);
-          if (typeof e.facing === 'number' && FACING_TO_ROTATION[e.facing]) {
-            const r = FACING_TO_ROTATION[e.facing];
-            mat4.translate(t, t, [0.5, 0.5, 0.5]);
-            mat4.rotateY(t, t, r.rotY);
-            mat4.rotateX(t, t, r.rotX);
-            mat4.translate(t, t, [-0.5, -0.5, -0.5]);
-          }
-        } else {
-          // Minecart / boat / armor_stand: entity Pos is (center_x, bottom_y,
-          // center_z). The model's 0..16 origin is its MIN CORNER, so shift
-          // −0.5 cell in X/Z to put the model's horizontal center on the Pos.
-          // Y is left as-is (Pos.y is already the bottom of the entity).
-          mat4.translate(t, t, [e.x - 0.5, e.y, e.z - 0.5]);
-          if (typeof e.yaw === 'number' && e.yaw !== 0) {
-            mat4.translate(t, t, [0.5, 0.5, 0.5]);
-            mat4.rotateY(t, t, -e.yaw * Math.PI / 180);
-            mat4.translate(t, t, [-0.5, -0.5, -0.5]);
-          }
-        }
-        mat4.scale(t, t, [0.0625, 0.0625, 0.0625]);
-        out.merge(m.transform(t));
-      } catch (err) {
-        console.warn('[entity] failed to mesh', e.id, err && err.message);
-      }
+  function ensureEntityDiag(diag, id) {
+    if (!diag.byId[id]) {
+      diag.byId[id] = {
+        inputCount: 0,
+        renderedCount: 0,
+        skippedUnsupported: 0,
+        skippedInvisible: 0,
+        skippedDisabled: 0,
+        collapsedDuplicates: 0,
+        quadCount: 0,
+        textures: [],
+      };
     }
-    return out;
+    return diag.byId[id];
+  }
+
+  function renderBoundsFor(size) {
+    const sx = Math.max(1, Number(size?.x) || 1);
+    const sy = Math.max(1, Number(size?.y) || 1);
+    const sz = Math.max(1, Number(size?.z) || 1);
+    return {
+      minX: 0, minY: 0, minZ: 0,
+      maxX: sx, maxY: sy, maxZ: sz,
+      size: { x: sx, y: sy, z: sz },
+      center: { x: sx / 2, y: sy / 2, z: sz / 2 },
+    };
+  }
+
+  function prepareRenderableEntities(rawEntities) {
+    const input = Array.isArray(rawEntities) ? rawEntities : [];
+    const diag = createEntityDiag(input.length);
+
+    for (const raw of input) {
+      const id = normalizedEntityId(raw && raw.id);
+      if (!id) continue;
+      const byId = ensureEntityDiag(diag, id);
+      byId.inputCount += 1;
+      byId.skippedDisabled += 1;
+      diag.skippedDisabled += 1;
+    }
+
+    return { entities: [], diag };
   }
 
   function patchChestRenderer() {
@@ -1574,16 +1314,45 @@
     };
   }
 
-  const ISO_X = Math.atan(1 / Math.sqrt(2));
-  const ISO_Y = Math.PI / 4;  // view from northwest — chest fronts (north-facing) visible
+  const DEG_TO_RAD = Math.PI / 180;
+  const ISO_X = 37 * DEG_TO_RAD;
+  const ISO_Y = 42 * DEG_TO_RAD;  // slightly off-axis so long rows do not perfectly overlap
 
-  function isoView(size) {
+  function boundsFromSize(size) {
+    return {
+      minX: 0,
+      minY: 0,
+      minZ: 0,
+      maxX: Math.max(1, Number(size?.x) || 1),
+      maxY: Math.max(1, Number(size?.y) || 1),
+      maxZ: Math.max(1, Number(size?.z) || 1),
+      size: {
+        x: Math.max(1, Number(size?.x) || 1),
+        y: Math.max(1, Number(size?.y) || 1),
+        z: Math.max(1, Number(size?.z) || 1),
+      },
+      center: {
+        x: Math.max(1, Number(size?.x) || 1) / 2,
+        y: Math.max(1, Number(size?.y) || 1) / 2,
+        z: Math.max(1, Number(size?.z) || 1) / 2,
+      },
+    };
+  }
+
+  function normalizedRenderBounds(boundsOrSize) {
+    if (boundsOrSize && typeof boundsOrSize.minX === 'number') return boundsOrSize;
+    return boundsFromSize(boundsOrSize);
+  }
+
+  function isoView(boundsOrSize) {
+    const bounds = normalizedRenderBounds(boundsOrSize);
+    const size = bounds.size;
     const m = mat4.create();
     const dist = (size.x + size.y + size.z) * 2;
     mat4.translate(m, m, [0, 0, -dist]);
     mat4.rotateX(m, m, ISO_X);
     mat4.rotateY(m, m, ISO_Y);
-    mat4.translate(m, m, [-size.x / 2, -size.y / 2, -size.z / 2]);
+    mat4.translate(m, m, [-bounds.center.x, -bounds.center.y, -bounds.center.z]);
     return m;
   }
 
@@ -1596,13 +1365,15 @@
     return { sx: x1, sy: y1 };
   }
 
-  function isoProj(size, width, height, padding = 1.18) {
+  function isoProj(boundsOrSize, width, height, padding = 1.18) {
+    const bounds = normalizedRenderBounds(boundsOrSize);
+    const center = bounds.center;
     // 1.18 = ~15% margin so the build "floats" with breathing room like
     // SchematicPreview's framing, instead of edge-to-edge.
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const cx of [-size.x / 2, size.x / 2])
-    for (const cy of [-size.y / 2, size.y / 2])
-    for (const cz of [-size.z / 2, size.z / 2]) {
+    for (const cx of [bounds.minX - center.x, bounds.maxX - center.x])
+    for (const cy of [bounds.minY - center.y, bounds.maxY - center.y])
+    for (const cz of [bounds.minZ - center.z, bounds.maxZ - center.z]) {
       const { sx, sy } = projectIso(cx, cy, cz);
       if (sx < minX) minX = sx;
       if (sx > maxX) maxX = sx;
@@ -1722,6 +1493,8 @@
     window.__fluidFaceStats = createFluidFaceStats();
     const buildRes = buildStructure(payload);
     const { structure, added, skipped, skipReasons } = buildRes;
+    const entityPrep = prepareRenderableEntities(payload.entities || []);
+    const renderBounds = renderBoundsFor(payload.size);
     // Diagnostic dump: which blocks landed in the structure, which were skipped,
     // which fell back to magenta. Visible in renderer.js when LITEMATIC_DEBUG is set,
     // and ALWAYS dumped into the result so the Node side can log on demand.
@@ -1764,9 +1537,15 @@
       waterSideTextureAlpha: WATER_SIDE_TEXTURE_ALPHA,
       waterTextureShade: WATER_TEXTURE_SHADE,
       transparentBackground,
+      entityRendering: entityPrep.diag,
+      renderBounds,
+      cameraAngles: {
+        pitchDegrees: ISO_X / DEG_TO_RAD,
+        yawDegrees: ISO_Y / DEG_TO_RAD,
+      },
     };
-    const view = isoView(payload.size);
-    const proj = isoProj(payload.size, width, height);
+    const view = isoView(renderBounds);
+    const proj = isoProj(renderBounds, width, height);
 
     gl.viewport(0, 0, width, height);
     // Dark navy backdrop (matches Discord dark theme + SchematicPreview's framing).
@@ -1837,33 +1616,7 @@
     }
     gl.depthMask(true);
 
-    // === Entities ===
-    // Build a single entity mesh (minecarts, item frames, armor stands,
-    // boats, paintings) and draw it last with depth write on so entities
-    // sit on top of block geometry. resources already exposes getTextureUV /
-    // getTextureAtlas — pass it as the atlas to BlockModel.getMesh.
-    if (payload.entities && payload.entities.length) {
-      const entityMesh = buildEntityMesh(payload.entities, resources);
-      if (entityMesh && !entityMesh.isEmpty()) {
-        // finishChunkMesh-style normal fixup (deepslate's mesh expects per-
-        // vertex normals; without it lighting can read flat-black). One pass
-        // over the merged mesh, set each vertex normal to its quad normal.
-        // Reverse winding: BlockModel.getMesh emits CCW-from-outside, which
-        // becomes CCW-from-camera (= front-face) only after deepslate's chunk
-        // traversal. Our direct entity-mesh path skips that, so the iso
-        // camera sees the quads as CW (= back-face) and CULL_FACE.BACK
-        // discards them. One reverse per quad flips the index order so the
-        // visible faces are front-facing for the NW iso projection.
-        for (const q of entityMesh.quads) {
-          q.reverse();
-          const n = q.normal();
-          q.forEach((v) => { v.normal = n; v.blockPos = new D.Vector(0, 0, 0); });
-        }
-        entityMesh.rebuild(gl, { pos: true, color: true, texture: true, normal: true, blockPos: true });
-        gl.depthMask(true);
-        renderer.drawMesh(entityMesh, { pos: true, color: true, texture: true, normal: true });
-      }
-    }
+    // Entity rendering is disabled for now; diagnostics above record skipped entities.
 
     gl.flush();
     gl.finish();
