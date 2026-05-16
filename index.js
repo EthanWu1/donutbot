@@ -690,14 +690,18 @@ function buildSchematicSizeSection(sub) {
   const bounding = schematicVolume(s);
   const sizeStr = `${fmt(s.x)} x ${fmt(s.y)} x ${fmt(s.z)}`;
   const volStr = sub.blockCount > 0 ? `${fmt(sub.blockCount)}/${fmt(bounding)}` : fmt(bounding);
-  return `**Size & Volume**\n• Size: \`${sizeStr}\`\n• Volume: \`${volStr}\``;
+  return `**Size & Volume**\nSize: \`${sizeStr}\`\nVolume: \`${volStr}\``;
 }
 
-// Append the Size & Volume section to post content, trimming the existing
-// text first if the combined result would exceed Discord's 2000-char limit.
+// Append the Size & Volume section to post content. Any prior Size & Volume
+// footer is stripped first so re-runs replace it cleanly instead of stacking
+// duplicates. Trims the body if the combined result would exceed Discord's
+// 2000-char limit.
 function appendSchematicSizeSection(content, sizeSection) {
-  if (!sizeSection) return String(content || '');
-  const base = String(content || '');
+  let base = String(content || '');
+  const prior = base.lastIndexOf('**Size & Volume**');
+  if (prior !== -1) base = base.slice(0, prior).trimEnd();
+  if (!sizeSection) return base;
   const cap = SCHEMATIC_MAX_BODY_CHARS - sizeSection.length - 2;
   const trimmed = base.length > cap
     ? base.slice(0, Math.max(0, cap - 1)).trimEnd() + '…'
@@ -1156,18 +1160,19 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
 }
 
 // One-time backfill: walk every thread in the schematic forum and bring each
-// starter message up to current standard — re-render the attached .litematic
-// in 16:10 landscape (old renders were square and got cropped in Discord's
-// Gallery view) and append a Size & Volume footer. Runs in the background on
-// boot, guarded by a per-guild flag so it only does the full pass once; it is
-// idempotent regardless (posts already carrying the footer are skipped, since
-// the re-render and footer are applied together). Archived threads are briefly
+// starter message up to current standard — a 16:10 landscape render (old
+// square renders got cropped in Discord's Gallery view) and a current Size &
+// Volume footer. Posts whose render is already landscape only get a content
+// edit (no re-render); square/missing renders are re-rendered. Runs in the
+// background on boot, guarded by a per-guild flag so it only does the full
+// pass once; it is idempotent regardless. Archived threads are briefly
 // un-archived to allow the edit and then re-archived to restore their state.
+const SCHEMATIC_FOOTER_MARKER = '**Size & Volume**\nSize:';
 async function backfillSchematicPosts(client) {
   const forum = await client.channels.fetch(SCHEMATIC_FORUM_CHANNEL_ID).catch(() => null);
   if (!forum || forum.type !== ChannelType.GuildForum || !forum.guild) return;
   const guildId = forum.guild.id;
-  if (await store.getConfigValue(guildId, 'schematicPostsBackfilled').catch(() => null)) return;
+  if (await store.getConfigValue(guildId, 'schematicPostsBackfilledV2').catch(() => null)) return;
 
   // Collect active threads plus every page of archived public threads.
   // Dedupe by id and stop once a page yields nothing new — guards against a
@@ -1192,40 +1197,55 @@ async function backfillSchematicPosts(client) {
     if (!before) break;
   }
 
-  const MARKER = '**Size & Volume**';
   let updated = 0, failed = 0;
   for (const thread of threads) {
     try {
       const wasArchived = thread.archived;
       const starter = await thread.fetchStarterMessage().catch(() => null);
       if (!starter) continue;
-      if ((starter.content || '').includes(MARKER)) continue;
-      const litematicAtt = [...starter.attachments.values()]
-        .find(a => /\.litematic$/i.test(a.name || ''));
+      const atts = [...starter.attachments.values()];
+      const litematicAtt = atts.find(a => /\.litematic$/i.test(a.name || ''));
       if (!litematicAtt) continue;
+      const renderAtt = atts.find(a => /\.png$/i.test(a.name || ''));
+
+      // Already current: landscape render AND the current (bullet-free) footer.
+      const isLandscape = !!(renderAtt && renderAtt.width && renderAtt.height
+        && renderAtt.width > renderAtt.height);
+      const hasFooter = (starter.content || '').includes(SCHEMATIC_FOOTER_MARKER);
+      if (isLandscape && hasFooter) continue;
 
       const litematicBuf = await downloadToBuffer(litematicAtt.url).catch(() => null);
       if (!litematicBuf) { failed += 1; continue; }
 
-      let rendered;
-      try {
-        rendered = await renderLitematicToPng(litematicBuf);
-      } catch { failed += 1; continue; }
-      if (!rendered.size) { failed += 1; continue; }
+      // Re-render only when the render isn't already landscape; otherwise just
+      // parse dimensions so the footer can be refreshed without a costly render.
+      let newRenderPng = null, meta = null;
+      if (isLandscape) {
+        meta = await readLitematicMeta(litematicBuf);
+        if (!meta) { failed += 1; continue; }
+      } else {
+        let rendered;
+        try { rendered = await renderLitematicToPng(litematicBuf); }
+        catch { failed += 1; continue; }
+        if (!rendered.size) { failed += 1; continue; }
+        newRenderPng = rendered.png;
+        meta = { size: rendered.size, blockCount: rendered.blockCount };
+      }
 
-      const meta = { size: rendered.size, blockCount: rendered.blockCount };
-      const content = appendSchematicSizeSection(starter.content, buildSchematicSizeSection(meta));
+      const editPayload = {
+        content: appendSchematicSizeSection(starter.content, buildSchematicSizeSection(meta)),
+      };
+      if (newRenderPng) {
+        editPayload.files = [
+          new AttachmentBuilder(newRenderPng, { name: 'render.png' }),
+          new AttachmentBuilder(litematicBuf, { name: litematicAtt.name || 'schematic.litematic' }),
+        ];
+      }
 
       if (wasArchived) { try { await thread.setArchived(false); } catch {} }
       let edited = null;
       try {
-        edited = await starter.edit({
-          content,
-          files: [
-            new AttachmentBuilder(rendered.png, { name: 'render.png' }),
-            new AttachmentBuilder(litematicBuf, { name: litematicAtt.name || 'schematic.litematic' }),
-          ],
-        });
+        edited = await starter.edit(editPayload);
       } catch {
         if (wasArchived) { try { await thread.setArchived(true); } catch {} }
         failed += 1;
@@ -1233,22 +1253,20 @@ async function backfillSchematicPosts(client) {
       }
       if (wasArchived) { try { await thread.setArchived(true); } catch {} }
 
-      // Sync fresh attachment URLs + dimensions onto the submission record so
-      // later /publish post edits don't 404 on the now-stale attachment URLs.
+      // Sync dimensions (and, when re-rendered, the fresh attachment URLs) onto
+      // the submission record so later /publish post edits stay consistent.
       const matchSub = await store.findSchematicSubmissionByForumThread(thread.id).catch(() => null);
       if (matchSub) {
-        const atts = edited ? [...edited.attachments.values()] : [];
-        const renderAtt = atts.find(a => /\.png$/i.test(a.name || ''));
-        const litAtt = atts.find(a => /\.litematic$/i.test(a.name || ''));
-        await store.updateSchematicSubmission(matchSub.id, {
-          size: meta.size,
-          blockCount: meta.blockCount,
-          renderUrl: renderAtt?.url || matchSub.renderUrl,
-          litematicUrl: litAtt?.url || matchSub.litematicUrl,
-        }).catch(() => {});
+        const patch = { size: meta.size, blockCount: meta.blockCount };
+        if (newRenderPng && edited) {
+          const ea = [...edited.attachments.values()];
+          patch.renderUrl = ea.find(a => /\.png$/i.test(a.name || ''))?.url || matchSub.renderUrl;
+          patch.litematicUrl = ea.find(a => /\.litematic$/i.test(a.name || ''))?.url || matchSub.litematicUrl;
+        }
+        await store.updateSchematicSubmission(matchSub.id, patch).catch(() => {});
       }
       updated += 1;
-      await new Promise(r => setTimeout(r, 800)); // stay gentle on the rate limiter
+      await new Promise(r => setTimeout(r, newRenderPng ? 800 : 400)); // stay gentle on the rate limiter
     } catch {
       failed += 1;
     }
@@ -1256,9 +1274,9 @@ async function backfillSchematicPosts(client) {
 
   console.log(`[schematic-backfill] ${updated} updated, ${failed} failed, ${threads.length} scanned`);
   // Only mark done when nothing failed, so a later restart retries the
-  // stragglers (already-updated posts are skipped via the marker check).
+  // stragglers (already-current posts are skipped above).
   if (failed === 0) {
-    await store.setConfigValue(guildId, 'schematicPostsBackfilled', true).catch(() => {});
+    await store.setConfigValue(guildId, 'schematicPostsBackfilledV2', true).catch(() => {});
   }
 }
 
@@ -1343,7 +1361,7 @@ async function importSchematicFromThread(guild, threadIdOrUrl, currentSub) {
 const SCHEMATIC_GUIDELINES_TITLE = '📌 How to Submit a Schematic';
 // Litematica logo shown on the how-to post. Optional — if the asset is absent
 // the post is created/kept without an image rather than failing.
-const SCHEMATIC_GUIDELINES_LOGO = path.join(__dirname, 'assets', 'litematica-logo.png');
+const SCHEMATIC_GUIDELINES_LOGO = path.join(__dirname, 'lib', 'assets', 'litematica_logo.png');
 
 // Build the how-to post payload. When the Litematica logo asset is present it
 // is attached and shown as the embed image.
@@ -1367,8 +1385,8 @@ function buildSchematicGuidelinesMessage() {
     ].join('\n'));
   const files = [];
   if (fs.existsSync(SCHEMATIC_GUIDELINES_LOGO)) {
-    embed.setImage('attachment://litematica-logo.png');
-    files.push(new AttachmentBuilder(SCHEMATIC_GUIDELINES_LOGO, { name: 'litematica-logo.png' }));
+    embed.setImage('attachment://litematica_logo.png');
+    files.push(new AttachmentBuilder(SCHEMATIC_GUIDELINES_LOGO, { name: 'litematica_logo.png' }));
   }
   return { embeds: [embed], files };
 }
