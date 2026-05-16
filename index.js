@@ -1364,9 +1364,9 @@ const SCHEMATIC_GUIDELINES_TITLE = '📌 How to Submit a Schematic';
 const SCHEMATIC_GUIDELINES_LOGO = path.join(__dirname, 'lib', 'assets', 'litematica_logo.png');
 
 // Build the how-to post payload. When the Litematica logo asset is present it
-// is attached and shown as the embed thumbnail — a thumbnail displays small
-// (top-right corner) and fits the whole image without cropping, while the
-// attached file keeps its full resolution.
+// is shown as the embed image. The asset is a small logo centred on a wide
+// transparent canvas with big margins, so the forum Gallery view's crop only
+// eats the margins and the logo itself stays small and uncropped.
 function buildSchematicGuidelinesMessage() {
   const embed = new EmbedBuilder()
     .setColor(0x08a4a7)
@@ -1387,27 +1387,18 @@ function buildSchematicGuidelinesMessage() {
     ].join('\n'));
   const files = [];
   if (fs.existsSync(SCHEMATIC_GUIDELINES_LOGO)) {
-    embed.setThumbnail('attachment://litematica_logo.png');
+    embed.setImage('attachment://litematica_logo.png');
     files.push(new AttachmentBuilder(SCHEMATIC_GUIDELINES_LOGO, { name: 'litematica_logo.png' }));
   }
   return { embeds: [embed], files };
 }
 
-// Bring the existing how-to post in line with buildSchematicGuidelinesMessage.
-// Self-healing: edits the starter only when it isn't already in the desired
-// state — logo shown as a small thumbnail, never as an oversized embed image.
-// Safe to run every boot; it's a no-op once the post is correct, so a failed
-// edit simply retries next restart instead of getting stuck.
+// Rewrite the existing how-to post's starter so it always matches the current
+// embed + logo. Runs every boot — a plain idempotent edit, so a logo swap or
+// layout change rolls out on the next restart with no stuck-state bookkeeping.
 async function refreshSchematicGuidelinesPost(thread, message) {
   const starter = await thread.fetchStarterMessage().catch(() => null);
   if (!starter) return;
-  const emb = starter.embeds?.[0];
-  const wantsLogo = message.files.length > 0;
-  const hasThumb = !!emb?.thumbnail?.url;
-  const hasImage = !!emb?.image?.url;
-  // Already correct: with a logo it's a thumbnail and not a big image;
-  // without one, neither. Nothing to do.
-  if (wantsLogo ? (hasThumb && !hasImage) : (!hasThumb && !hasImage)) return;
   const wasArchived = thread.archived;
   if (wasArchived) { try { await thread.setArchived(false); } catch {} }
   try {
