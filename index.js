@@ -1367,7 +1367,9 @@ const SCHEMATIC_GUIDELINES_LOGO = path.join(__dirname, 'lib', 'assets', 'litemat
 const SCHEMATIC_GUIDELINES_REV = 2;
 
 // Build the how-to post payload. When the Litematica logo asset is present it
-// is attached and shown as the embed image.
+// is attached and shown as the embed thumbnail — a thumbnail displays small
+// (top-right corner) and fits the whole image without cropping, while the
+// attached file keeps its full resolution.
 function buildSchematicGuidelinesMessage() {
   const embed = new EmbedBuilder()
     .setColor(0x08a4a7)
@@ -1388,7 +1390,7 @@ function buildSchematicGuidelinesMessage() {
     ].join('\n'));
   const files = [];
   if (fs.existsSync(SCHEMATIC_GUIDELINES_LOGO)) {
-    embed.setImage('attachment://litematica_logo.png');
+    embed.setThumbnail('attachment://litematica_logo.png');
     files.push(new AttachmentBuilder(SCHEMATIC_GUIDELINES_LOGO, { name: 'litematica_logo.png' }));
   }
   return { embeds: [embed], files };
