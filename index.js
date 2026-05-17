@@ -3081,7 +3081,10 @@ function extractBaseNameFromDisplay(displayName) {
       continue;
     }
 
-    for (const [, prefix] of (C.AUTONICK_ENTRIES || [])) {
+    for (const prefix of [
+      ...(C.AUTONICK_ENTRIES || []).map(e => e[1]),
+      ...(C.AUTONICK_RETIRED_PREFIXES || []),
+    ]) {
       if (prefix && name.startsWith(prefix)) {
         name = name.slice(prefix.length).trim();
         changed = true;
