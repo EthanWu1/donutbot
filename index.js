@@ -1116,7 +1116,7 @@ function buildSchematicImageRemoveRow(subId, images) {
 // sub.images is re-synced to the message's own attachment URLs so they stay
 // stable across edits.
 async function postOrUpdateSchematicGallery(channel, sub) {
-  if (!channel) return;
+  if (!channel) return null;
   const images = (Array.isArray(sub.images) ? sub.images : []).slice(0, SCHEMATIC_IMAGE_MAX);
 
   const sameChannel = sub.galleryChannelId && String(sub.galleryChannelId) === String(channel.id);
@@ -1127,7 +1127,7 @@ async function postOrUpdateSchematicGallery(channel, sub) {
   if (!images.length) {
     if (msg) await msg.delete().catch(() => {});
     await store.updateSchematicSubmission(sub.id, { galleryMessageId: null, galleryChannelId: null }).catch(() => {});
-    return;
+    return null;
   }
 
   const files = [];
@@ -1138,7 +1138,7 @@ async function postOrUpdateSchematicGallery(channel, sub) {
       kept.push(img);
     } catch (e) { console.error('[schematic gallery] image fetch failed:', e?.message); }
   }
-  if (!files.length) return;
+  if (!files.length) return null;
 
   const payload = {
     content: '**Images** — drag more into the channel to add, use the menu to remove.',
@@ -1147,8 +1147,10 @@ async function postOrUpdateSchematicGallery(channel, sub) {
     allowedMentions: { parse: [] },
   };
   if (msg) {
-    await msg.edit({ ...payload, attachments: [] }).catch(() => {});
-  } else {
+    msg = await msg.edit({ ...payload, attachments: [] }).catch(() => null);
+  }
+  if (!msg) {
+    // No live message to edit (first panel, deleted, or cross-channel) — post fresh.
     msg = await channel.send(payload).catch(() => null);
   }
   if (msg) {
@@ -1160,6 +1162,7 @@ async function postOrUpdateSchematicGallery(channel, sub) {
       ...(atts.length ? { images: atts.map(a => ({ url: a.url, name: a.name || 'image.png' })) } : {}),
     }).catch(() => {});
   }
+  return msg || null;
 }
 
 // Returns true if the channel is in the Publish Schematic ticket category.
@@ -4221,8 +4224,6 @@ client.on('messageCreate', async (message) => {
             } else {
               const added = imgs.slice(0, room).map(a => ({ url: a.url, name: a.name || 'image.png' }));
               const updated = await store.updateSchematicSubmission(sub.id, { images: [...current, ...added], updatedAt: Date.now() }).catch(() => sub) || sub;
-              // The raw upload is re-hosted in the Images panel — drop it.
-              await message.delete().catch(() => {});
               if (imgs.length > room) {
                 await message.channel.send({ content: `Only ${room} of ${imgs.length} image(s) added — the ${SCHEMATIC_IMAGE_MAX}-image limit was reached.`, allowedMentions: { parse: [] } }).catch(() => {});
               }
@@ -4234,13 +4235,21 @@ client.on('messageCreate', async (message) => {
                     return forum ? forum.threads.fetch(updated.forumThreadId).catch(() => null) : null;
                   })()
                 : null;
-              if (inTicket && publishedThread) {
-                await postOrUpdateSchematicGallery(publishedThread, updated).catch(() => {});
-                await postOrUpdateSchematicDraftPreview(message.channel, updated).catch(() => {});
-                await message.channel.send({ content: `Added ${added.length} image${added.length === 1 ? '' : 's'} to the published post.`, allowedMentions: { parse: [] } }).catch(() => {});
+              // Build the gallery FIRST (it downloads the just-uploaded image
+              // off this message), THEN delete the raw upload — deleting it
+              // earlier would invalidate the attachment before the re-host.
+              const galleryChannel = (inTicket && publishedThread) ? publishedThread : message.channel;
+              const galleryMsg = await postOrUpdateSchematicGallery(galleryChannel, updated).catch(() => null);
+              if (galleryMsg) {
+                await message.delete().catch(() => {});
               } else {
-                await postOrUpdateSchematicGallery(message.channel, updated).catch(() => {});
-                if (inTicket) await postOrUpdateSchematicDraftPreview(message.channel, updated).catch(() => {});
+                await message.channel.send({ content: 'Could not build the Images panel — your upload was kept. Try again in a moment.', allowedMentions: { parse: [] } }).catch(() => {});
+              }
+              if (inTicket) {
+                await postOrUpdateSchematicDraftPreview(message.channel, updated).catch(() => {});
+                if (publishedThread && galleryMsg) {
+                  await message.channel.send({ content: `Added ${added.length} image${added.length === 1 ? '' : 's'} to the published post.`, allowedMentions: { parse: [] } }).catch(() => {});
+                }
               }
             }
           }
