@@ -1092,44 +1092,73 @@ function isSchematicImageAttachment(att) {
   return SCHEMATIC_IMAGE_EXT.test(att.name || att.url || '');
 }
 
-// Post (or edit in place) the single "Images" gallery message inside a
-// schematic's forum thread, then re-sync sub.images to the gallery message's
-// own attachment URLs so they stay stable across edits.
-async function postOrUpdateSchematicGallery(thread, sub) {
+// Select menu on the gallery message — pick image(s) to remove. Built from
+// the same ordered list rendered in the message so the chosen indices line up.
+function buildSchematicImageRemoveRow(subId, images) {
+  const options = images.map((img, i) => ({
+    label: `${i + 1}. ${String(img.name || 'image').replace(/\.[a-z0-9]+$/i, '').slice(0, 90)}`.slice(0, 100),
+    value: String(i),
+  }));
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`schemimg_remove:${subId}`)
+      .setPlaceholder('Remove image(s)…')
+      .setMinValues(0)
+      .setMaxValues(Math.max(1, options.length))
+      .addOptions(options),
+  );
+}
+
+// Post (or edit in place) the single "Images" gallery message — drag images in
+// to add, use the select menu to remove. It lives in whichever channel images
+// were last managed in (the ticket, then the forum thread once published);
+// `galleryChannelId` tracks that so a stale message isn't edited cross-channel.
+// sub.images is re-synced to the message's own attachment URLs so they stay
+// stable across edits.
+async function postOrUpdateSchematicGallery(channel, sub) {
+  if (!channel) return;
   const images = (Array.isArray(sub.images) ? sub.images : []).slice(0, SCHEMATIC_IMAGE_MAX);
-  let msg = sub.galleryMessageId
-    ? await thread.messages.fetch(sub.galleryMessageId).catch(() => null)
+
+  const sameChannel = sub.galleryChannelId && String(sub.galleryChannelId) === String(channel.id);
+  let msg = (sameChannel && sub.galleryMessageId)
+    ? await channel.messages.fetch(sub.galleryMessageId).catch(() => null)
     : null;
 
-  const files = [];
-  for (const img of images) {
-    try {
-      files.push(new AttachmentBuilder(await downloadToBuffer(img.url), { name: img.name || 'image.png' }));
-    } catch (e) { console.error('[schematic gallery] image fetch failed:', e?.message); }
-  }
-  if (!files.length) {
-    if (msg) {
-      await msg.delete().catch(() => {});
-      await store.updateSchematicSubmission(sub.id, { galleryMessageId: null }).catch(() => {});
-    }
+  if (!images.length) {
+    if (msg) await msg.delete().catch(() => {});
+    await store.updateSchematicSubmission(sub.id, { galleryMessageId: null, galleryChannelId: null }).catch(() => {});
     return;
   }
 
-  const payload = { content: '**Images**', files, allowedMentions: { parse: [] } };
+  const files = [];
+  const kept = [];
+  for (const img of images) {
+    try {
+      files.push(new AttachmentBuilder(await downloadToBuffer(img.url), { name: img.name || 'image.png' }));
+      kept.push(img);
+    } catch (e) { console.error('[schematic gallery] image fetch failed:', e?.message); }
+  }
+  if (!files.length) return;
+
+  const payload = {
+    content: '**Images** — drag more into the channel to add, use the menu to remove.',
+    files,
+    components: [buildSchematicImageRemoveRow(sub.id, kept)],
+    allowedMentions: { parse: [] },
+  };
   if (msg) {
     await msg.edit({ ...payload, attachments: [] }).catch(() => {});
   } else {
-    msg = await thread.send(payload).catch(() => null);
-    if (msg) await store.updateSchematicSubmission(sub.id, { galleryMessageId: msg.id }).catch(() => {});
+    msg = await channel.send(payload).catch(() => null);
   }
   if (msg) {
-    const fresh = await thread.messages.fetch(msg.id).catch(() => null);
+    const fresh = await channel.messages.fetch(msg.id).catch(() => null);
     const atts = fresh ? [...fresh.attachments.values()] : [];
-    if (atts.length) {
-      await store.updateSchematicSubmission(sub.id, {
-        images: atts.map(a => ({ url: a.url, name: a.name || 'image.png' })),
-      }).catch(() => {});
-    }
+    await store.updateSchematicSubmission(sub.id, {
+      galleryMessageId: msg.id,
+      galleryChannelId: channel.id,
+      ...(atts.length ? { images: atts.map(a => ({ url: a.url, name: a.name || 'image.png' })) } : {}),
+    }).catch(() => {});
   }
 }
 
@@ -4175,43 +4204,44 @@ client.on('messageCreate', async (message) => {
     if (message.guildId && message.attachments?.size) {
       const imgs = [...message.attachments.values()].filter(isSchematicImageAttachment);
       if (imgs.length) {
-        // Ticket upload: accumulate on the submission for the eventual gallery.
-        if (isPublishSchematicTicketChannel(message.channel)) {
-          const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
+        const inTicket = isPublishSchematicTicketChannel(message.channel);
+        const inForumThread = message.channel.isThread?.()
+          && message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID;
+        if (inTicket || inForumThread) {
+          const sub = inTicket
+            ? await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null)
+            : await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
           const authorized = sub && (String(message.author.id) === String(sub.submitterId)
             || (message.member && canManageSchematicSubmission(message.member)));
           if (authorized) {
             const current = Array.isArray(sub.images) ? sub.images : [];
             const room = SCHEMATIC_IMAGE_MAX - current.length;
             if (room <= 0) {
-              await message.channel.send({ content: `Image limit reached (${SCHEMATIC_IMAGE_MAX}). Remove some before adding more.`, allowedMentions: { parse: [] } }).catch(() => {});
+              await message.channel.send({ content: `Image limit reached (${SCHEMATIC_IMAGE_MAX}). Remove some from the Images panel before adding more.`, allowedMentions: { parse: [] } }).catch(() => {});
             } else {
               const added = imgs.slice(0, room).map(a => ({ url: a.url, name: a.name || 'image.png' }));
-              const updated = await store.updateSchematicSubmission(sub.id, { images: [...current, ...added], updatedAt: Date.now() }).catch(() => null);
-              await message.channel.send({ content: `Added ${added.length} image${added.length === 1 ? '' : 's'} to the schematic post (${current.length + added.length}/${SCHEMATIC_IMAGE_MAX}). They appear under the post when it is published.`, allowedMentions: { parse: [] } }).catch(() => {});
-              if (updated) await postOrUpdateSchematicDraftPreview(message.channel, updated).catch(() => {});
-              // Live-refresh the forum gallery if the schem is already published.
-              if (updated && updated.status === 'PUBLISHED' && updated.forumThreadId) {
-                const forum = await message.guild.channels.fetch(SCHEMATIC_FORUM_CHANNEL_ID).catch(() => null);
-                const thread = forum ? await forum.threads.fetch(updated.forumThreadId).catch(() => null) : null;
-                if (thread) await postOrUpdateSchematicGallery(thread, updated).catch(() => {});
-              }
-            }
-          }
-        }
-        // Forum thread: append and refresh the gallery, then tidy the upload.
-        else if (message.channel.isThread?.() && message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID) {
-          const sub = await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
-          if (sub && message.member && isAuthorizedToEditSubmission(message.member, sub)) {
-            const current = Array.isArray(sub.images) ? sub.images : [];
-            const room = SCHEMATIC_IMAGE_MAX - current.length;
-            if (room <= 0) {
-              await message.channel.send({ content: `Image limit reached (${SCHEMATIC_IMAGE_MAX}).`, allowedMentions: { parse: [] } }).catch(() => {});
-            } else {
-              const added = imgs.slice(0, room).map(a => ({ url: a.url, name: a.name || 'image.png' }));
-              const updated = await store.updateSchematicSubmission(sub.id, { images: [...current, ...added], updatedAt: Date.now() }).catch(() => sub);
-              await postOrUpdateSchematicGallery(message.channel, updated || sub).catch(() => {});
+              const updated = await store.updateSchematicSubmission(sub.id, { images: [...current, ...added], updatedAt: Date.now() }).catch(() => sub) || sub;
+              // The raw upload is re-hosted in the Images panel — drop it.
               await message.delete().catch(() => {});
+              if (imgs.length > room) {
+                await message.channel.send({ content: `Only ${room} of ${imgs.length} image(s) added — the ${SCHEMATIC_IMAGE_MAX}-image limit was reached.`, allowedMentions: { parse: [] } }).catch(() => {});
+              }
+              // Once published the forum thread owns the canonical Images
+              // panel; before that it lives in the ticket.
+              const publishedThread = (updated.status === 'PUBLISHED' && updated.forumThreadId)
+                ? await (async () => {
+                    const forum = await message.guild.channels.fetch(SCHEMATIC_FORUM_CHANNEL_ID).catch(() => null);
+                    return forum ? forum.threads.fetch(updated.forumThreadId).catch(() => null) : null;
+                  })()
+                : null;
+              if (inTicket && publishedThread) {
+                await postOrUpdateSchematicGallery(publishedThread, updated).catch(() => {});
+                await postOrUpdateSchematicDraftPreview(message.channel, updated).catch(() => {});
+                await message.channel.send({ content: `Added ${added.length} image${added.length === 1 ? '' : 's'} to the published post.`, allowedMentions: { parse: [] } }).catch(() => {});
+              } else {
+                await postOrUpdateSchematicGallery(message.channel, updated).catch(() => {});
+                if (inTicket) await postOrUpdateSchematicDraftPreview(message.channel, updated).catch(() => {});
+              }
             }
           }
         }
@@ -4968,6 +4998,34 @@ if (interaction.isButton() && interaction.customId.startsWith('schemrot:')) {
   return safeIReply(interaction, { content: `Rotated to ${newRotation}°.${note}`, flags: 64 });
 }
 
+// --- PUBLISH SCHEMATIC: remove images via the gallery select menu ---
+if (interaction.isStringSelectMenu?.() && interaction.customId.startsWith('schemimg_remove:')) {
+  const subId = interaction.customId.split(':')[1];
+  const sub = await store.getSchematicSubmission(subId).catch(() => null);
+  if (!sub) return interaction.reply({ content: 'Submission record missing.', flags: 64 }).catch(() => {});
+  if (!isAuthorizedToEditSubmission(interaction.member, sub)) {
+    return interaction.reply({ content: 'Only the submitter or a schematic manager can remove images.', flags: 64 }).catch(() => {});
+  }
+  await interaction.deferReply({ flags: 64 }).catch(() => {});
+  const idxs = new Set((interaction.values || []).map(v => parseInt(v, 10)).filter(Number.isInteger));
+  if (!idxs.size) return safeIReply(interaction, { content: 'No images selected.', flags: 64 });
+  const current = Array.isArray(sub.images) ? sub.images : [];
+  const kept = current.filter((_, i) => !idxs.has(i));
+  const removed = current.length - kept.length;
+  await store.updateSchematicSubmission(subId, { images: kept, updatedAt: Date.now() }).catch(() => {});
+  const fresh = await store.getSchematicSubmission(subId).catch(() => ({ ...sub, images: kept }));
+  await postOrUpdateSchematicGallery(interaction.channel, fresh).catch(() => {});
+  if (isPublishSchematicTicketChannel(interaction.channel)) {
+    await postOrUpdateSchematicDraftPreview(interaction.channel, fresh).catch(() => {});
+  }
+  return safeIReply(interaction, {
+    content: removed
+      ? `Removed ${removed} image${removed === 1 ? '' : 's'}.`
+      : 'No matching images to remove.',
+    flags: 64,
+  });
+}
+
 // --- PUBLISH SCHEMATIC: in-post render confirm flow (rotate / confirm / discard) ---
 if (interaction.isButton() && interaction.customId.startsWith('schempend:')) {
   const [, subId, action] = interaction.customId.split(':');
@@ -5182,7 +5240,7 @@ if (interaction.isButton() && interaction.customId.startsWith('tk_open:')) {
             renderUrl: null, renderMessageId: null,
             draftMessageId: null,
             rotation: 0, pendingRender: null,
-            images: [], galleryMessageId: null,
+            images: [], galleryMessageId: null, galleryChannelId: null,
             forumThreadId: null, forumStarterMessageId: null,
             createdAt: Date.now(), updatedAt: Date.now(),
           });
@@ -5603,6 +5661,7 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
             pendingRender: null,
             images: [],
             galleryMessageId: null,
+            galleryChannelId: null,
             forumThreadId: null,
             forumStarterMessageId: null,
             createdAt: Date.now(),
