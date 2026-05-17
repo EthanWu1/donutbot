@@ -774,12 +774,14 @@ function buildSchematicEmbed(sub, { forPreview = false } = {}) {
     // Compact checklist of every required piece. Once everything is ✅,
     // the submission is ready for /publish post.
     const check = (ok) => ok ? '✅' : '❌';
+    const imgCount = Array.isArray(sub.images) ? sub.images.length : 0;
     const checklist = [
       `${check(Boolean(sub.name && sub.name.trim()))} Name`,
       `${check(parseDesignerLines(sub.designers || '').length > 0)} Designers`,
       `${check(Boolean(sub.howto && sub.howto.trim()))} Instructions`,
       `${check(Boolean(sub.litematicUrl))} Schematic`,
       `${check(Boolean(sub.renderUrl))} Render`,
+      `${imgCount > 0 ? '✅' : '➖'} Images (${imgCount}) — optional, drag them into this channel`,
     ].join('\n');
     const header = `${checklist}\n\n───\n\n`;
     eb.setDescription((header + (body || '')).slice(0, 4000));
@@ -1077,6 +1079,60 @@ async function startForumRenderConfirm(uploadMessage, sub) {
   }).catch(() => {});
 }
 
+// Submitters can drop screenshots in the ticket or the published post. They
+// accumulate on `sub.images` and surface in the forum thread as one tidy
+// "Images" gallery message (Discord allows up to 10 attachments per message).
+const SCHEMATIC_IMAGE_MAX = 10;
+const SCHEMATIC_IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+
+function isSchematicImageAttachment(att) {
+  if (!att) return false;
+  if (/\.litematic$/i.test(att.name || att.url || '')) return false;
+  if (String(att.contentType || '').startsWith('image/')) return true;
+  return SCHEMATIC_IMAGE_EXT.test(att.name || att.url || '');
+}
+
+// Post (or edit in place) the single "Images" gallery message inside a
+// schematic's forum thread, then re-sync sub.images to the gallery message's
+// own attachment URLs so they stay stable across edits.
+async function postOrUpdateSchematicGallery(thread, sub) {
+  const images = (Array.isArray(sub.images) ? sub.images : []).slice(0, SCHEMATIC_IMAGE_MAX);
+  let msg = sub.galleryMessageId
+    ? await thread.messages.fetch(sub.galleryMessageId).catch(() => null)
+    : null;
+
+  const files = [];
+  for (const img of images) {
+    try {
+      files.push(new AttachmentBuilder(await downloadToBuffer(img.url), { name: img.name || 'image.png' }));
+    } catch (e) { console.error('[schematic gallery] image fetch failed:', e?.message); }
+  }
+  if (!files.length) {
+    if (msg) {
+      await msg.delete().catch(() => {});
+      await store.updateSchematicSubmission(sub.id, { galleryMessageId: null }).catch(() => {});
+    }
+    return;
+  }
+
+  const payload = { content: '**Images**', files, allowedMentions: { parse: [] } };
+  if (msg) {
+    await msg.edit({ ...payload, attachments: [] }).catch(() => {});
+  } else {
+    msg = await thread.send(payload).catch(() => null);
+    if (msg) await store.updateSchematicSubmission(sub.id, { galleryMessageId: msg.id }).catch(() => {});
+  }
+  if (msg) {
+    const fresh = await thread.messages.fetch(msg.id).catch(() => null);
+    const atts = fresh ? [...fresh.attachments.values()] : [];
+    if (atts.length) {
+      await store.updateSchematicSubmission(sub.id, {
+        images: atts.map(a => ({ url: a.url, name: a.name || 'image.png' })),
+      }).catch(() => {});
+    }
+  }
+}
+
 // Returns true if the channel is in the Publish Schematic ticket category.
 function isPublishSchematicTicketChannel(channel) {
   return channel?.parentId === C.TICKET_CATEGORIES.PUBLISH_SCHEMATIC;
@@ -1206,6 +1262,7 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
           size: sub.size || null,
           blockCount: sub.blockCount || null,
         }).catch(() => {});
+        await postOrUpdateSchematicGallery(thread, sub).catch(() => {});
         return { ok: true, thread, updated: true };
       } catch (e) {
         return { ok: false, reason: `Forum edit failed: ${e?.message || e}` };
@@ -1249,6 +1306,7 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     blockCount: sub.blockCount || null,
   }).catch(() => {});
 
+  await postOrUpdateSchematicGallery(thread, sub).catch(() => {});
   return { ok: true, thread, updated: false };
 }
 
@@ -4112,6 +4170,55 @@ client.on('messageCreate', async (message) => {
     }
   } catch (e) { console.error('[publish_schematic] auto-render error:', e?.message); }
 
+  // --- PUBLISH SCHEMATIC: collect dropped images (ticket OR forum thread) ---
+  try {
+    if (message.guildId && message.attachments?.size) {
+      const imgs = [...message.attachments.values()].filter(isSchematicImageAttachment);
+      if (imgs.length) {
+        // Ticket upload: accumulate on the submission for the eventual gallery.
+        if (isPublishSchematicTicketChannel(message.channel)) {
+          const sub = await store.findSchematicSubmissionByTicketChannel(message.channel.id).catch(() => null);
+          const authorized = sub && (String(message.author.id) === String(sub.submitterId)
+            || (message.member && canManageSchematicSubmission(message.member)));
+          if (authorized) {
+            const current = Array.isArray(sub.images) ? sub.images : [];
+            const room = SCHEMATIC_IMAGE_MAX - current.length;
+            if (room <= 0) {
+              await message.channel.send({ content: `Image limit reached (${SCHEMATIC_IMAGE_MAX}). Remove some before adding more.`, allowedMentions: { parse: [] } }).catch(() => {});
+            } else {
+              const added = imgs.slice(0, room).map(a => ({ url: a.url, name: a.name || 'image.png' }));
+              const updated = await store.updateSchematicSubmission(sub.id, { images: [...current, ...added], updatedAt: Date.now() }).catch(() => null);
+              await message.channel.send({ content: `Added ${added.length} image${added.length === 1 ? '' : 's'} to the schematic post (${current.length + added.length}/${SCHEMATIC_IMAGE_MAX}). They appear under the post when it is published.`, allowedMentions: { parse: [] } }).catch(() => {});
+              if (updated) await postOrUpdateSchematicDraftPreview(message.channel, updated).catch(() => {});
+              // Live-refresh the forum gallery if the schem is already published.
+              if (updated && updated.status === 'PUBLISHED' && updated.forumThreadId) {
+                const forum = await message.guild.channels.fetch(SCHEMATIC_FORUM_CHANNEL_ID).catch(() => null);
+                const thread = forum ? await forum.threads.fetch(updated.forumThreadId).catch(() => null) : null;
+                if (thread) await postOrUpdateSchematicGallery(thread, updated).catch(() => {});
+              }
+            }
+          }
+        }
+        // Forum thread: append and refresh the gallery, then tidy the upload.
+        else if (message.channel.isThread?.() && message.channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID) {
+          const sub = await store.findSchematicSubmissionByForumThread(message.channel.id).catch(() => null);
+          if (sub && message.member && isAuthorizedToEditSubmission(message.member, sub)) {
+            const current = Array.isArray(sub.images) ? sub.images : [];
+            const room = SCHEMATIC_IMAGE_MAX - current.length;
+            if (room <= 0) {
+              await message.channel.send({ content: `Image limit reached (${SCHEMATIC_IMAGE_MAX}).`, allowedMentions: { parse: [] } }).catch(() => {});
+            } else {
+              const added = imgs.slice(0, room).map(a => ({ url: a.url, name: a.name || 'image.png' }));
+              const updated = await store.updateSchematicSubmission(sub.id, { images: [...current, ...added], updatedAt: Date.now() }).catch(() => sub);
+              await postOrUpdateSchematicGallery(message.channel, updated || sub).catch(() => {});
+              await message.delete().catch(() => {});
+            }
+          }
+        }
+      }
+    }
+  } catch (e) { console.error('[publish_schematic] image collect error:', e?.message); }
+
   // --- ACCEPTED STAFF/BUILDER INFO FLOW ---
   if (!message.guild && acceptedStaffInfoSessions.has(message.author.id)) {
     const sess = acceptedStaffInfoSessions.get(message.author.id);
@@ -4975,6 +5082,43 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_post:')) 
   return safeIReply(interaction, { content: `${verb} → <#${res.thread.id}>`, flags: 64 });
 }
 
+// --- GIVEAWAY: winner "Open Ticket" button on the congrats message ---
+if (interaction.isButton() && interaction.customId.startsWith('gw_claim:')) {
+  const gwMsgId = interaction.customId.split(':')[1];
+  const g = await store.getGiveaway(gwMsgId).catch(() => null);
+  if (!g) {
+    return interaction.reply({ content: 'This giveaway could not be found.', flags: 64 }).catch(() => {});
+  }
+  const winnerIds = Array.isArray(g.winnerIds) ? g.winnerIds.map(String) : [];
+  if (!winnerIds.includes(String(interaction.user.id))) {
+    return interaction.reply({ content: 'Only the giveaway winner can open a claim ticket.', flags: 64 }).catch(() => {});
+  }
+  // One claim ticket per winner per giveaway.
+  const existing = await store.findOpenTicketByUserButton(interaction.guildId, interaction.user.id, 'giveaway', `gw_${gwMsgId}`).catch(() => null);
+  if (existing) {
+    const existingCh = await interaction.guild.channels.fetch(existing.channelId).catch(() => null);
+    if (existingCh) {
+      return interaction.reply({ content: `You already have a claim ticket open: <#${existing.channelId}>`, flags: 64 }).catch(() => {});
+    }
+    await store.updateTicketRecord(existing.channelId, { status: 'CLOSED' }).catch(() => {});
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(`gw_claim_modal:${gwMsgId}`)
+    .setTitle('Claim Your Reward')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('ign')
+          .setLabel('Your Minecraft IGN')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(40),
+      ),
+    );
+  await interaction.showModal(modal).catch(() => {});
+  return;
+}
+
 // --- TICKETS: panel button -> show modal (FAST) ---
 if (interaction.isButton() && interaction.customId.startsWith('tk_open:')) {
   const parts = interaction.customId.split(':');
@@ -5037,6 +5181,8 @@ if (interaction.isButton() && interaction.customId.startsWith('tk_open:')) {
             litematicUrl: null, litematicName: null,
             renderUrl: null, renderMessageId: null,
             draftMessageId: null,
+            rotation: 0, pendingRender: null,
+            images: [], galleryMessageId: null,
             forumThreadId: null, forumStarterMessageId: null,
             createdAt: Date.now(), updatedAt: Date.now(),
           });
@@ -5344,6 +5490,52 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
   }
 
   // --- TICKETS: modal submit -> create ticket channel ---
+  // --- GIVEAWAY: claim-ticket modal (IGN) -> create verified ticket ---
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('gw_claim_modal:')) {
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
+    const gwMsgId = interaction.customId.split(':')[1];
+    const g = await store.getGiveaway(gwMsgId).catch(() => null);
+    if (!g) return safeIReply(interaction, { content: 'This giveaway could not be found.', flags: 64 });
+    const winnerIds = Array.isArray(g.winnerIds) ? g.winnerIds.map(String) : [];
+    if (!winnerIds.includes(String(interaction.user.id))) {
+      return safeIReply(interaction, { content: 'Only the giveaway winner can open a claim ticket.', flags: 64 });
+    }
+    const ign = (interaction.fields.getTextInputValue('ign') || '').trim().slice(0, 40);
+    if (!ign) return safeIReply(interaction, { content: 'Please enter your IGN.', flags: 64 });
+
+    const buttonKey = `gw_${gwMsgId}`;
+    const existing = await store.findOpenTicketByUserButton(interaction.guildId, interaction.user.id, 'giveaway', buttonKey).catch(() => null);
+    if (existing) {
+      const existingCh = await interaction.guild.channels.fetch(existing.channelId).catch(() => null);
+      if (existingCh) return safeIReply(interaction, { content: `You already have a claim ticket open: <#${existing.channelId}>`, flags: 64 });
+      await store.updateTicketRecord(existing.channelId, { status: 'CLOSED' }).catch(() => {});
+    }
+
+    const btnCfg = {
+      key: 'reward',
+      label: 'Giveaway Reward',
+      categoryId: C.TICKET_CATEGORIES.GIVEAWAY || C.TICKET_CATEGORIES.SUPPORT || '',
+      welcome: 'Welcome {userMention}! A staff member will deliver your reward shortly.',
+      questions: [],
+    };
+    try {
+      const ch = await createTicketChannel({ interaction, panelId: 'giveaway', buttonKey, btnCfg, answers: {} });
+      if (ch) {
+        const verified = new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle('✅ Verified')
+          .setDescription(`<@${interaction.user.id}> won **${g.prize}**`)
+          .addFields({ name: 'IGN', value: ign.slice(0, 256) });
+        await ch.send({ embeds: [verified], allowedMentions: { parse: [] } }).catch(() => {});
+      }
+      const visible = !!(ch && ch.permissionsFor?.(interaction.user)?.has?.(PermissionsBitField.Flags.ViewChannel));
+      return safeIReply(interaction, { content: visible && ch ? `✅ Claim ticket created: <#${ch.id}>` : '✅ Claim ticket created.', flags: 64 });
+    } catch (e) {
+      console.error('giveaway claim ticket error:', e);
+      return safeIReply(interaction, { content: '❌ Failed to create claim ticket.', flags: 64 });
+    }
+  }
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith("tk_modal:")) {
     await interaction.deferReply({ flags: 64 });
     const parts = interaction.customId.split(":");
@@ -5404,6 +5596,8 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
             draftMessageId: null,
             rotation: 0,
             pendingRender: null,
+            images: [],
+            galleryMessageId: null,
             forumThreadId: null,
             forumStarterMessageId: null,
             createdAt: Date.now(),
@@ -7597,7 +7791,13 @@ if (commandName === 'giveaway') {
                 await msg.edit({ content: `🔁 **Rerolled Winner:** <@${pick}> — **${g.prize}**` }).catch(() => {});
               }
 
-              const ann = await msg.reply({ content: `🎉 Congratulations <@${pick}>, you won **${g.prize}**!` }).catch(() => null);
+              // Reroll replaces the winner — sync the stored list so the
+              // claim button only lets the new winner open a ticket.
+              await store.updateGiveaway(g.messageId, { winnerIds: [pick] }).catch(() => {});
+              const ann = await msg.reply({
+                content: `🎉 Congratulations <@${pick}>, you won **${g.prize}**!`,
+                components: [buildGiveawayClaimRow(g.messageId)],
+              }).catch(() => null);
               if (ann) await store.updateGiveaway(g.messageId, { lastAnnounceMessageId: ann.id }).catch(() => {});
             }
           }
@@ -8437,6 +8637,19 @@ async function restorePayBuilderButtonFromWatch(watch) {
 }
 function cancelRow(watchId, enabled) { return enabled ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`paywatch_cancel:${watchId}`).setLabel('Cancel').setStyle(ButtonStyle.Danger))] : []; }
 async function safeEditOriginal(watch, embeds, enableCancel) { try { if (!watch.message_id) return; const ch = await client.channels.fetch(watch.channel_id); const msg = await ch.messages.fetch(watch.message_id); await msg.edit({ content: '', embeds, components: cancelRow(watch.id, enableCancel) }); } catch {} }
+// "Open Ticket" button shown on a giveaway's congratulations message. Only the
+// stored winners can use it — the giveaway message id is carried in the
+// customId so the handler can look the giveaway (and its winner list) up.
+function buildGiveawayClaimRow(giveawayMessageId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`gw_claim:${giveawayMessageId}`)
+      .setLabel('Open Ticket')
+      .setStyle(ButtonStyle.Success)
+      .setEmoji('🎁'),
+  );
+}
+
 async function endGiveawayLogic(g, channel, msg) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('disabled').setLabel('Ended').setStyle(ButtonStyle.Secondary).setDisabled(true).setEmoji('🎉')
@@ -8453,6 +8666,9 @@ async function endGiveawayLogic(g, channel, msg) {
   const newDesc = `Ended: ${tsR(Date.now())} (${ts(Date.now())})\nHosted by: <@${g.hostId}>\nEntries: **${g.entries.length}**\nWinners: ${winnerText}`;
   await msg.edit({ embeds: [new EmbedBuilder(oldEmbed.data).setColor(0x2F3136).setDescription(newDesc)], components: [row] });
 
+  // Persist the winners so the claim button can verify who may open a ticket.
+  await store.updateGiveaway(g.messageId, { winnerIds }).catch(() => {});
+
   // Announce by replying to the original giveaway message
   try {
     // Delete any previous announcement message if tracked
@@ -8463,7 +8679,10 @@ async function endGiveawayLogic(g, channel, msg) {
   } catch {}
 
   if (winnerIds.length > 0) {
-    const announce = await msg.reply({ content: `🎉 Congratulations ${winnerText}, you won **${g.prize}**!` }).catch(() => null);
+    const announce = await msg.reply({
+      content: `🎉 Congratulations ${winnerText}, you won **${g.prize}**!`,
+      components: [buildGiveawayClaimRow(g.messageId)],
+    }).catch(() => null);
     if (announce) await store.updateGiveaway(g.messageId, { lastAnnounceMessageId: announce.id }).catch(() => {});
   } else {
     const announce = await msg.reply({ content: `Giveaway for **${g.prize}** ended with no entries.` }).catch(() => null);
