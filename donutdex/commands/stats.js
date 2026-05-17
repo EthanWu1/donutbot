@@ -84,7 +84,27 @@ module.exports = {
           : `No auction sells found for **${ign}** on page ${page}.`,
       });
     }
-    // action === 'history' handled in Task 12.
+    if (action === 'history') {
+      await interaction.deferUpdate();
+      const ranges = { '24h': 86400_000, '7d': 7 * 86400_000, '30d': 30 * 86400_000, all: Infinity };
+      const range = ranges[arg] !== undefined ? arg : '7d';
+      const since = range === 'all' ? 0 : Date.now() - ranges[range];
+      const rows = db.snapshotsSince(ign, since);
+      const points = rows.map((r) => ({ ts: r.ts, value: r.money }));
+      const { renderBalanceChart } = require('../lib/chart');
+      const png = renderBalanceChart(points, `${ign} — Balance (${range})`, true);
+      const { AttachmentBuilder } = require('discord.js');
+      const file = new AttachmentBuilder(png, { name: 'history.png' });
+
+      const rangeRow = new ActionRowBuilder().addComponents(
+        ...['24h', '7d', '30d', 'all'].map((r) =>
+          new ButtonBuilder()
+            .setCustomId(`stats:history:${ign}:${r}`)
+            .setLabel(r)
+            .setStyle(r === range ? ButtonStyle.Primary : ButtonStyle.Secondary)),
+      );
+      return interaction.editReply({ files: [file], components: [rangeRow] });
+    }
   },
 
   _buildStatsReply: buildStatsReply,
