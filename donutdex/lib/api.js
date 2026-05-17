@@ -42,4 +42,92 @@ const _cache = {
 
 const pool = new KeyPool(config.apiKeys, config.ratePerKeyPerMin);
 
-module.exports = { KeyPool, _cache, pool };
+class ApiError extends Error {}
+class NotFoundError extends ApiError {}
+class RateLimitedError extends ApiError {}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function rawRequest(path) {
+  let lastErr = new ApiError('No DonutSMP API keys configured');
+  for (let attempt = 0; attempt < config.apiKeys.length * 2 + 1; attempt++) {
+    const slot = pool.next();
+    if (!slot) {
+      if (config.apiKeys.length === 0) throw lastErr;
+      await sleep(1500);
+      continue;
+    }
+    let res;
+    try {
+      res = await fetch(config.apiBaseUrl + path, {
+        headers: { Authorization: slot.key },
+      });
+    } catch (e) {
+      lastErr = new ApiError(`Network error: ${e.message}`);
+      continue;
+    }
+    if (res.status === 429) { pool.cooldown(slot); lastErr = new RateLimitedError('Rate limited'); continue; }
+    if (res.status === 404) throw new NotFoundError('Player or resource not found');
+    const text = await res.text();
+    if (!res.ok) { lastErr = new ApiError(`HTTP ${res.status}: ${text.slice(0, 120)}`); continue; }
+    let json;
+    try { json = JSON.parse(text); }
+    catch { throw new ApiError(`Non-JSON response: ${text.slice(0, 120)}`); }
+    return json.result !== undefined ? json.result : json;
+  }
+  throw lastErr;
+}
+
+async function request(path, ttl) {
+  if (ttl) {
+    const hit = _cache.get(path);
+    if (hit !== undefined) return hit;
+  }
+  const result = await rawRequest(path);
+  if (ttl) _cache.set(path, result, ttl);
+  return result;
+}
+
+// Picks the first defined candidate field; raw stat field names are confirmed
+// against live data in Step 3 of this task.
+function pick(obj, candidates) {
+  for (const c of candidates) {
+    if (obj && obj[c] !== undefined && obj[c] !== null) return Number(obj[c]) || 0;
+  }
+  return 0;
+}
+
+function normalizeStats(raw) {
+  return {
+    money: pick(raw, ['money', 'balance']),
+    shards: pick(raw, ['shards', 'shard']),
+    kills: pick(raw, ['kills', 'kill']),
+    deaths: pick(raw, ['deaths', 'death']),
+    playtime: pick(raw, ['playtime', 'playtimeMinutes', 'time']),
+    placed: pick(raw, ['placed_blocks', 'placedBlocks', 'blocks_placed']),
+    broken: pick(raw, ['broken_blocks', 'brokenBlocks', 'blocks_broken']),
+    mobs: pick(raw, ['mobs_killed', 'mobsKilled', 'mobkills']),
+    spent: pick(raw, ['money_spent_on_shop', 'shop_spent', 'moneySpent', 'spent']),
+    made: pick(raw, ['money_made_from_sell', 'sell_made', 'moneyMade', 'made']),
+  };
+}
+
+async function getStats(user) {
+  const raw = await request(`/stats/${encodeURIComponent(user)}`, config.cacheTtl.stats);
+  return { raw, stats: normalizeStats(raw) };
+}
+const getLookup = (user) =>
+  request(`/lookup/${encodeURIComponent(user)}`, config.cacheTtl.lookup);
+const getLeaderboard = (type, page) =>
+  request(`/leaderboards/${encodeURIComponent(type)}/${page}`, config.cacheTtl.leaderboard);
+const getAuctionList = (page) =>
+  request(`/auction/list/${page}`, config.cacheTtl.auction);
+const getAuctionTransactions = (page) =>
+  request(`/auction/transactions/${page}`, config.cacheTtl.auction);
+
+module.exports = {
+  KeyPool, _cache, pool,
+  ApiError, NotFoundError, RateLimitedError,
+  request, normalizeStats,
+  getStats, getLookup, getLeaderboard, getAuctionList, getAuctionTransactions,
+};
