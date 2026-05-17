@@ -8090,7 +8090,7 @@ if (commandName === 'giveaway') {
       const eb = new EmbedBuilder()
         .setColor(0x00A8FF)
         .setThumbnail(targetUser.displayAvatarURL({ dynamic: true, size: 256 }))
-        .setDescription(`@${displayName}'s overall activity.`)
+        .setDescription(`<@${targetUser.id}>'s overall activity.`)
         .setTimestamp();
       if (staffRole || Number(s.closed || 0) || Number(s.renameCount || 0) || Number(s.messageCount || 0) || rc) {
         eb.addFields({ name: 'Staff History', value: `> **Closed Tickets:** \`${Number(s.closed || 0)}\`\n> **Tickets Renamed:** \`${Number(s.renameCount || 0)}\`\n> **Total Messages:** \`${Number(s.messageCount || 0)}\`\n> **Avg Response:** \`${fmtMs(avgMs)}\``, inline: false });
@@ -8101,7 +8101,13 @@ if (commandName === 'giveaway') {
         eb.addFields({ name: 'Builder History', value: text, inline: false });
       }
       if (!eb.data.fields?.length) eb.setDescription(`${targetUser} has no recorded staff or builder history.`);
-      return interaction.editReply({ embeds: [eb] });
+      // Ping the builder/staff member the stats are about — mentions inside
+      // an embed don't notify, so the ping goes in the message content.
+      return interaction.editReply({
+        content: `<@${targetUser.id}>`,
+        embeds: [eb],
+        allowedMentions: { users: [targetUser.id] },
+      });
     }
 
     if (commandName === 'stafflist') {
