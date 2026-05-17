@@ -5182,7 +5182,7 @@ if (interaction.isButton() && interaction.customId.startsWith('gw_claim:')) {
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId('ign')
-          .setLabel('Your Minecraft IGN')
+          .setLabel('IGN')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setMaxLength(40),
@@ -8726,7 +8726,6 @@ function buildGiveawayClaimRow(giveawayMessageId) {
       .setCustomId(`gw_claim:${giveawayMessageId}`)
       .setLabel('Open Ticket')
       .setStyle(ButtonStyle.Success)
-      .setEmoji('🎁'),
   );
 }
 
