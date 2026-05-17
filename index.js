@@ -8101,13 +8101,8 @@ if (commandName === 'giveaway') {
         eb.addFields({ name: 'Builder History', value: text, inline: false });
       }
       if (!eb.data.fields?.length) eb.setDescription(`${targetUser} has no recorded staff or builder history.`);
-      // Ping the builder/staff member the stats are about — mentions inside
-      // an embed don't notify, so the ping goes in the message content.
-      return interaction.editReply({
-        content: `<@${targetUser.id}>`,
-        embeds: [eb],
-        allowedMentions: { users: [targetUser.id] },
-      });
+      // Show the member as a mention (no notification — embed mentions don't ping).
+      return interaction.editReply({ embeds: [eb], allowedMentions: { parse: [] } });
     }
 
     if (commandName === 'stafflist') {
