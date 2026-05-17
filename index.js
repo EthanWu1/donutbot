@@ -781,7 +781,7 @@ function buildSchematicEmbed(sub, { forPreview = false } = {}) {
       `${check(Boolean(sub.howto && sub.howto.trim()))} Instructions`,
       `${check(Boolean(sub.litematicUrl))} Schematic`,
       `${check(Boolean(sub.renderUrl))} Render`,
-      `${imgCount > 0 ? '✅' : '➖'} Images (${imgCount}) — optional, drag them into this channel`,
+      `${imgCount > 0 ? '✅' : '➖'} Images (${imgCount})`,
     ].join('\n');
     const header = `${checklist}\n\n───\n\n`;
     eb.setDescription((header + (body || '')).slice(0, 4000));
