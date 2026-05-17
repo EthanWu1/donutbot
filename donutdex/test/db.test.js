@@ -5,8 +5,16 @@ const path = require('node:path');
 
 const TMP = path.join(__dirname, 'tmp-test.sqlite');
 process.env.DONUT_DB_PATH = TMP;
-test.afterEach(() => {});
-test.after(() => { try { fs.unlinkSync(TMP); } catch {} });
+
+// Remove the test db plus its WAL/SHM sidecars. The snapshots table is
+// append-only, so a leftover file from an aborted run would corrupt results.
+function cleanup() {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { fs.unlinkSync(TMP + suffix); } catch {}
+  }
+}
+cleanup(); // clear any stale db before the lib opens the file
+test.after(cleanup);
 
 const db = require('../lib/db');
 
