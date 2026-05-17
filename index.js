@@ -5598,7 +5598,6 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
         const endedAt = Number(g.endedAt || g.createdAt) || 0;
         const verified = new EmbedBuilder()
           .setColor(0x57f287)
-          .setTitle('✅ Verified')
           .setDescription(
             `<@${interaction.user.id}> won **${g.prize}**\n\n` +
             `[Jump to giveaway](${gwUrl})${endedAt ? ` · ended ${tsR(endedAt)}` : ''}`
