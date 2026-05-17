@@ -733,6 +733,12 @@ async function findOpenTicketByUserButton(guildId, userId, panelId, buttonId) {
   return entries.find(t => t.guildId===guildId && t.creatorId===userId && t.panelId===panelId && t.buttonId===buttonId && t.status==='OPEN') || null;
 }
 
+// All currently-open spawner tickets (records carry spawnerType/Direction/Qty).
+async function listOpenSpawnerTickets() {
+  const ts = await getTicketSystem();
+  return Object.values(ts.tickets||{}).filter(t => t && t.status==='OPEN' && t.spawnerType);
+}
+
 // --- STAFF TICKET STATS ---
 // ticketStats[guildId][staffId] = { closed, claimed, messageCount, responseTotalMs, responseCount }
 function ensureTicketStatsRow(guildId, staffId) {
@@ -1419,7 +1425,7 @@ module.exports = {
   addSticky, getStickies, clearStickies, updateStickyMessageId, getStickyById, updateSticky,
   getTicketSystem, getTicketConfig, setTicketConfig,
   listTicketPanels, getTicketPanel, setTicketPanel, deleteTicketPanel,
-  nextTicketId, createTicketRecord, getTicketRecord, updateTicketRecord, deleteTicketRecord, findOpenTicketByUserButton,
+  nextTicketId, createTicketRecord, getTicketRecord, updateTicketRecord, deleteTicketRecord, findOpenTicketByUserButton, listOpenSpawnerTickets,
   recordTicketResponse, recordTicketClosed, recordTicketClaimed, recordTicketOpened, recordTicketRenamed, recordTicketMessage, getTicketStats,
   listAppTypes, getAppType, setAppType, deleteAppType, createAppSubmission, getAppSubmission, updateAppSubmission,
 getAutoNickConfig, setAutoNickPrefix, seedAutoNickDefaults,

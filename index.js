@@ -413,6 +413,10 @@ async function refreshBuildersBoard(guild) {
   return true;
 }
 const LEVEL_UP_CHANNEL_ID = C.CHANNEL_LEVEL_UP;
+// Channel that gets a plain milestone shout every 5 levels.
+const LEVEL_MILESTONE_CHANNEL_ID = '1505582865813999789';
+// Category where the Members/Channels/Roles stat voice channels live.
+const STAT_CHANNELS_CATEGORY_ID = '1484047106737176708';
 
 // --- TICKETS + APPLICATIONS SYSTEM ---
 const TICKET_SYSTEM_DEFAULT_GUILD_ID = process.env.GUILD_ID || null;
@@ -650,6 +654,92 @@ async function refreshSpawnerPricesPanel(guild) {
     if (msg) await store.setSpawnerPanelRef({ channelId: msg.channelId, messageId: msg.id }).catch(() => {});
   }
   return msg ? { channel, message: msg } : null;
+}
+
+// Post an update message in every open spawner ticket affected by a price
+// change. `shopDirection` is the column the admin set ('buy' or 'sell');
+// customers buying use the shop's SELL price, customers selling use the
+// shop's BUY price, so the affected ticket direction is the opposite.
+async function notifySpawnerTicketsOfPriceChange(guild, typeKey, shopDirection) {
+  if (!guild) return;
+  const type = getSpawnerType(typeKey);
+  if (!type || !['buy', 'sell'].includes(shopDirection)) return;
+  const customerDirection = shopDirection === 'buy' ? 'sell' : 'buy';
+  let tickets = [];
+  try { tickets = await store.listOpenSpawnerTickets(); } catch { return; }
+  const prices = await store.getSpawnerPrices().catch(() => ({}));
+  const priceVal = prices?.[type.key]?.[shopDirection];
+  const priceStr = fmtSpawnerPrice(priceVal);
+  for (const rec of tickets) {
+    if (String(rec.guildId) !== String(guild.id)) continue;
+    if (String(rec.spawnerType) !== String(type.key)) continue;
+    if (String(rec.spawnerDirection) !== customerDirection) continue;
+    const channel = await guild.channels.fetch(rec.channelId).catch(() => null);
+    if (!channel || !channel.isTextBased?.()) continue;
+    const verb = customerDirection === 'buy' ? 'selling' : 'buying';
+    let embed;
+    if (priceStr) {
+      embed = new EmbedBuilder()
+        .setColor(0x08a4a7)
+        .setTitle('Spawner Price Updated')
+        .setDescription(`We are now **${verb}** ${type.emoji} **${type.label}** spawners at **${priceStr}** each.`)
+        .setFooter({ text: 'Prices are not negotiable.' });
+      const qty = Number(rec.spawnerQty);
+      if (Number.isFinite(qty) && qty > 0) {
+        embed.addFields(
+          { name: 'Quantity Requested', value: `**${qty}**`, inline: true },
+          { name: 'Updated Estimated Total', value: `**${fmtSpawnerPrice(qty * Number(priceVal))}**`, inline: true },
+        );
+      }
+    } else {
+      embed = new EmbedBuilder()
+        .setColor(0xed4245)
+        .setTitle('Spawner Price Updated')
+        .setDescription(`We are no longer **${verb}** ${type.emoji} **${type.label}** spawners. A staff member will assist you with this ticket.`);
+    }
+    await channel.send({ embeds: [embed] }).catch(() => {});
+  }
+}
+
+// Server-stat voice channels: three private (no-Connect) voice channels under
+// STAT_CHANNELS_CATEGORY_ID whose names display live Members / Channels / Roles
+// counts. Channels are matched/created by their label prefix so the bot never
+// duplicates them across restarts.
+const STAT_CHANNEL_DEFS = [
+  { label: 'Members',  count: (g) => g.memberCount ?? g.members?.cache?.size ?? 0 },
+  { label: 'Channels', count: (g) => g.channels?.cache?.size ?? 0 },
+  { label: 'Roles',    count: (g) => g.roles?.cache?.size ?? 0 },
+];
+
+async function ensureServerStatChannels(guild) {
+  if (!guild || !STAT_CHANNELS_CATEGORY_ID) return;
+  try {
+    const category = await guild.channels.fetch(STAT_CHANNELS_CATEGORY_ID).catch(() => null);
+    if (!category) return;
+    for (const def of STAT_CHANNEL_DEFS) {
+      const desiredName = `${def.label}: ${Number(def.count(guild)).toLocaleString('en-US')}`;
+      let channel = guild.channels.cache.find(c =>
+        c.parentId === STAT_CHANNELS_CATEGORY_ID &&
+        c.type === ChannelType.GuildVoice &&
+        typeof c.name === 'string' &&
+        c.name.startsWith(`${def.label}:`)
+      ) || null;
+      if (!channel) {
+        channel = await guild.channels.create({
+          name: desiredName,
+          type: ChannelType.GuildVoice,
+          parent: STAT_CHANNELS_CATEGORY_ID,
+          permissionOverwrites: [
+            { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.Connect] },
+          ],
+        }).catch(() => null);
+      } else if (channel.name !== desiredName) {
+        await channel.setName(desiredName).catch(() => {});
+      }
+    }
+  } catch (e) {
+    console.error('[stat channels] error:', e?.message || e);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2245,7 +2335,12 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
     [C.ROLE_OWNER, C.ROLE_CO_OWNER, C.ROLE_ADMIN].filter(Boolean).map(String)
   );
   let staffPing = null;
-  if (!isSchematicTicket) {
+  if (isSpawnerButton(buttonKey)) {
+    // Spawner tickets ping only the dedicated spawner-access role.
+    staffPing = filterCachedRoleIds([SPAWNER_TICKET_ACCESS_ROLE_ID], guild.roles)
+      .map(r => `<@&${r}>`)
+      .join(' ') || null;
+  } else if (!isSchematicTicket) {
     staffPing = viewerRoleIds
       .filter(r => !noPingRoleIds.has(String(r)))
       .map(r => `<@&${r}>`)
@@ -3299,6 +3394,24 @@ async function handleLevelUp(member, newLevel, oldLevel, currentXp) {
   } catch (err) {
     console.error('Error sending level-up message:', err);
   }
+
+  // Plain milestone shout in its own channel — only every 5th level.
+  try {
+    if (LEVEL_MILESTONE_CHANNEL_ID) {
+      const milestoneCh = await client.channels.fetch(LEVEL_MILESTONE_CHANNEL_ID).catch(() => null);
+      if (milestoneCh && typeof milestoneCh.send === 'function') {
+        for (let lvl = normalizedOld + 1; lvl <= normalizedNew; lvl++) {
+          if (lvl % 5 !== 0) continue;
+          await milestoneCh.send({
+            content: `<@${member.id}> has reached level **${lvl}**!`,
+            allowedMentions: { users: [member.id] },
+          }).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error sending level milestone message:', err);
+  }
 }
 
 const ACTIVE_BUILD_STATUSES = ['PENDING', 'WAITING_PAYMENT', 'AWAITING_CONFIRM', 'AWAITING_PAYOUT'];
@@ -3679,22 +3792,13 @@ client.once('clientReady', async () => {
         'Describe the scam and include evidence'
       );
 
-      // Carry forward giveaway_claim + partnerships exactly as they were
-      // (only refresh giveaway_claim questions to canonical shape).
-      const gwExisting = findExisting('giveaway_claim');
-      const giveawayBtn = gwExisting ? {
-        ...gwExisting,
-        type: 'button',
-        questions: [
-          { id: 'ign', label: 'IGN', style: 'Short', required: true, min: 1, max: 40 },
-          { id: 'proof', label: 'Will you send proof?', style: 'Short', required: true, min: 1, max: 100 }
-        ],
-      } : null;
+      // Carry forward partnerships exactly as it was. The giveaway_claim
+      // button is intentionally dropped — claiming now happens through the
+      // Claim button on the giveaway announcement message.
       const partnershipsBtn = findExisting('partnerships');
 
       // Final canonical layout: 5-then-up-to-2 across two rows.
       const row1 = [otherBtn, farmHelpBtn, publishSchematicBtn, scamReportBtn];
-      if (giveawayBtn) row1.push(giveawayBtn);
       const row2 = [];
       if (partnershipsBtn) row2.push(partnershipsBtn);
       panel.components = row2.length ? [row1, row2] : [row1];
@@ -4899,6 +5003,67 @@ if (interaction.isButton() && (
   return;
 }
 
+// --- PUBLISH SCHEMATIC: start a fresh submission in an existing ticket ---
+// Shown after the prior submission was published (approved) or rejected, so a
+// submitter can publish another schematic without opening a new ticket.
+if (interaction.isButton() && interaction.customId.startsWith('publish_new:')) {
+  const channel = interaction.channel;
+  if (!channel || !isPublishSchematicTicketChannel(channel)) {
+    return interaction.reply({ content: 'Use this inside a Publish Schematic ticket.', flags: 64 }).catch(() => {});
+  }
+  const current = await store.findSchematicSubmissionByTicketChannel(channel.id).catch(() => null);
+  const isOwner = current && String(interaction.user.id) === String(current.submitterId);
+  const isManager = canManageSchematicSubmission(interaction.member);
+  if (!isOwner && !isManager) {
+    return interaction.reply({ content: 'Only the submitter or a schematic manager can start a new submission.', flags: 64 }).catch(() => {});
+  }
+  const curStatus = String(current?.status || '').toUpperCase();
+  if (current && !['PUBLISHED', 'REJECTED'].includes(curStatus)) {
+    return interaction.reply({ content: 'Finish the current submission first — it has not been published or rejected yet.', flags: 64 }).catch(() => {});
+  }
+  await interaction.deferReply({ flags: 64 }).catch(() => {});
+  // Detach the old record so /publish + ticket lookups target the new one.
+  // A published schematic still resolves via its forum thread id.
+  if (current) {
+    await store.updateSchematicSubmission(current.id, { ticketChannelId: null }).catch(() => {});
+  }
+  const newId = `${channel.id}-${Date.now()}`;
+  const submitterId = current?.submitterId || interaction.user.id;
+  await store.setSchematicSubmission(newId, {
+    id: newId,
+    ticketChannelId: channel.id,
+    guildId: channel.guildId,
+    submitterId,
+    status: 'DRAFT',
+    name: null, designers: null, credits: null,
+    rates: null, consumes: null, stats: null,
+    positives: null, negatives: null,
+    build: null, howto: null,
+    litematicUrl: null, litematicName: null,
+    renderUrl: null, renderMessageId: null,
+    draftMessageId: null,
+    rotation: 0, pendingRender: null,
+    images: [], galleryMessageId: null, galleryChannelId: null,
+    forumThreadId: null, forumStarterMessageId: null,
+    createdAt: Date.now(), updatedAt: Date.now(),
+  }).catch(() => {});
+  const startEmbed = new EmbedBuilder()
+    .setColor(0x08a4a7)
+    .setTitle('Ready to submit another schematic?')
+    .setDescription([
+      'Click **Start Submission** to fill in the basics (name, designers, rates, instructions).',
+      '',
+      'Then drop your `.litematic` file in this channel — the bot will render it automatically.',
+      '',
+      'A schematic manager will review and publish your post to the forum.',
+    ].join('\n'));
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`publish_start:${newId}`).setLabel('Start Submission').setStyle(ButtonStyle.Secondary),
+  );
+  await channel.send({ embeds: [startEmbed], components: [row] }).catch(() => {});
+  return safeIReply(interaction, { content: 'New submission started — click **Start Submission** above.', flags: 64 });
+}
+
 // --- PUBLISH SCHEMATIC: Re-render button ---
 // --- PUBLISH SCHEMATIC: UserSelectMenu pickers for Designers / Credits ---
 if (interaction.isUserSelectMenu?.() && (
@@ -5588,22 +5753,29 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       key: 'reward',
       label: 'Giveaway Reward',
       categoryId: C.TICKET_CATEGORIES.GIVEAWAY || C.TICKET_CATEGORIES.SUPPORT || '',
-      welcome: 'Welcome {userMention}! A staff member will deliver your reward shortly.',
-      questions: [],
+      welcome: `Congratulations {userMention}! You won **${g.prize}**.\nA staff member will deliver your reward shortly.`,
+      questions: [
+        { id: 'ign', label: 'IGN' },
+      ],
     };
+    // Ticket channel is named after the prize: giveaway-<prize>.
+    const prizeSlug = String(g.prize || 'prize')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'prize';
     try {
-      const ch = await createTicketChannel({ interaction, panelId: 'giveaway', buttonKey, btnCfg, answers: {} });
+      const ch = await createTicketChannel({
+        interaction, panelId: 'giveaway', buttonKey, btnCfg,
+        answers: { ign },
+        nameOverride: `giveaway-${prizeSlug}`,
+      });
       if (ch) {
-        const gwUrl = `https://discord.com/channels/${g.guildId || interaction.guildId}/${g.channelId}/${g.messageId}`;
-        const endedAt = Number(g.endedAt || g.createdAt) || 0;
-        const verified = new EmbedBuilder()
-          .setColor(0x57f287)
-          .setDescription(
-            `<@${interaction.user.id}> won **${g.prize}**\n\n` +
-            `[Jump to giveaway](${gwUrl})${endedAt ? ` · ended ${tsR(endedAt)}` : ''}`
-          )
-          .addFields({ name: 'IGN', value: ign.slice(0, 256) });
-        await ch.send({ embeds: [verified], allowedMentions: { parse: [] } }).catch(() => {});
+        // Forward the original giveaway message into the ticket for context.
+        try {
+          const gwCh = await interaction.guild.channels.fetch(g.channelId).catch(() => null);
+          const gwMsg = gwCh ? await gwCh.messages.fetch(g.messageId).catch(() => null) : null;
+          if (gwMsg) await gwMsg.forward(ch).catch(() => {});
+        } catch (e) {
+          console.error('giveaway forward error:', e?.message);
+        }
       }
       const visible = !!(ch && ch.permissionsFor?.(interaction.user)?.has?.(PermissionsBitField.Flags.ViewChannel));
       return safeIReply(interaction, { content: visible && ch ? `✅ Claim ticket created: <#${ch.id}>` : '✅ Claim ticket created.', flags: 64 });
@@ -7842,6 +8014,10 @@ if (commandName === 'giveaway') {
             const msg = await ch.messages.fetch(g.messageId).catch(() => null);
             if (msg) {
               // Delete prior announce message if we tracked it
+              if (g.lastClaimMessageId) {
+                const prevClaim = await ch.messages.fetch(g.lastClaimMessageId).catch(() => null);
+                if (prevClaim) await prevClaim.delete().catch(() => {});
+              }
               if (g.lastAnnounceMessageId) {
                 const prev = await ch.messages.fetch(g.lastAnnounceMessageId).catch(() => null);
                 if (prev) await prev.delete().catch(() => {});
@@ -7874,9 +8050,13 @@ if (commandName === 'giveaway') {
               await store.updateGiveaway(g.messageId, { winnerIds: [pick] }).catch(() => {});
               const ann = await msg.reply({
                 content: `🎉 Congratulations <@${pick}>, you won **${g.prize}**!`,
-                components: [buildGiveawayClaimRow(g.messageId)],
               }).catch(() => null);
               if (ann) await store.updateGiveaway(g.messageId, { lastAnnounceMessageId: ann.id }).catch(() => {});
+              const claimMsg = await ch.send({
+                components: [buildGiveawayClaimRow(g.messageId)],
+                allowedMentions: { parse: [] },
+              }).catch(() => null);
+              if (claimMsg) await store.updateGiveaway(g.messageId, { lastClaimMessageId: claimMsg.id }).catch(() => {});
             }
           }
         } catch (e) {
@@ -8387,6 +8567,7 @@ ${E_TIME} Created ${created}`)
         if (!price || price <= 0) return interaction.editReply('❌ Price must be a positive number (e.g. `4.1m`, `530000`).');
         await store.setSpawnerPrice(type.key, sub, price).catch(() => {});
         await refreshSpawnerPricesPanel(interaction.guild).catch(() => {});
+        await notifySpawnerTicketsOfPriceChange(interaction.guild, type.key, sub).catch(() => {});
         return interaction.editReply(`✅ Set **${type.label}** ${sub.toUpperCase()} price to **${fmtSpawnerPrice(price)}** each.`);
       }
 
@@ -8398,6 +8579,7 @@ ${E_TIME} Created ${created}`)
         if (!['buy','sell'].includes(action)) return interaction.editReply('❌ Action must be Buy or Sell.');
         await store.clearSpawnerPrice(type.key, action).catch(() => {});
         await refreshSpawnerPricesPanel(interaction.guild).catch(() => {});
+        await notifySpawnerTicketsOfPriceChange(interaction.guild, type.key, action).catch(() => {});
         return interaction.editReply(`✅ Cleared **${type.label}** ${action.toUpperCase()} price.`);
       }
     }
@@ -8447,6 +8629,10 @@ ${E_TIME} Created ${created}`)
         const verb = res.updated ? 'Updated' : 'Published';
         await channel.send({
           embeds: [new EmbedBuilder().setColor(0x08a4a7).setTitle(verb).setDescription(`This schematic has been ${verb.toLowerCase()} in <#${res.thread.id}>.`)],
+          // Once approved, let the submitter start another submission in-ticket.
+          components: res.updated ? [] : [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`publish_new:${channel.id}`).setLabel('New Submission').setStyle(ButtonStyle.Secondary).setEmoji('📦'),
+          )],
         }).catch(() => {});
         const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
         await postOrUpdateSchematicDraftPreview(channel, fresh).catch(() => {});
@@ -8506,6 +8692,10 @@ ${E_TIME} Created ${created}`)
             .setTitle('Submission Rejected')
             .setDescription(`Rejected by ${interaction.user}.`)
             .addFields({ name: 'Reason', value: reason.slice(0, 1024) || '—' })],
+          // Let the submitter try again with a fresh submission in this ticket.
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`publish_new:${channel.id}`).setLabel('New Submission').setStyle(ButtonStyle.Secondary).setEmoji('📦'),
+          )],
         }).catch(() => {});
 
         return safeIReply(interaction, { content: 'Rejection logged. You can `/ticket close` when ready.', flags: 64 });
@@ -8723,8 +8913,8 @@ function buildGiveawayClaimRow(giveawayMessageId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`gw_claim:${giveawayMessageId}`)
-      .setLabel('Open Ticket')
-      .setStyle(ButtonStyle.Success)
+      .setLabel('Claim')
+      .setStyle(ButtonStyle.Secondary)
   );
 }
 
@@ -8755,14 +8945,24 @@ async function endGiveawayLogic(g, channel, msg) {
       const prev = await channel.messages.fetch(g.lastAnnounceMessageId).catch(() => null);
       if (prev) await prev.delete().catch(() => {});
     }
+    if (g.lastClaimMessageId) {
+      const prevClaim = await channel.messages.fetch(g.lastClaimMessageId).catch(() => null);
+      if (prevClaim) await prevClaim.delete().catch(() => {});
+    }
   } catch {}
 
   if (winnerIds.length > 0) {
     const announce = await msg.reply({
       content: `🎉 Congratulations ${winnerText}, you won **${g.prize}**!`,
-      components: [buildGiveawayClaimRow(g.messageId)],
     }).catch(() => null);
     if (announce) await store.updateGiveaway(g.messageId, { lastAnnounceMessageId: announce.id }).catch(() => {});
+    // Claim button posted as its own message so it sits apart from the
+    // congratulations line for a cleaner look.
+    const claimMsg = await channel.send({
+      components: [buildGiveawayClaimRow(g.messageId)],
+      allowedMentions: { parse: [] },
+    }).catch(() => null);
+    if (claimMsg) await store.updateGiveaway(g.messageId, { lastClaimMessageId: claimMsg.id }).catch(() => {});
   } else {
     const announce = await msg.reply({ content: `Giveaway for **${g.prize}** ended with no entries.` }).catch(() => null);
     if (announce) await store.updateGiveaway(g.messageId, { lastAnnounceMessageId: announce.id }).catch(() => {});
@@ -9142,6 +9342,16 @@ client.once(Events.ClientReady, async () => {
   };
   tick().catch(() => {});
   setInterval(() => tick().catch(() => {}), 60 * 1000);
+
+  // Server-stat voice channels (Members / Channels / Roles). Discord rate-limits
+  // channel renames hard, so refresh on a 10-minute cadence.
+  const refreshStatChannels = async () => {
+    for (const guild of client.guilds.cache.values()) {
+      await ensureServerStatChannels(guild).catch(() => {});
+    }
+  };
+  refreshStatChannels().catch(() => {});
+  setInterval(() => refreshStatChannels().catch(() => {}), 10 * 60 * 1000);
 });
 
 client.login(cfg.token);
