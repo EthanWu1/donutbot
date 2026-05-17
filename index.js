@@ -1140,8 +1140,11 @@ async function postOrUpdateSchematicGallery(channel, sub) {
   }
   if (!files.length) return null;
 
+  // On the published forum post the panel carries no caption — just the
+  // images + the remove menu. In the ticket it keeps the how-to caption.
+  const isForumPost = channel.isThread?.() && channel.parentId === SCHEMATIC_FORUM_CHANNEL_ID;
   const payload = {
-    content: '**Images** — drag more into the channel to add, use the menu to remove.',
+    content: isForumPost ? '' : '**Images** — drag more into the channel to add, use the menu to remove.',
     files,
     components: [buildSchematicImageRemoveRow(sub.id, kept)],
     allowedMentions: { parse: [] },
