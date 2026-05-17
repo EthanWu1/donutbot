@@ -3398,14 +3398,24 @@ async function handleLevelUp(member, newLevel, oldLevel, currentXp) {
   // Plain milestone shout in its own channel — only every 5th level.
   try {
     if (LEVEL_MILESTONE_CHANNEL_ID) {
-      const milestoneCh = await client.channels.fetch(LEVEL_MILESTONE_CHANNEL_ID).catch(() => null);
-      if (milestoneCh && typeof milestoneCh.send === 'function') {
+      const milestoneCh = await client.channels.fetch(LEVEL_MILESTONE_CHANNEL_ID)
+        .catch(e => {
+          console.error(`[milestone] cannot fetch channel ${LEVEL_MILESTONE_CHANNEL_ID}:`, e?.message || e);
+          return null;
+        });
+      if (!milestoneCh) {
+        console.error(`[milestone] channel ${LEVEL_MILESTONE_CHANNEL_ID} not found or not visible to the bot — check the ID and the bot's View Channel permission.`);
+      } else if (typeof milestoneCh.send !== 'function') {
+        console.error(`[milestone] channel ${LEVEL_MILESTONE_CHANNEL_ID} is not a text channel (type ${milestoneCh.type}).`);
+      } else {
         for (let lvl = normalizedOld + 1; lvl <= normalizedNew; lvl++) {
           if (lvl % 5 !== 0) continue;
           await milestoneCh.send({
             content: `<@${member.id}> has reached level **${lvl}**!`,
             allowedMentions: { users: [member.id] },
-          }).catch(() => {});
+          })
+            .then(() => console.log(`[milestone] posted level ${lvl} for ${member.id} in ${LEVEL_MILESTONE_CHANNEL_ID}`))
+            .catch(e => console.error(`[milestone] send failed for level ${lvl} in ${LEVEL_MILESTONE_CHANNEL_ID}:`, e?.message || e));
         }
       }
     }
