@@ -5521,10 +5521,15 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
     try {
       const ch = await createTicketChannel({ interaction, panelId: 'giveaway', buttonKey, btnCfg, answers: {} });
       if (ch) {
+        const gwUrl = `https://discord.com/channels/${g.guildId || interaction.guildId}/${g.channelId}/${g.messageId}`;
+        const endedAt = Number(g.endedAt || g.createdAt) || 0;
         const verified = new EmbedBuilder()
           .setColor(0x57f287)
           .setTitle('✅ Verified')
-          .setDescription(`<@${interaction.user.id}> won **${g.prize}**`)
+          .setDescription(
+            `<@${interaction.user.id}> won **${g.prize}**\n\n` +
+            `[Jump to giveaway](${gwUrl})${endedAt ? ` · ended ${tsR(endedAt)}` : ''}`
+          )
           .addFields({ name: 'IGN', value: ign.slice(0, 256) });
         await ch.send({ embeds: [verified], allowedMentions: { parse: [] } }).catch(() => {});
       }
@@ -8666,8 +8671,9 @@ async function endGiveawayLogic(g, channel, msg) {
   const newDesc = `Ended: ${tsR(Date.now())} (${ts(Date.now())})\nHosted by: <@${g.hostId}>\nEntries: **${g.entries.length}**\nWinners: ${winnerText}`;
   await msg.edit({ embeds: [new EmbedBuilder(oldEmbed.data).setColor(0x2F3136).setDescription(newDesc)], components: [row] });
 
-  // Persist the winners so the claim button can verify who may open a ticket.
-  await store.updateGiveaway(g.messageId, { winnerIds }).catch(() => {});
+  // Persist the winners + end time so the claim button can verify who may
+  // open a ticket and the ticket can show how long ago the giveaway ended.
+  await store.updateGiveaway(g.messageId, { winnerIds, endedAt: Date.now() }).catch(() => {});
 
   // Announce by replying to the original giveaway message
   try {
