@@ -8021,8 +8021,8 @@ if (commandName === 'giveaway') {
       const type = options.getString('type', true);
       await interaction.deferReply().catch(() => {});
       const cfg = await store.getTicketConfig().catch(() => ({}));
-      if (!isStaffMember(interaction.member, cfg) && !interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
-        return safeIReply(interaction, { content: 'Staff only.', flags: 64 });
+      if (!isStaffMember(interaction.member, cfg) && !isBuilderMember(interaction.member) && !interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
+        return safeIReply(interaction, { content: 'Staff or builders only.', flags: 64 });
       }
 
       if (type === 'staff') {
@@ -8071,8 +8071,8 @@ if (commandName === 'giveaway') {
     if (commandName === 'stats') {
       await interaction.deferReply().catch(() => {});
       const cfg = await store.getTicketConfig().catch(() => ({}));
-      if (!isStaffMember(interaction.member, cfg) && !interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
-        return safeIReply(interaction, { content: 'Staff only.', flags: 64 });
+      if (!isStaffMember(interaction.member, cfg) && !isBuilderMember(interaction.member) && !interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
+        return safeIReply(interaction, { content: 'Staff or builders only.', flags: 64 });
       }
       const targetUser = options.getUser('staff') || interaction.user;
       const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
