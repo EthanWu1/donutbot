@@ -61,12 +61,6 @@ const commands = [
     .setName('serverinfo')
     .setDescription('Server information'),
 
-  // --- LITEMATIC RENDER ---
-  new SlashCommandBuilder()
-    .setName('render')
-    .setDescription('Render a .litematic schematic with size and volume')
-    .addAttachmentOption(o => o.setName('litematic').setDescription('Litematic file to render').setRequired(true)),
-
   // --- AFK ---
   new SlashCommandBuilder()
     .setName('afk')

@@ -37,7 +37,7 @@ const store = require('./store');
 const { getUserBalance } = require('./donutsApi');
 const { parseNumber, parseDuration, getLevelFromXp, getXpForLevel, sanitizeDisplayName } = require('./utils');
 const { generateRankCard } = require('./rankCard');
-const { handleRenderCommand, handleRenderRotation, schematicVolume } = require('./lib/litematicRenderCommand');
+const { schematicVolume } = require('./lib/litematicRenderCommand');
 const {
   APPLICATION_COOLDOWN_MS,
   buildBuilderLeaderboardLine,
@@ -60,11 +60,13 @@ const {
   splitIgnList,
 } = require('./botLogic');
 
-// Lazy-loaded inside the litematic handlers so missing render deps
-// (puppeteer, etc.) do not crash bot boot for unrelated features.
+// All litematic rendering now goes through the shared render service
+// (render-service/), so this process no longer launches its own Chromium.
+// renderClient exposes renderLitematic() with the same signature and return
+// shape as the old in-process renderer, so every call site is unchanged.
 let _litematicRender = null;
 function getLitematicRender() {
-  if (!_litematicRender) _litematicRender = require('./lib/litematicRender/renderer');
+  if (!_litematicRender) _litematicRender = require('./lib/renderClient');
   return _litematicRender;
 }
 
@@ -5333,14 +5335,6 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_rerender:
   return safeIReply(interaction, { content: res.ok ? 'Re-rendered.' : res.reason, flags: 64 });
 }
 
-// --- LITEMATIC RENDER: rotation arrows on a /render reply ---
-if (interaction.isButton() && interaction.customId.startsWith('renderrot:')) {
-  await handleRenderRotation(interaction, {
-    renderLitematic: (buf, opts) => getLitematicRender().renderLitematic(buf, opts),
-  });
-  return;
-}
-
 // --- PUBLISH SCHEMATIC: rotation arrows on the in-ticket draft preview ---
 if (interaction.isButton() && interaction.customId.startsWith('schemrot:')) {
   const [, subId, dir] = interaction.customId.split(':');
@@ -8577,14 +8571,6 @@ if (commandName === 'giveaway') {
       const msg = await targetCh.send({ embeds: [embed] }).catch(() => null);
       if (msg) { await msg.react('⬆️').catch(() => {}); await msg.react('⬇️').catch(() => {}); }
       return interaction.editReply(`✅ Suggestion submitted${targetCh.id !== interaction.channelId ? ` in <#${targetCh.id}>` : '.'}`);
-    }
-
-    // --- LITEMATIC RENDER ---
-    if (commandName === 'render') {
-      await handleRenderCommand(interaction, {
-        renderLitematic: (buf, opts) => getLitematicRender().renderLitematic(buf, opts),
-      });
-      return;
     }
 
     // --- SERVER INFO ---

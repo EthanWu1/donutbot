@@ -27,5 +27,24 @@ module.exports = {
         //   PUPPETEER_EXECUTABLE_PATH: '/usr/bin/chromium-browser',
       },
     },
+    {
+      // Shared litematic render service — the only process that launches
+      // Chromium. Both donutbot and Donut Index call it over loopback HTTP.
+      name: 'render-service',
+      script: 'render-service/server.js',
+      cwd: __dirname,
+      instances: 1,
+      exec_mode: 'fork',
+      autorestart: true,
+      max_restarts: 10,
+      min_uptime: '60s',
+      restart_delay: 5000,
+      // Chromium renders spike memory; cycle the process past 1.2 GB.
+      max_memory_restart: '1200M',
+      env: {
+        NODE_ENV: 'production',
+        RENDER_SERVICE_PORT: '4123',
+      },
+    },
   ],
 };
