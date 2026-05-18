@@ -1164,6 +1164,8 @@ function buildSchematicModal(sub) {
 // for descriptions. Text in this field overwrites the picker's output.
 function buildSchematicDetailsModal(sub) {
   return buildModalFromFields(`publish_modal_details:${sub.id}`, 'Edit Schematic Details', [
+    { id: 'designers', label: 'Designers (one per line)', style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.designers,
+      placeholder: '<@691315771015561257>\nPlayerIGN — for designers not in the server' },
     { id: 'credits',   label: 'Credits',    style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.credits,
       placeholder: '<@iEtZ>: helped wire the on/off switch' },
     { id: 'consumes',  label: 'Consumes',   style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.consumes,
@@ -5851,6 +5853,7 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
 
     const patch = isDetails
       ? {
+          designers: (interaction.fields.getTextInputValue('designers') || '').trim(),
           credits:   (interaction.fields.getTextInputValue('credits')   || '').trim(),
           consumes:  (interaction.fields.getTextInputValue('consumes')  || '').trim(),
           positives: (interaction.fields.getTextInputValue('positives') || '').trim(),
