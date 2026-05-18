@@ -17,7 +17,9 @@ const fs = require('fs');
 const http = require('http');
 const { getBrowserLaunchOptions } = require('../lib/litematicRender/renderer');
 
-const HOLOPRINT_DIR = path.join(__dirname, 'holoprint');
+// HoloPrint's own src/ is the web root — it fetches packTemplate/, data/ etc.
+// relative to the page, exactly as on the live site (src/index.html).
+const HOLOPRINT_DIR = path.join(__dirname, 'holoprint', 'src');
 const PACK_TIMEOUT_MS = 180_000;
 const QUEUE_CAP = 3;
 
@@ -113,7 +115,7 @@ async function makeHoloprintPack(mcstructureBuffer, sourceName) {
   if (_pending >= QUEUE_CAP) {
     throw new Error(`holoprint queue full (${_pending}/${QUEUE_CAP})`);
   }
-  if (!fs.existsSync(path.join(HOLOPRINT_DIR, 'src', 'HoloPrint.js'))) {
+  if (!fs.existsSync(path.join(HOLOPRINT_DIR, 'HoloPrint.js'))) {
     throw new Error('HoloPrint app is not vendored — render-service/holoprint/src is missing');
   }
 
