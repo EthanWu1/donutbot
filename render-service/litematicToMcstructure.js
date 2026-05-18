@@ -6,16 +6,15 @@
 // Java .litematic. This module reads a litematic (via the existing hardened
 // reader) and assembles an equivalent .mcstructure NBT.
 //
-// Block translation is BEST-EFFORT, as agreed in the plan: Bedrock 1.21
-// flattened most block ids to match Java, so plain blocks convert exactly.
-// For the families whose Bedrock state schema is stable and well known
-// (logs/pillars, stairs, slabs) the orientation states are translated; every
-// other Java property is dropped so the block falls back to its Bedrock
-// default. Dropping a state is a safe miss — emitting an unknown state can make
-// Bedrock reject the block outright. Final correctness is verified in-game.
+// Block translation prefers GeyserMC's authoritative Java->Bedrock mapping
+// (see javaToBedrock.js). When that data is unavailable it falls back to the
+// small built-in translation below — names plus axis/stairs/slabs only — so
+// the bridge still works, just less faithfully. Block entities (sign text,
+// chest contents, ...) are not carried over either way.
 
 const nbt = require('prismarine-nbt');
 const { readLitematic } = require('../lib/litematicRender/litematicReader');
+const javaToBedrock = require('./javaToBedrock');
 
 // Bedrock stamps every palette block with a state-schema version. It encodes
 // the game version as (major<<24)|(minor<<16)|(patch<<8)|revision; 1.21.0 is
@@ -60,7 +59,8 @@ const STATE_TYPE = {
   'minecraft:vertical_half': 'string',
 };
 
-// Java (name, properties) -> Bedrock { name, states }.
+// Built-in fallback translation, used only when Geyser's mapping is
+// unavailable. Java (name, properties) -> Bedrock { name, states }.
 function translate(javaName, props = {}) {
   let name = NAME_MAP[javaName] || javaName;
   const states = {};
@@ -98,6 +98,16 @@ function encodeStates(states) {
   return out;
 }
 
+// Java (name, properties) -> Bedrock { name, states } with NBT-typed states.
+// Prefers Geyser's authoritative mapping; falls back to the built-in
+// translation when the Geyser data is unavailable or a block is unmapped.
+function convertBlock(javaName, props) {
+  const mapped = javaToBedrock.resolve(javaName, props);
+  if (mapped) return mapped;
+  const f = translate(javaName, props || {});
+  return { name: f.name, states: encodeStates(f.states) };
+}
+
 // Assembles the .mcstructure NBT Buffer from re-based blocks (origin 0,0,0).
 // blocks: [{ x, y, z, name, properties }]; size: { x, y, z }.
 function buildMcstructure(blocks, size) {
@@ -133,19 +143,25 @@ function buildMcstructure(blocks, size) {
     return idx;
   }
 
-  // Layer 0 holds the blocks; layer 1 is Bedrock's waterlogging layer, left
-  // empty. -1 marks a cell with no block. mcstructure order is x-major,
-  // then y, then z.
+  // Layer 0 holds the blocks; layer 1 is Bedrock's waterlogging layer. -1
+  // marks an empty cell. mcstructure order is x-major, then y, then z.
   const layer0 = new Array(volume).fill(-1);
-  for (const b of blocks) {
-    const { name, states } = translate(b.name, b.properties);
-    layer0[(b.x * sy + b.y) * sz + b.z] = indexOf(name, states);
-  }
   const layer1 = new Array(volume).fill(-1);
+  let waterIndex = -1;
+  for (const b of blocks) {
+    const { name, states } = convertBlock(b.name, b.properties);
+    const idx = (b.x * sy + b.y) * sz + b.z;
+    layer0[idx] = indexOf(name, states);
+    // A waterlogged Java block carries its water in Bedrock's second layer.
+    if (b.properties && b.properties.waterlogged === 'true') {
+      if (waterIndex < 0) waterIndex = indexOf('minecraft:water', {});
+      layer1[idx] = waterIndex;
+    }
+  }
 
   const blockPalette = paletteEntries.map((e) => ({
     name: nbtString(e.name),
-    states: { type: 'compound', value: encodeStates(e.states) },
+    states: { type: 'compound', value: e.states },
     version: nbtInt(BLOCK_VERSION),
   }));
 
@@ -216,6 +232,7 @@ function conversionWarnings(lite) {
 // { mcstructure, name, size, blockCount, warnings }.
 async function litematicToMcstructure(buffer) {
   const lite = await readLitematic(buffer);
+  await javaToBedrock.init(); // load Geyser's mapping once; no-ops if absent
   return {
     mcstructure: buildMcstructure(lite.blocks, lite.size),
     name: lite.name,
