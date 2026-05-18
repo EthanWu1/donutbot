@@ -3,7 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const nbt = require('prismarine-nbt');
-const { buildMcstructure, translate } = require('../render-service/litematicToMcstructure');
+const {
+  buildMcstructure, translate, conversionWarnings,
+} = require('../render-service/litematicToMcstructure');
 
 test('translate: a plain block keeps its name and emits no states', () => {
   const r = translate('minecraft:stone', {});
@@ -72,4 +74,22 @@ test('buildMcstructure: identical blocks share one palette entry', async () => {
   const parsed = nbt.simplify((await nbt.parse(buildMcstructure(blocks, size), 'little')).parsed);
   assert.strictEqual(parsed.structure.palette.default.block_palette.length, 1);
   assert.deepStrictEqual(parsed.structure.block_indices[0], [0, 0]);
+});
+
+test('buildMcstructure: rejects an over-large axis before allocating', () => {
+  assert.throws(() => buildMcstructure([], { x: 5000, y: 1, z: 1 }), /axis limit/);
+});
+
+test('buildMcstructure: rejects an over-large bounding-box volume', () => {
+  // Each axis is under the per-axis cap; the product blows the volume cap.
+  // This is the far-apart-regions OOM case — rejected before allocation.
+  assert.throws(() => buildMcstructure([], { x: 4000, y: 4000, z: 4000 }), /cell limit/);
+});
+
+test('conversionWarnings: flags dropped entities and block entities', () => {
+  assert.deepStrictEqual(conversionWarnings({ entityCount: 0, tileEntityCount: 0 }), []);
+  const w = conversionWarnings({ entityCount: 2, tileEntityCount: 1 });
+  assert.strictEqual(w.length, 2);
+  assert.match(w[0], /2 entities/);
+  assert.match(w[1], /1 block entity/);
 });

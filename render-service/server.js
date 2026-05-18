@@ -20,6 +20,11 @@ const PORT = Number(process.env.RENDER_SERVICE_PORT) || 4123;
 const HOST = '127.0.0.1';
 const MAX_BODY_BYTES = 8 * 1024 * 1024; // litematic upload ceiling
 
+// Each .litematic -> .mcstructure conversion allocates dense per-cell arrays;
+// cap how many run concurrently so stacked requests can't exhaust memory.
+const MAX_CONVERSIONS_IN_FLIGHT = 3;
+let conversionsInFlight = 0;
+
 function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -68,17 +73,28 @@ async function handleRender(req, res) {
 
 // POST /mcstructure — body: raw .litematic bytes. Converts to a Bedrock
 // .mcstructure (for HoloPrint). Pure NBT work, no browser involved.
-// Returns { ok, mcstructure:<base64>, name, size, blockCount }.
+// Returns { ok, mcstructure:<base64>, name, size, blockCount, warnings }.
 async function handleMcstructure(req, res) {
   const buf = await readBody(req, MAX_BODY_BYTES);
   if (!buf.length) {
     sendJson(res, 400, { ok: false, error: 'empty body' });
     return;
   }
-  const { mcstructure, name, size, blockCount } = await litematicToMcstructure(buf);
-  sendJson(res, 200, {
-    ok: true, mcstructure: mcstructure.toString('base64'), name, size, blockCount,
-  });
+  if (conversionsInFlight >= MAX_CONVERSIONS_IN_FLIGHT) {
+    sendJson(res, 503, { ok: false, error: 'render service is busy — try again shortly' });
+    return;
+  }
+  conversionsInFlight += 1;
+  try {
+    const {
+      mcstructure, name, size, blockCount, warnings,
+    } = await litematicToMcstructure(buf);
+    sendJson(res, 200, {
+      ok: true, mcstructure: mcstructure.toString('base64'), name, size, blockCount, warnings,
+    });
+  } finally {
+    conversionsInFlight -= 1;
+  }
 }
 
 // POST /holoprint — body: raw .litematic bytes. Converts to a .mcstructure,
@@ -86,18 +102,34 @@ async function handleMcstructure(req, res) {
 // If the headless pack step fails, falls back to returning the .mcstructure so
 // the caller still has something usable.
 // Returns { ok, kind:'pack'|'mcstructure', pack|mcstructure:<base64>, name,
-// size, blockCount, packError? }.
+// size, blockCount, warnings, packError? }.
 async function handleHoloprint(req, res) {
   const buf = await readBody(req, MAX_BODY_BYTES);
   if (!buf.length) {
     sendJson(res, 400, { ok: false, error: 'empty body' });
     return;
   }
-  const { mcstructure, name, size, blockCount } = await litematicToMcstructure(buf);
+  if (conversionsInFlight >= MAX_CONVERSIONS_IN_FLIGHT) {
+    sendJson(res, 503, { ok: false, error: 'render service is busy — try again shortly' });
+    return;
+  }
+  let mcstructure;
+  let name;
+  let size;
+  let blockCount;
+  let warnings;
+  conversionsInFlight += 1;
+  try {
+    ({
+      mcstructure, name, size, blockCount, warnings,
+    } = await litematicToMcstructure(buf));
+  } finally {
+    conversionsInFlight -= 1;
+  }
   try {
     const { pack, packName } = await holoprint.makeHoloprintPack(mcstructure, name);
     sendJson(res, 200, {
-      ok: true, kind: 'pack', pack: pack.toString('base64'), name: packName, size, blockCount,
+      ok: true, kind: 'pack', pack: pack.toString('base64'), name: packName, size, blockCount, warnings,
     });
   } catch (err) {
     console.error('[render-service] holoprint pack failed:', err.message);
@@ -108,6 +140,7 @@ async function handleHoloprint(req, res) {
       name,
       size,
       blockCount,
+      warnings,
       packError: String(err.message || err).slice(0, 300),
     });
   }
