@@ -13,6 +13,8 @@
 
 const http = require('http');
 const renderer = require('../lib/litematicRender/renderer');
+const { litematicToMcstructure } = require('./litematicToMcstructure');
+const holoprint = require('./holoprintRenderer');
 
 const PORT = Number(process.env.RENDER_SERVICE_PORT) || 4123;
 const HOST = '127.0.0.1';
@@ -64,6 +66,53 @@ async function handleRender(req, res) {
   sendJson(res, 200, { ok: true, png: png.toString('base64'), meta });
 }
 
+// POST /mcstructure — body: raw .litematic bytes. Converts to a Bedrock
+// .mcstructure (for HoloPrint). Pure NBT work, no browser involved.
+// Returns { ok, mcstructure:<base64>, name, size, blockCount }.
+async function handleMcstructure(req, res) {
+  const buf = await readBody(req, MAX_BODY_BYTES);
+  if (!buf.length) {
+    sendJson(res, 400, { ok: false, error: 'empty body' });
+    return;
+  }
+  const { mcstructure, name, size, blockCount } = await litematicToMcstructure(buf);
+  sendJson(res, 200, {
+    ok: true, mcstructure: mcstructure.toString('base64'), name, size, blockCount,
+  });
+}
+
+// POST /holoprint — body: raw .litematic bytes. Converts to a .mcstructure,
+// then runs the vendored HoloPrint app headless to build a .holoprint.mcpack.
+// If the headless pack step fails, falls back to returning the .mcstructure so
+// the caller still has something usable.
+// Returns { ok, kind:'pack'|'mcstructure', pack|mcstructure:<base64>, name,
+// size, blockCount, packError? }.
+async function handleHoloprint(req, res) {
+  const buf = await readBody(req, MAX_BODY_BYTES);
+  if (!buf.length) {
+    sendJson(res, 400, { ok: false, error: 'empty body' });
+    return;
+  }
+  const { mcstructure, name, size, blockCount } = await litematicToMcstructure(buf);
+  try {
+    const { pack, packName } = await holoprint.makeHoloprintPack(mcstructure, name);
+    sendJson(res, 200, {
+      ok: true, kind: 'pack', pack: pack.toString('base64'), name: packName, size, blockCount,
+    });
+  } catch (err) {
+    console.error('[render-service] holoprint pack failed:', err.message);
+    sendJson(res, 200, {
+      ok: true,
+      kind: 'mcstructure',
+      mcstructure: mcstructure.toString('base64'),
+      name,
+      size,
+      blockCount,
+      packError: String(err.message || err).slice(0, 300),
+    });
+  }
+}
+
 const server = http.createServer((req, res) => {
   const path = (req.url || '/').split('?')[0];
 
@@ -74,6 +123,20 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && path === '/render') {
     handleRender(req, res).catch((err) => {
       console.error('[render-service] render failed:', err.message);
+      sendJson(res, 500, { ok: false, error: String(err.message || err).slice(0, 300) });
+    });
+    return;
+  }
+  if (req.method === 'POST' && path === '/mcstructure') {
+    handleMcstructure(req, res).catch((err) => {
+      console.error('[render-service] mcstructure failed:', err.message);
+      sendJson(res, 500, { ok: false, error: String(err.message || err).slice(0, 300) });
+    });
+    return;
+  }
+  if (req.method === 'POST' && path === '/holoprint') {
+    handleHoloprint(req, res).catch((err) => {
+      console.error('[render-service] holoprint failed:', err.message);
       sendJson(res, 500, { ok: false, error: String(err.message || err).slice(0, 300) });
     });
     return;
@@ -94,7 +157,8 @@ server.listen(PORT, HOST, () => {
 function shutdown() {
   console.log('[render-service] shutting down');
   server.close();
-  renderer.shutdown().finally(() => process.exit(0));
+  Promise.allSettled([renderer.shutdown(), holoprint.shutdown()])
+    .finally(() => process.exit(0));
 }
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>holoprint-headless</title>
+  <!--
+    Headless entry point for the vendored HoloPrint app. The render service
+    loads this page in Chromium and calls window.__makeHoloPrint().
+
+    The import map is copied verbatim from HoloPrint's own src/index.html
+    (commit 699514320f65cfbb1fcc8d5b3ad8c71d91f3c49b). If you re-vendor a newer
+    HoloPrint, refresh this map to match its index.html.
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "nbtify-readonly-typeless": "https://esm.sh/nbtify-readonly-typeless@1.1.2?keep-names",
+        "mcbe-leveldb-reader": "https://esm.sh/mcbe-leveldb-reader@2.0.1?exports=extractStructureFilesFromMcworld",
+        "tga-js": "https://esm.sh/tga-js@1.1.1",
+        "potpack": "https://esm.sh/potpack@2.1.0",
+        "deepmerge": "https://esm.sh/deepmerge@4.3.1",
+        "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2?exports=createClient",
+        "three": "https://esm.sh/three@0.177.0",
+        "three/examples/jsm/": "https://esm.sh/three@0.177.0/examples/jsm/",
+        "stats.js": "https://esm.sh/stats.js@0.17.0",
+        "lil-gui": "https://esm.sh/lil-gui@0.20",
+        "@zip.js/zip.js": "https://esm.sh/@zip.js/zip.js@^2.7.57?exports=ZipWriter,TextReader,BlobWriter,BlobReader,ZipReader",
+        "strip-json-comments": "https://esm.sh/strip-json-comments@5.0.1"
+      }
+    }
+  </script>
+  <script type="module">
+    import { makePack } from "./src/HoloPrint.js";
+
+    // Generates a .holoprint.mcpack from a base64 .mcstructure. No previewCont
+    // is passed, so HoloPrint skips its 3D preview (no DOM needed). Returns
+    // the pack name and the pack bytes as base64.
+    window.__makeHoloPrint = async (structureBase64, fileName, config) => {
+      const bin = atob(structureBase64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const file = new File([bytes], fileName, { type: "application/octet-stream" });
+
+      const pack = await makePack([file], config || {});
+      const buf = new Uint8Array(await pack.arrayBuffer());
+
+      // Chunked base64 — String.fromCharCode on a multi-MB array overflows.
+      let out = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < buf.length; i += CHUNK) {
+        out += String.fromCharCode.apply(null, buf.subarray(i, i + CHUNK));
+      }
+      return { name: pack.name, packBase64: btoa(out) };
+    };
+
+    window.__ready = true;
+  </script>
+</head>
+<body></body>
+</html>
