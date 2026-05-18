@@ -1165,15 +1165,15 @@ function buildSchematicModal(sub) {
 function buildSchematicDetailsModal(sub) {
   return buildModalFromFields(`publish_modal_details:${sub.id}`, 'Edit Schematic Details', [
     { id: 'designers', label: 'Designers (one per line)', style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.designers,
-      placeholder: '<@691315771015561257>\nPlayerIGN — for designers not in the server' },
+      placeholder: '<@EtZ>' },
     { id: 'credits',   label: 'Credits',    style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.credits,
-      placeholder: '<@iEtZ>: helped wire the on/off switch' },
+      placeholder: '<@EtZ>: helped wire the on/off switch' },
     { id: 'consumes',  label: 'Consumes',   style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.consumes,
       placeholder: 'Bone Blocks: 280k/h\nBlaze Rods: 220k/h' },
     { id: 'positives', label: 'Positives',  style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.positives,
-      placeholder: 'Compact (8x19x8)' },
+      placeholder: 'Compact design\nNo input needed' },
     { id: 'negatives', label: 'Negatives',  style: TextInputStyle.Paragraph, required: false, max: 800, value: sub.negatives,
-      placeholder: '0.14% item loss' },
+      placeholder: '0.14% item loss\nRequires maintenance' },
   ]);
 }
 
