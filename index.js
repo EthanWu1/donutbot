@@ -884,12 +884,11 @@ function helpVisibleCategories(tier) {
 
 function buildHelpOverviewEmbed(tier) {
   const cats = helpVisibleCategories(tier);
-  const lines = cats.map(c => `**${c.label}** — ${c.blurb}`);
   const tierLabel = tier === 'admin' ? 'Admin' : tier === 'staff' ? 'Staff' : 'Member';
   return new EmbedBuilder()
     .setColor(0x08a4a7)
     .setTitle('Command Help')
-    .setDescription(['Pick a category from the menu below to see its commands.', '', ...lines].join('\n'))
+    .setDescription('Pick a category from the menu below to see its commands.')
     .setFooter({ text: `${tierLabel} view · ${cats.length} categories` });
 }
 
