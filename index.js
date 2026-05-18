@@ -750,7 +750,7 @@ async function ensureServerStatChannels(guild) {
 // command rows are [signature, one-line description].
 const HELP_CATALOG = [
   {
-    id: 'general', label: 'General', emoji: '🍩', tier: 'member',
+    id: 'general', label: 'General', tier: 'member',
     blurb: 'Everyday commands for all members.',
     commands: [
       ['/help', 'Open this command menu.'],
@@ -761,7 +761,7 @@ const HELP_CATALOG = [
     ],
   },
   {
-    id: 'tickets', label: 'Tickets', emoji: '🎟️', tier: 'staff',
+    id: 'tickets', label: 'Tickets', tier: 'staff',
     blurb: 'Manage support tickets.',
     commands: [
       ['/ticket add <user>', 'Add a user to this ticket.'],
@@ -773,7 +773,7 @@ const HELP_CATALOG = [
     ],
   },
   {
-    id: 'giveaways', label: 'Giveaways', emoji: '🎉', tier: 'staff',
+    id: 'giveaways', label: 'Giveaways', tier: 'staff',
     blurb: 'Run and manage giveaways.',
     commands: [
       ['/giveaway create', 'Start a giveaway (duration or goals).'],
@@ -783,7 +783,7 @@ const HELP_CATALOG = [
     ],
   },
   {
-    id: 'builds', label: 'Builds & Payments', emoji: '🏗️', tier: 'staff',
+    id: 'builds', label: 'Builds & Payments', tier: 'staff',
     blurb: 'Build tracking and payment watching.',
     commands: [
       ['/build start', 'Start tracking a new build.'],
@@ -796,7 +796,7 @@ const HELP_CATALOG = [
     ],
   },
   {
-    id: 'schematics', label: 'Schematics & Farms', emoji: '📦', tier: 'staff',
+    id: 'schematics', label: 'Schematics & Farms', tier: 'staff',
     blurb: 'Renders, schematic submissions, kelp catalog.',
     commands: [
       ['/render <litematic>', 'Render a litematic file.'],
@@ -809,7 +809,7 @@ const HELP_CATALOG = [
     ],
   },
   {
-    id: 'stats', label: 'Stats', emoji: '📊', tier: 'staff',
+    id: 'stats', label: 'Stats', tier: 'staff',
     blurb: 'Staff and builder performance.',
     commands: [
       ['/leaderboard <type>', 'Staff or builder leaderboard.'],
@@ -817,7 +817,7 @@ const HELP_CATALOG = [
     ],
   },
   {
-    id: 'moderation', label: 'Moderation', emoji: '🛠️', tier: 'staff',
+    id: 'moderation', label: 'Moderation', tier: 'staff',
     blurb: 'Channel and member moderation.',
     commands: [
       ['/purge <amount>', 'Bulk-delete messages (1-100).'],
@@ -829,7 +829,7 @@ const HELP_CATALOG = [
     ],
   },
   {
-    id: 'content', label: 'Content', emoji: '✍️', tier: 'staff',
+    id: 'content', label: 'Content', tier: 'staff',
     blurb: 'Messages, embeds, sticky notes, search.',
     commands: [
       ['/say <message>', 'Send a message as the bot.'],
@@ -839,7 +839,7 @@ const HELP_CATALOG = [
     ],
   },
   {
-    id: 'admin', label: 'Admin', emoji: '⚙️', tier: 'admin',
+    id: 'admin', label: 'Admin', tier: 'admin',
     blurb: 'Server configuration and management.',
     commands: [
       ['/level add | set | multiplier', 'Adjust levels and XP rate.'],
@@ -884,7 +884,7 @@ function helpVisibleCategories(tier) {
 
 function buildHelpOverviewEmbed(tier) {
   const cats = helpVisibleCategories(tier);
-  const lines = cats.map(c => `${c.emoji}  **${c.label}** — ${c.blurb}`);
+  const lines = cats.map(c => `**${c.label}** — ${c.blurb}`);
   const tierLabel = tier === 'admin' ? 'Admin' : tier === 'staff' ? 'Staff' : 'Member';
   return new EmbedBuilder()
     .setColor(0x08a4a7)
@@ -897,7 +897,7 @@ function buildHelpCategoryEmbed(cat) {
   const lines = cat.commands.map(([sig, desc]) => `**${sig}**\n${desc}`);
   return new EmbedBuilder()
     .setColor(0x08a4a7)
-    .setTitle(`${cat.emoji}  ${cat.label}`)
+    .setTitle(cat.label)
     .setDescription([cat.blurb, '', lines.join('\n\n')].join('\n'))
     .setFooter({ text: 'Use the menu to switch categories.' });
 }
@@ -909,11 +909,10 @@ function buildHelpComponents(tier, selectedId) {
     .setCustomId('help_cat')
     .setPlaceholder('Select a category')
     .addOptions(
-      { label: 'Overview', value: 'overview', emoji: '📖', default: sel === 'overview' },
+      { label: 'Overview', value: 'overview', default: sel === 'overview' },
       ...cats.map(c => ({
         label: c.label,
         value: c.id,
-        emoji: c.emoji,
         description: c.blurb.slice(0, 90),
         default: sel === c.id,
       })),
