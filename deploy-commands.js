@@ -11,6 +11,11 @@ if (!APP_TOKEN || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
 }
 
 const commands = [
+  // --- HELP ---
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Browse the bot’s commands by category'),
+
   // --- LEVELING ---
   new SlashCommandBuilder()
     .setName('level')

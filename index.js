@@ -743,6 +743,185 @@ async function ensureServerStatChannels(guild) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// FEATURE BLOCK: /help — categorized, permission-aware command browser
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Command catalog. `tier` is the minimum viewer tier that sees the category;
+// command rows are [signature, one-line description].
+const HELP_CATALOG = [
+  {
+    id: 'general', label: 'General', emoji: '🍩', tier: 'member',
+    blurb: 'Everyday commands for all members.',
+    commands: [
+      ['/help', 'Open this command menu.'],
+      ['/serverinfo', 'Show server information.'],
+      ['/afk [reason]', 'Mark yourself as AFK.'],
+      ['/suggestion <text>', 'Submit a suggestion to staff.'],
+      ['/level check [user]', 'Check a level and XP progress.'],
+    ],
+  },
+  {
+    id: 'tickets', label: 'Tickets', emoji: '🎟️', tier: 'staff',
+    blurb: 'Manage support tickets.',
+    commands: [
+      ['/ticket add <user>', 'Add a user to this ticket.'],
+      ['/ticket rename <name>', 'Rename this ticket channel.'],
+      ['/ticket claim', 'Claim this ticket.'],
+      ['/ticket unclaim', 'Release your claim.'],
+      ['/ticket requestclose [reason]', 'Ask the creator to confirm close.'],
+      ['/ticket close [reason]', 'Close this ticket now.'],
+    ],
+  },
+  {
+    id: 'giveaways', label: 'Giveaways', emoji: '🎉', tier: 'staff',
+    blurb: 'Run and manage giveaways.',
+    commands: [
+      ['/giveaway create', 'Start a giveaway (duration or goals).'],
+      ['/giveaway end <message_id>', 'End a giveaway early.'],
+      ['/giveaway reroll [message_id]', 'Reroll a winner.'],
+      ['/giveaway delete <message_id>', 'Delete a giveaway.'],
+    ],
+  },
+  {
+    id: 'builds', label: 'Builds & Payments', emoji: '🏗️', tier: 'staff',
+    blurb: 'Build tracking and payment watching.',
+    commands: [
+      ['/build start', 'Start tracking a new build.'],
+      ['/build edit <build_id>', 'Edit an active build job.'],
+      ['/build remove', 'Remove an open build.'],
+      ['/build history <person>', 'Show a builder’s completed builds.'],
+      ['/pay start', 'Watch a DonutSMP payment.'],
+      ['/pay history [limit]', 'Show payment history.'],
+      ['/pay complete <watch_id>', 'Force-complete a paywatch (admin).'],
+    ],
+  },
+  {
+    id: 'schematics', label: 'Schematics & Farms', emoji: '📦', tier: 'staff',
+    blurb: 'Renders, schematic submissions, kelp catalog.',
+    commands: [
+      ['/render <litematic>', 'Render a litematic file.'],
+      ['/publish post', 'Publish/update a submission to the forum.'],
+      ['/publish render', 'Re-render from the latest .litematic.'],
+      ['/publish reject <reason>', 'Reject a submission.'],
+      ['/publish unpost', 'Delete the forum thread, back to DRAFT.'],
+      ['/kelp panel', 'Browse the kelp farm catalog.'],
+      ['/kelp add | edit | remove | setprice', 'Manage the kelp catalog.'],
+    ],
+  },
+  {
+    id: 'stats', label: 'Stats', emoji: '📊', tier: 'staff',
+    blurb: 'Staff and builder performance.',
+    commands: [
+      ['/leaderboard <type>', 'Staff or builder leaderboard.'],
+      ['/stats [member]', 'Staff and builder stats for a member.'],
+    ],
+  },
+  {
+    id: 'moderation', label: 'Moderation', emoji: '🛠️', tier: 'staff',
+    blurb: 'Channel and member moderation.',
+    commands: [
+      ['/purge <amount>', 'Bulk-delete messages (1-100).'],
+      ['/lock', 'Lock the current channel.'],
+      ['/unlock', 'Unlock the current channel.'],
+      ['/role grant <user> <role> [duration]', 'Grant a role.'],
+      ['/role remove <user> <role>', 'Remove a role.'],
+      ['/vouch add | remove | check', 'Manage member vouches.'],
+    ],
+  },
+  {
+    id: 'content', label: 'Content', emoji: '✍️', tier: 'staff',
+    blurb: 'Messages, embeds, sticky notes, search.',
+    commands: [
+      ['/say <message>', 'Send a message as the bot.'],
+      ['/embed create | edit', 'Build or edit an embed.'],
+      ['/sticky create | edit | delete', 'Manage sticky messages.'],
+      ['/search embeds <query>', 'Search embed text in a channel.'],
+    ],
+  },
+  {
+    id: 'admin', label: 'Admin', emoji: '⚙️', tier: 'admin',
+    blurb: 'Server configuration and management.',
+    commands: [
+      ['/level add | set | multiplier', 'Adjust levels and XP rate.'],
+      ['/panel list | send', 'Publish or list configurable panels.'],
+      ['/spawner buy | sell | remove', 'Manage spawner prices.'],
+      ['/application <type> <state>', 'Open or close applications.'],
+      ['/stafflist edit', 'Edit staff-list IGNs and alts.'],
+      ['/list <role>', 'List members with a role.'],
+    ],
+  },
+];
+
+const HELP_TIER_RANK = { member: 0, staff: 1, admin: 2 };
+
+function helpHasAnyRole(member, ids) {
+  const cache = member?.roles?.cache;
+  if (!cache) return false;
+  return ids.some(id => id && cache.has(id));
+}
+
+// Resolve the viewer's help tier from Discord permissions + configured roles.
+function getHelpTier(member) {
+  if (!member) return 'member';
+  const perms = member.permissions;
+  const isAdmin = !!(
+    perms?.has?.(PermissionsBitField.Flags.Administrator) ||
+    perms?.has?.(PermissionsBitField.Flags.ManageGuild) ||
+    helpHasAnyRole(member, [C.ROLE_OWNER, C.ROLE_CO_OWNER, C.ROLE_ADMIN, C.ROLE_MANAGER])
+  );
+  if (isAdmin) return 'admin';
+  const isStaff = helpHasAnyRole(member, [
+    C.ROLE_STAFF, C.ROLE_CHIEF_MOD, C.ROLE_MOD, C.ROLE_TRIAL_MOD, C.ROLE_SUPPORT,
+    C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3,
+  ]);
+  return isStaff ? 'staff' : 'member';
+}
+
+function helpVisibleCategories(tier) {
+  const rank = HELP_TIER_RANK[tier] ?? 0;
+  return HELP_CATALOG.filter(c => rank >= (HELP_TIER_RANK[c.tier] ?? 0));
+}
+
+function buildHelpOverviewEmbed(tier) {
+  const cats = helpVisibleCategories(tier);
+  const lines = cats.map(c => `${c.emoji}  **${c.label}** — ${c.blurb}`);
+  const tierLabel = tier === 'admin' ? 'Admin' : tier === 'staff' ? 'Staff' : 'Member';
+  return new EmbedBuilder()
+    .setColor(0x08a4a7)
+    .setTitle('Command Help')
+    .setDescription(['Pick a category from the menu below to see its commands.', '', ...lines].join('\n'))
+    .setFooter({ text: `${tierLabel} view · ${cats.length} categories` });
+}
+
+function buildHelpCategoryEmbed(cat) {
+  const lines = cat.commands.map(([sig, desc]) => `**${sig}**\n${desc}`);
+  return new EmbedBuilder()
+    .setColor(0x08a4a7)
+    .setTitle(`${cat.emoji}  ${cat.label}`)
+    .setDescription([cat.blurb, '', lines.join('\n\n')].join('\n'))
+    .setFooter({ text: 'Use the menu to switch categories.' });
+}
+
+function buildHelpComponents(tier, selectedId) {
+  const cats = helpVisibleCategories(tier);
+  const sel = selectedId || 'overview';
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('help_cat')
+    .setPlaceholder('Select a category')
+    .addOptions(
+      { label: 'Overview', value: 'overview', emoji: '📖', default: sel === 'overview' },
+      ...cats.map(c => ({
+        label: c.label,
+        value: c.id,
+        emoji: c.emoji,
+        description: c.blurb.slice(0, 90),
+        default: sel === c.id,
+      })),
+    );
+  return [new ActionRowBuilder().addComponents(menu)];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // FEATURE BLOCK: SCHEMATIC SUBMISSIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -6937,6 +7116,22 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
   }
   // ─── END CATALOG INTERACTIONS ─────────────────────────────────────────────
 
+  // --- /help category dropdown ---
+  if (interaction.isStringSelectMenu() && interaction.customId === 'help_cat') {
+    const tier = getHelpTier(interaction.member);
+    const val = interaction.values?.[0] || 'overview';
+    const cat = HELP_CATALOG.find(c => c.id === val);
+    const visible = cat && (HELP_TIER_RANK[tier] ?? 0) >= (HELP_TIER_RANK[cat.tier] ?? 0);
+    const embed = (val === 'overview' || !visible)
+      ? buildHelpOverviewEmbed(tier)
+      : buildHelpCategoryEmbed(cat);
+    await interaction.update({
+      embeds: [embed],
+      components: buildHelpComponents(tier, visible ? val : 'overview'),
+    }).catch(() => {});
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
   const { commandName, options } = interaction;
 
@@ -6950,6 +7145,16 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
     }
   }
   try {
+
+    // --- HELP ---
+    if (commandName === 'help') {
+      const tier = getHelpTier(interaction.member);
+      return interaction.reply({
+        embeds: [buildHelpOverviewEmbed(tier)],
+        components: buildHelpComponents(tier, 'overview'),
+        flags: 64,
+      });
+    }
 
     // --- LEVELING ---
     if (commandName === 'level') {
