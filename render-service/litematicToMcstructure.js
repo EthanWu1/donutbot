@@ -24,6 +24,14 @@ const { readLitematic } = require('../lib/litematicRender/litematicReader');
 // only if states stop translating cleanly.
 const BLOCK_VERSION = 18153472;
 
+// The output is two dense arrays of sx*sy*sz cells. readLitematic caps the
+// summed *region* volume, but its reported size is the bounding box across
+// non-air blocks — two tiny regions placed far apart stay under the region cap
+// yet blow the bounding box up. These caps reject that before any allocation,
+// so a crafted litematic cannot OOM the shared render service.
+const MAX_OUTPUT_DIM = 4096;
+const MAX_OUTPUT_VOLUME = 8_000_000;
+
 // Java block id -> Bedrock block id, only where they still differ. Bedrock 1.21
 // flattened most ids to match Java, so this list is deliberately short.
 const NAME_MAP = {
@@ -96,7 +104,20 @@ function buildMcstructure(blocks, size) {
   const sx = size.x;
   const sy = size.y;
   const sz = size.z;
+  if (!(sx >= 1) || !(sy >= 1) || !(sz >= 1)) {
+    throw new Error(`invalid structure size ${sx}x${sy}x${sz}`);
+  }
+  if (sx > MAX_OUTPUT_DIM || sy > MAX_OUTPUT_DIM || sz > MAX_OUTPUT_DIM) {
+    throw new Error(`structure ${sx}x${sy}x${sz} exceeds the ${MAX_OUTPUT_DIM}-block axis limit`);
+  }
   const volume = sx * sy * sz;
+  if (volume > MAX_OUTPUT_VOLUME) {
+    throw new Error(
+      `structure bounding box (${volume.toLocaleString('en-US')} cells) exceeds the `
+      + `${MAX_OUTPUT_VOLUME.toLocaleString('en-US')}-cell limit — litematics whose blocks `
+      + 'span a huge volume (e.g. far-apart regions) are rejected',
+    );
+  }
 
   // Palette deduped by name + states.
   const paletteIndex = new Map();
@@ -174,7 +195,25 @@ function buildMcstructure(blocks, size) {
   return nbt.writeUncompressed(root, 'little');
 }
 
-// Full pipeline: raw .litematic bytes -> { mcstructure, name, size, blockCount }.
+// Notes about source content the .mcstructure conversion cannot carry over,
+// so callers surface it instead of returning a silently incomplete structure.
+function conversionWarnings(lite) {
+  const warnings = [];
+  const ents = lite.entityCount || 0;
+  const tiles = lite.tileEntityCount || 0;
+  if (ents > 0) {
+    warnings.push(`${ents} entit${ents === 1 ? 'y' : 'ies'} `
+      + '(mobs, item frames, paintings, armor stands) were not converted.');
+  }
+  if (tiles > 0) {
+    warnings.push(`${tiles} block entit${tiles === 1 ? 'y' : 'ies'} `
+      + '(sign text, chest contents, banners) were not converted.');
+  }
+  return warnings;
+}
+
+// Full pipeline: raw .litematic bytes ->
+// { mcstructure, name, size, blockCount, warnings }.
 async function litematicToMcstructure(buffer) {
   const lite = await readLitematic(buffer);
   return {
@@ -182,7 +221,10 @@ async function litematicToMcstructure(buffer) {
     name: lite.name,
     size: lite.size,
     blockCount: lite.blockCount,
+    warnings: conversionWarnings(lite),
   };
 }
 
-module.exports = { litematicToMcstructure, buildMcstructure, translate };
+module.exports = {
+  litematicToMcstructure, buildMcstructure, translate, conversionWarnings,
+};
