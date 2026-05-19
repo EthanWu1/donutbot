@@ -102,6 +102,16 @@ function encodeStates(states) {
 // Prefers Geyser's authoritative mapping; falls back to the built-in
 // translation when the Geyser data is unavailable or a block is unmapped.
 function convertBlock(javaName, props) {
+  // A litematic captured while a piston was mid-cycle stores `moving_piston`
+  // technical blocks. Bedrock's equivalent (`moving_block`) is not buildable
+  // and HoloPrint draws it as an error cube — represent it as the piston at
+  // rest so the hologram shows a placeable block.
+  if (javaName === 'minecraft:moving_piston') {
+    const sticky = props && props.type === 'sticky';
+    javaName = sticky ? 'minecraft:sticky_piston' : 'minecraft:piston';
+    props = { facing: (props && props.facing) || 'up', extended: 'false' };
+  }
+
   const mapped = javaToBedrock.resolve(javaName, props);
   if (mapped) return mapped;
   const f = translate(javaName, props || {});
