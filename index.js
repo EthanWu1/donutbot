@@ -5497,6 +5497,11 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_post:')) 
   if (ch) {
     await ch.send({
       embeds: [new EmbedBuilder().setColor(0x08a4a7).setTitle(verb).setDescription(`This schematic has been ${verb.toLowerCase()} in <#${res.thread.id}>.`)],
+      // Once approved (fresh publish), let the submitter start another
+      // submission in this same ticket without opening a new one.
+      components: res.updated ? [] : [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`publish_new:${ch.id}`).setLabel('New Submission').setStyle(ButtonStyle.Secondary).setEmoji('📦'),
+      )],
     }).catch(() => {});
     // Refresh the pinned draft preview so its button label flips to "Update Forum Post".
     const fresh = await store.getSchematicSubmission(sub.id).catch(() => sub);
