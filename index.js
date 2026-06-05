@@ -69,6 +69,7 @@ const {
   getStaffIncentives,
   shouldAiRespond,
   resolveAiModel,
+  buildAiPersonalityPrompt,
 } = require('./botFeatures');
 
 // All litematic rendering now goes through the shared render service
@@ -4591,6 +4592,43 @@ async function maybeRespondWithAi(message) {
       .trim()
       .slice(0, 800);
     const prompt = clean || 'Say hi.';
+    const authorMember = message.member || (message.guild ? await message.guild.members.fetch(message.author.id).catch(() => null) : null);
+    const authorHasOwnerRole = Boolean(C.ROLE_OWNER && authorMember?.roles?.cache?.has?.(C.ROLE_OWNER));
+    const configuredOwnerId = String(
+      process.env.OWNER_USER_ID ||
+      process.env.BOT_OWNER_ID ||
+      process.env.DONUTBOT_OWNER_ID ||
+      ''
+    ).trim();
+    const ownerId = configuredOwnerId || (authorHasOwnerRole ? message.author.id : message.guild?.ownerId) || null;
+    const ownerMember = ownerId && message.guild
+      ? (message.guild.members.cache.get(ownerId) || await message.guild.members.fetch(ownerId).catch(() => null))
+      : null;
+    const isOwner = authorHasOwnerRole || (ownerId && String(message.author.id) === String(ownerId));
+    const ownerRole = C.ROLE_OWNER && message.guild ? message.guild.roles.cache.get(C.ROLE_OWNER) : null;
+    const ownerRoleMembers = ownerRole?.members
+      ? [...ownerRole.members.values()].map(member => ({
+        id: member.id,
+        name: member.displayName || member.user?.username || member.id
+      }))
+      : [];
+    if (authorHasOwnerRole && !ownerRoleMembers.some(member => String(member.id) === String(message.author.id))) {
+      ownerRoleMembers.unshift({
+        id: message.author.id,
+        name: authorMember?.displayName || message.author.username
+      });
+    }
+    const systemPrompt = buildAiPersonalityPrompt({
+      botName: client.user?.username || 'DonutBot',
+      serverName: message.guild?.name || 'this Discord server',
+      memberCount: message.guild?.memberCount,
+      ownerId,
+      ownerName: ownerMember?.displayName || ownerMember?.user?.username || (isOwner ? authorMember?.displayName || message.author.username : 'the owner'),
+      ownerRoleMembers,
+      currentUserName: authorMember?.displayName || message.author.username,
+      isOwner,
+      extraServerContext: process.env.AI_SERVER_CONTEXT || ''
+    });
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -4600,9 +4638,9 @@ async function maybeRespondWithAi(message) {
       },
       body: JSON.stringify({
         model: AI_MODEL,
-        max_tokens: 80,
+        max_tokens: 110,
         temperature: 0.8,
-        system: 'You are DonutBot: tiny, useful, lightly funny, and brief. Reply in one or two short sentences. No slurs, no drama, no pretending to moderate.',
+        system: systemPrompt,
         messages: [{ role: 'user', content: prompt }]
       })
     });

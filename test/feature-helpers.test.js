@@ -16,7 +16,8 @@ const {
   getStaffIncentives,
   shouldSyncTicketPermissions,
   shouldAiRespond,
-  resolveAiModel
+  resolveAiModel,
+  buildAiPersonalityPrompt
 } = require('../botFeatures');
 
 function memberWithRoles(roleIds = [], roleNames = []) {
@@ -194,4 +195,29 @@ test('ai model defaults to current cheapest Haiku when unset', () => {
   assert.equal(resolveAiModel({}), 'claude-haiku-4-5-20251001');
   assert.equal(resolveAiModel({ AI_MODEL: 'custom-model' }), 'custom-model');
   assert.equal(resolveAiModel({ CLAUDE_MODEL: 'claude-alt' }), 'claude-alt');
+});
+
+test('ai personality prompt is server-aware and owner-safe while allowing light roasts', () => {
+  const prompt = buildAiPersonalityPrompt({
+    serverName: 'EtZ Empire',
+    memberCount: 1234,
+    ownerId: '42',
+    ownerName: 'Ethan',
+    ownerRoleMembers: [{ id: '42', name: 'Ethan' }],
+    currentUserName: 'Some Builder',
+    isOwner: false
+  });
+
+  assert.match(prompt, /EtZ Empire/);
+  assert.match(prompt, /1,234 members/);
+  assert.match(prompt, /Ethan/);
+  assert.match(prompt, /42/);
+  assert.match(prompt, /Owner role holders: Ethan \(42\)/);
+  assert.match(prompt, /Never roast the owner/i);
+  assert.match(prompt, /build tickets/i);
+  assert.match(prompt, /giveaways/i);
+  assert.match(prompt, /applications/i);
+  assert.match(prompt, /light roasts/i);
+  assert.match(prompt, /Never use slurs/i);
+  assert.match(prompt, /embarrass/i);
 });

@@ -193,6 +193,54 @@ function resolveAiModel(env = process.env) {
   return configured || DEFAULT_AI_MODEL;
 }
 
+function buildAiPersonalityPrompt({
+  botName = 'DonutBot',
+  serverName = 'this Discord server',
+  memberCount,
+  ownerId,
+  ownerName = 'the owner',
+  ownerRoleMembers = [],
+  currentUserName = 'this user',
+  isOwner = false,
+  extraServerContext = ''
+} = {}) {
+  const cleanBotName = String(botName || 'DonutBot').trim() || 'DonutBot';
+  const cleanServerName = String(serverName || 'this Discord server').trim() || 'this Discord server';
+  const cleanOwnerName = String(ownerName || 'the owner').trim() || 'the owner';
+  const cleanCurrentUserName = String(currentUserName || 'this user').trim() || 'this user';
+  const ownerTag = ownerId ? `${cleanOwnerName} (${ownerId})` : cleanOwnerName;
+  const count = Number(memberCount);
+  const memberText = Number.isFinite(count) && count > 0
+    ? `${Math.trunc(count).toLocaleString('en-US')} members`
+    : 'an active community';
+  const extra = String(extraServerContext || '').trim();
+  const seenOwnerRoleMembers = new Set();
+  const ownerRoleText = (ownerRoleMembers || [])
+    .map(member => {
+      const id = String(member?.id || '').trim();
+      const name = String(member?.name || member?.displayName || member?.username || id || '').trim();
+      if (!name) return null;
+      const key = id || name.toLowerCase();
+      if (seenOwnerRoleMembers.has(key)) return null;
+      seenOwnerRoleMembers.add(key);
+      return id ? `${name} (${id})` : name;
+    })
+    .filter(Boolean)
+    .slice(0, 5)
+    .join(', ');
+
+  return [
+    `You are ${cleanBotName}, the tiny funny mascot for ${cleanServerName}.`,
+    `Server context: ${cleanServerName} has ${memberText}. It runs ranks/XP, builder and staff points, build tickets, giveaways, applications, refunds, sticky messages, vouches, automod, and anti-raid tools.${extra ? ` Extra context: ${extra}` : ''}`,
+    `Personality: quick, useful, chaotic-funny, and confident. You love light roasts, especially about build queue chaos, rank grinding, giveaway luck, and questionable Minecraft decisions.`,
+    `Reply to ${cleanCurrentUserName} in one or two short sentences. Use at most one emoji. Do not write long explanations unless asked.`,
+    `Owner rule: the owner is ${ownerTag}.${ownerRoleText ? ` Owner role holders: ${ownerRoleText}.` : ''} Never roast the owner or anyone with the Owner role. If the current user is the owner (${isOwner ? 'yes' : 'no'}), hype them up or roast the request instead.`,
+    'Safety: Never use slurs, hate, protected-class insults, sexual content, private info, body/appearance insults, family insults, trauma jokes, poverty jokes, or mental-health jokes.',
+    'Do not embarrass, humiliate, dogpile, or bring up old/user-specific history. Keep roasts harmless, obviously playful, and server/game related.',
+    'Do not pretend to take moderation actions, expose secrets, invent staff decisions, or claim you checked data you cannot see.'
+  ].join('\n');
+}
+
 function shouldSyncTicketPermissions({ parentId, buildCategoryIds = [], giveawayCategoryIds = [] } = {}) {
   const parent = String(parentId || '');
   if (buildCategoryIds.map(String).includes(parent)) return { shouldSync: true, type: 'build' };
@@ -218,5 +266,6 @@ module.exports = {
   getStaffIncentives,
   shouldAiRespond,
   resolveAiModel,
+  buildAiPersonalityPrompt,
   shouldSyncTicketPermissions
 };
