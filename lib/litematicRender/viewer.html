@@ -1072,6 +1072,11 @@
       const lvl = fluidLevelOf(b);
       return FLUID_LEVEL_HEIGHTS[lvl] ?? 16;
     }
+    function isFullHeightFluidAt(x, y, z) {
+      const b = atPos.get(`${x},${y},${z}`);
+      if (!b) return false;
+      return hasFluid(x, y + 1, z) || isFluidSourceBlock(b, isWater && b.__implicitWater);
+    }
     const cornerCache = new Map();
     function cornerHeight(gx, y, gz, fallback) {
       const key = `${gx},${y},${gz}`;
@@ -1101,6 +1106,20 @@
       let sum = 0, count = 0;
       const hasOrthoNeighbor = (h, hOrthoA, hOrthoB) =>
         h !== null && (hOrthoA !== null || hOrthoB !== null);
+      const s00 = isFullHeightFluidAt(gx,     y, gz);
+      const sW0 = isFullHeightFluidAt(gx - 1, y, gz);
+      const s0N = isFullHeightFluidAt(gx,     y, gz - 1);
+      const sWN = isFullHeightFluidAt(gx - 1, y, gz - 1);
+      // A flowing block next to a source must meet the source's top edge.
+      // Averaging source 16 with a low flowing level made the shared edge
+      // dip below the source top, leaving a visible seam/gap.
+      if ((s00 && hasOrthoNeighbor(h00, hW0, h0N))
+          || (sW0 && hasOrthoNeighbor(hW0, h00, hWN))
+          || (s0N && hasOrthoNeighbor(h0N, h00, hWN))
+          || (sWN && hasOrthoNeighbor(hWN, hW0, h0N))) {
+        cornerCache.set(key, 16);
+        return 16;
+      }
       if (hasOrthoNeighbor(h00, hW0, h0N)) { sum += h00; count++; }
       if (hasOrthoNeighbor(hW0, h00, hWN)) { sum += hW0; count++; }
       if (hasOrthoNeighbor(h0N, h00, hWN)) { sum += h0N; count++; }

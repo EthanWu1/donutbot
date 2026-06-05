@@ -235,6 +235,23 @@ test('keeps source water top corners flat even beside flowing water', async () =
   assert.deepEqual(sourceCorners, [16, 16, 16, 16]);
 });
 
+test('raises flowing water shared edge to meet adjacent source water without a visible gap', async () => {
+  const result = await renderPayload({
+    name: 'source water edge blended into flowing water',
+    author: 'test',
+    size: { x: 2, y: 1, z: 1 },
+    blockCount: 2,
+    blocks: [
+      { x: 0, y: 0, z: 0, name: 'minecraft:water', properties: { level: '0' } },
+      { x: 1, y: 0, z: 0, name: 'minecraft:water', properties: { level: '5' } },
+    ],
+  });
+
+  const flowingCorners = result.diag.fluidCorners.water['1,0,0'];
+  assert.equal(flowingCorners[0], 16);
+  assert.equal(flowingCorners[3], 16);
+});
+
 test('treats water without a level property as a flat source block', async () => {
   const result = await renderPayload({
     name: 'source water without level',
