@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const nbt = require('prismarine-nbt');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { ensureAssets } = require('../lib/litematicRender/setupAssets');
 const { getBrowserLaunchOptions } = require('../lib/litematicRender/renderer');
@@ -61,6 +62,66 @@ async function countPixels(dataUrl, predicate) {
     if (predicate(pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3])) count += 1;
   }
   return count;
+}
+
+function makeTinyLitematic() {
+  return nbt.writeUncompressed({
+    type: 'compound',
+    name: '',
+    value: {
+      Metadata: {
+        type: 'compound',
+        value: {
+          Name: { type: 'string', value: 'materials' },
+          Author: { type: 'string', value: 'test' },
+        },
+      },
+      Regions: {
+        type: 'compound',
+        value: {
+          region: {
+            type: 'compound',
+            value: {
+              Position: {
+                type: 'compound',
+                value: {
+                  x: { type: 'int', value: 0 },
+                  y: { type: 'int', value: 0 },
+                  z: { type: 'int', value: 0 },
+                },
+              },
+              Size: {
+                type: 'compound',
+                value: {
+                  x: { type: 'int', value: 3 },
+                  y: { type: 'int', value: 1 },
+                  z: { type: 'int', value: 1 },
+                },
+              },
+              BlockStatePalette: {
+                type: 'list',
+                value: {
+                  type: 'compound',
+                  value: [
+                    { Name: { type: 'string', value: 'minecraft:stone' } },
+                    { Name: { type: 'string', value: 'minecraft:oak_planks' } },
+                    {
+                      Name: { type: 'string', value: 'minecraft:water' },
+                      Properties: {
+                        type: 'compound',
+                        value: { level: { type: 'string', value: '0' } },
+                      },
+                    },
+                  ],
+                },
+              },
+              BlockStates: { type: 'longArray', value: [36n] },
+            },
+          },
+        },
+      },
+    },
+  });
 }
 
 test('culls the top face of ice when water sits directly on it', async () => {
@@ -156,6 +217,57 @@ test('merges sloped flowing water side runs into continuous faces', async () => 
   const waterStats = result.diag.fluidFaces.water.bySource.water;
   assert.equal(waterStats.verticalStill, 0);
   assert.equal(waterStats.verticalFlat, 4);
+});
+
+test('keeps source water top corners flat even beside flowing water', async () => {
+  const result = await renderPayload({
+    name: 'source water next to flowing water',
+    author: 'test',
+    size: { x: 2, y: 1, z: 1 },
+    blockCount: 2,
+    blocks: [
+      { x: 0, y: 0, z: 0, name: 'minecraft:water', properties: { level: '0' } },
+      { x: 1, y: 0, z: 0, name: 'minecraft:water', properties: { level: '5' } },
+    ],
+  });
+
+  const sourceCorners = result.diag.fluidCorners.water['0,0,0'];
+  assert.deepEqual(sourceCorners, [16, 16, 16, 16]);
+});
+
+test('treats water without a level property as a flat source block', async () => {
+  const result = await renderPayload({
+    name: 'source water without level',
+    author: 'test',
+    size: { x: 1, y: 1, z: 1 },
+    blockCount: 1,
+    blocks: [
+      { x: 0, y: 0, z: 0, name: 'minecraft:water', properties: {} },
+    ],
+  });
+
+  assert.deepEqual(result.diag.fluidCorners.water['0,0,0'], [16, 16, 16, 16]);
+});
+
+test('keeps flowing water top corners sloped', async () => {
+  const result = await renderPayload({
+    name: 'flowing water slope',
+    author: 'test',
+    size: { x: 2, y: 1, z: 1 },
+    blockCount: 2,
+    blocks: [
+      { x: 0, y: 0, z: 0, name: 'minecraft:water', properties: { level: '1' } },
+      { x: 1, y: 0, z: 0, name: 'minecraft:water', properties: { level: '7' } },
+    ],
+  });
+
+  const flowingCorners = result.diag.fluidCorners.water['0,0,0'];
+  assert.notDeepEqual(flowingCorners, [
+    flowingCorners[0],
+    flowingCorners[0],
+    flowingCorners[0],
+    flowingCorners[0],
+  ]);
 });
 
 test('does not cull side faces for water cells touching only by a vertical step edge', async () => {
@@ -392,6 +504,43 @@ test('renderer receives no entities for static renders', async () => {
   assert.equal(payload.entityCount, 0);
   assert.equal(payload.sourceEntityCount, 1);
   assert.deepEqual(payload.entities, []);
+});
+
+test('builds non-air material metadata from parsed blocks', () => {
+  const { buildRenderMetadata } = require('../lib/litematicRender/renderer');
+  const meta = buildRenderMetadata({
+    name: 'materials',
+    author: 'test',
+    size: { x: 3, y: 1, z: 1 },
+    blockCount: 132,
+    entityCount: 2,
+    blocks: [
+      ...Array.from({ length: 65 }, () => ({ name: 'minecraft:stone' })),
+      ...Array.from({ length: 65 }, () => ({ name: 'minecraft:oak_planks' })),
+      ...Array.from({ length: 2 }, () => ({ name: 'minecraft:water' })),
+    ],
+  });
+
+  assert.deepEqual(meta.materials, [
+    { key: 'minecraft:oak_planks', name: 'Oak Planks', count: 65, stacks: 2 },
+    { key: 'minecraft:stone', name: 'Stone', count: 65, stacks: 2 },
+    { key: 'minecraft:water', name: 'Water', count: 2, stacks: 1 },
+  ]);
+});
+
+test('renderLitematic returns material metadata from parsed litematic blocks', async () => {
+  const renderer = require('../lib/litematicRender/renderer');
+  try {
+    const result = await renderer.renderLitematic(makeTinyLitematic(), { width: 96, height: 96 });
+
+    assert.deepEqual(result.meta.materials, [
+      { key: 'minecraft:oak_planks', name: 'Oak Planks', count: 1, stacks: 1 },
+      { key: 'minecraft:stone', name: 'Stone', count: 1, stacks: 1 },
+      { key: 'minecraft:water', name: 'Water', count: 1, stacks: 1 },
+    ]);
+  } finally {
+    await renderer.shutdown();
+  }
 });
 
 test('disabled entity rendering does not expand render bounds', async () => {

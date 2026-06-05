@@ -993,6 +993,13 @@
   // Flowing levels 1..7 keep their vanilla descending heights so streams
   // still show slope.
   const FLUID_LEVEL_HEIGHTS = [16, 12.5, 10.5, 9, 7, 5.3, 3.7, 1.9, 16, 16, 16, 16, 16, 16, 16, 16];
+  function fluidLevelOf(b) {
+    const level = parseInt(b?.properties?.level ?? '0', 10);
+    return Number.isFinite(level) ? level : 0;
+  }
+  function isFluidSourceBlock(b, isImplicit) {
+    return !!isImplicit || fluidLevelOf(b) === 0;
+  }
   function preprocessFluid(blocks, fluidName, cornersKey) {
     const atPos = new Map();
     const isWater = fluidName === 'minecraft:water';
@@ -1062,7 +1069,7 @@
       if (hasFluid(x, y + 1, z)) return 16;
       // Implicit-water cells count as full source (level 0).
       if (b.__implicitWater) return 16;
-      const lvl = parseInt(b.properties?.level || '0', 10);
+      const lvl = fluidLevelOf(b);
       return FLUID_LEVEL_HEIGHTS[lvl] ?? 16;
     }
     const cornerCache = new Map();
@@ -1114,7 +1121,12 @@
         b.__fluidTopBuried = true;
         continue;
       }
-      const own = isImplicit ? 16 : (FLUID_LEVEL_HEIGHTS[parseInt(b.properties?.level || '0', 10)] ?? 16);
+      if (isFluidSourceBlock(b, isImplicit)) {
+        b[cornersKey] = [16, 16, 16, 16];
+        b.__fluidNeighbors = fluidNeighborsFor(b);
+        continue;
+      }
+      const own = FLUID_LEVEL_HEIGHTS[fluidLevelOf(b)] ?? 16;
       // cornerHeight returns null when the corner has no orthogonal-pair
       // connection — caller uses own height so a diagonal-only neighbor
       // does NOT pull the corner up across the empty intermediate cell.
@@ -1367,6 +1379,21 @@
       waterCoveredTopCullCount,
       waterCoveredTopCulledBlocks: [...waterCoveredTopCulledBlocks].sort(),
     };
+  }
+
+  function collectFluidCornerDiagnostics(blocks) {
+    const out = { water: {}, lava: {} };
+    for (const b of blocks) {
+      const key = `${b.x},${b.y},${b.z}`;
+      if (b.name === 'minecraft:water' && Array.isArray(b.__waterCorners)) {
+        out.water[key] = b.__waterCorners.slice();
+      } else if (b.name === 'minecraft:lava' && Array.isArray(b.__lavaCorners)) {
+        out.lava[key] = b.__lavaCorners.slice();
+      } else if (b.__implicitWater && Array.isArray(b.__waterCorners) && blockRendersWaterOverlay(b)) {
+        out.water[key] = b.__waterCorners.slice();
+      }
+    }
+    return out;
   }
 
   const DEG_TO_RAD = Math.PI / 180;
@@ -1630,6 +1657,24 @@
     const transparentLayers = splitTransparentLayers(gl, transparentChunks);
     Object.assign(window.__renderDiagnostics, meshBufferStats(renderChunks), {
       fluidFaces: window.__fluidFaceStats,
+      fluidCorners: collectFluidCornerDiagnostics(payload.blocks),
+      fluidTreatment: {
+        renderer: 'deepslate-special-renderer-patch',
+        water: {
+          sourceTop: 'flat',
+          flowingTop: 'sloped',
+          tintRgb: WATER_TINT_RGB,
+          textureAlpha: WATER_TEXTURE_ALPHA,
+          sideTextureAlpha: WATER_SIDE_TEXTURE_ALPHA,
+          textureShade: WATER_TEXTURE_SHADE,
+        },
+        lava: {
+          sourceTop: 'flat',
+          flowingTop: 'sloped',
+          textureAlpha: 255,
+          sideTexture: 'block/lava_flow',
+        },
+      },
       transparentLayering: transparentLayers.diag,
     });
     console.log('[render-diag]', JSON.stringify(window.__renderDiagnostics, null, 2));
