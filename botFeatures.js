@@ -184,7 +184,7 @@ function shouldAiRespond({ enabled, mentioned, repliedToBot = false, isBot, now 
   if (!enabled) return { allowed: false, reason: 'disabled' };
   if (isBot) return { allowed: false, reason: 'bot' };
   if (!mentioned && !repliedToBot) return { allowed: false, reason: 'not_triggered' };
-  if (now - lastUserResponseAt < cooldownMs) return { allowed: false, reason: 'cooldown' };
+  if (!repliedToBot && now - lastUserResponseAt < cooldownMs) return { allowed: false, reason: 'cooldown' };
   return { allowed: true };
 }
 

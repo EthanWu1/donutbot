@@ -200,6 +200,16 @@ test('ai responder only responds to mentions when enabled and not cooled down', 
     lastUserResponseAt: 0,
     cooldownMs: 5_000
   }).allowed, true);
+
+  assert.equal(shouldAiRespond({
+    enabled: true,
+    mentioned: false,
+    repliedToBot: true,
+    isBot: false,
+    now: 10_000,
+    lastUserResponseAt: 9_000,
+    cooldownMs: 5_000
+  }).allowed, true);
 });
 
 test('ai model defaults to current cheapest Haiku when unset', () => {
