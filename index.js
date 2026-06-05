@@ -59,6 +59,16 @@ const {
   sanitizeStaffApplicationQuestions,
   splitIgnList,
 } = require('./botLogic');
+const {
+  DEFAULT_ROLE_IDS,
+  calculateBuilderPoints,
+  calculateStaffPoints,
+  canApplyForRole,
+  normalizeGiveawayClaim,
+  getBuilderIncentives,
+  getStaffIncentives,
+  shouldAiRespond,
+} = require('./botFeatures');
 
 // All litematic rendering now goes through the shared render service
 // (render-service/), so this process no longer launches its own Chromium.
@@ -417,6 +427,13 @@ async function refreshBuildersBoard(guild) {
 const LEVEL_UP_CHANNEL_ID = C.CHANNEL_LEVEL_UP;
 // Channel that gets a plain milestone shout every 5 levels.
 const LEVEL_MILESTONE_CHANNEL_ID = '1505582865813999789';
+const HEAD_BUILDER_ROLE_ID = process.env.HEAD_BUILDER_ROLE_ID || C.ROLE_BUILDER_1 || DEFAULT_ROLE_IDS.headBuilder;
+const AI_ENABLED = process.env.AI_ENABLED === undefined
+  ? !!process.env.ANTHROPIC_API_KEY
+  : ['1', 'true', 'yes', 'on'].includes(String(process.env.AI_ENABLED).toLowerCase());
+const AI_MODEL = process.env.AI_MODEL || 'claude-3-haiku-20240307';
+const AI_COOLDOWN_MS = Math.max(10_000, Number(process.env.AI_COOLDOWN_MS || 60_000));
+const aiCooldowns = new Map();
 // Category where the Members/Channels/Roles stat voice channels live.
 const STAT_CHANNELS_CATEGORY_ID = '1484047106737176708';
 
@@ -504,6 +521,49 @@ function isBuilderMember(member) {
     C.ROLE_BUILDER_TIER_2,
     C.ROLE_BUILDER_TIER_3,
   ].filter(Boolean).includes(r.id)) || false;
+}
+
+function isManagerPlus(member) {
+  if (!member) return false;
+  if (member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) return true;
+  if (member.permissions?.has?.(PermissionsBitField.Flags.ManageGuild)) return true;
+  const allowed = [C.ROLE_OWNER, C.ROLE_CO_OWNER, C.ROLE_ADMIN, C.ROLE_MANAGER].filter(Boolean).map(String);
+  return member.roles?.cache?.some?.(r => allowed.includes(String(r.id))) || false;
+}
+
+function isHeadBuilder(member) {
+  if (!member) return false;
+  return !!HEAD_BUILDER_ROLE_ID && member.roles?.cache?.has?.(String(HEAD_BUILDER_ROLE_ID));
+}
+
+function canRefundBuilds(member) {
+  return isManagerPlus(member) || isHeadBuilder(member);
+}
+
+function applicationGateForMember(member, typeId) {
+  return canApplyForRole(member, typeId, {
+    levelRoles: C.LEVEL_ROLES,
+    builderRoleId: C.ROLE_BUILDER_3 || C.ROLE_BUILDER_2 || C.ROLE_BUILDER_1,
+    staffRoleId: C.ROLE_STAFF || C.ROLE_TRIAL_MOD
+  });
+}
+
+async function getBuilderIgnForMember(member) {
+  const fallback = sanitizeDisplayName(member?.displayName || member?.user?.username || 'builder', { maxLen: 16 });
+  try {
+    const staffList = await store.getAcceptedStaffList().catch(() => null);
+    const builders = staffList?.builders || staffList?.builder || {};
+    const saved = builders?.[member.id];
+    const ign = sanitizeDisplayName(saved?.ign || saved?.mainIgn || saved?.name || '', { maxLen: 16 });
+    return ign || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function findBuildRequestForTicket(guildId, channelId) {
+  const requests = await store.listBuildRequests(guildId).catch(() => []);
+  return requests.find(r => String(r.ticketChannelId || r.channelId || '') === String(channelId || '')) || null;
 }
 
 function canManageStaffList(member) {
@@ -760,6 +820,8 @@ const HELP_CATALOG = [
       ['/afk [reason]', 'Mark yourself as AFK.'],
       ['/suggestion <text>', 'Submit a suggestion to staff.'],
       ['/level check [user]', 'Check a level and XP progress.'],
+      ['/rank [user]', 'Show XP, rank, and points.'],
+      ['/apply builder | staff', 'Start an application if eligible.'],
     ],
   },
   {
@@ -790,7 +852,8 @@ const HELP_CATALOG = [
     commands: [
       ['/build start', 'Start tracking a new build.'],
       ['/build edit <build_id>', 'Edit an active build job.'],
-      ['/build remove', 'Remove an open build.'],
+      ['/build remove <id>', 'Remove a queued/tracked build.'],
+      ['/refund <id> <amount> <reason>', 'Record a build refund.'],
       ['/build history <person>', 'Show a builder’s completed builds.'],
       ['/pay start', 'Watch a DonutSMP payment.'],
       ['/pay history [limit]', 'Show payment history.'],
@@ -802,10 +865,7 @@ const HELP_CATALOG = [
     blurb: 'Renders, schematic submissions, kelp catalog.',
     commands: [
       ['/render <litematic>', 'Render a litematic file.'],
-      ['/publish post', 'Publish/update a submission to the forum.'],
-      ['/publish render', 'Re-render from the latest .litematic.'],
-      ['/publish reject <reason>', 'Reject a submission.'],
-      ['/publish unpost', 'Delete the forum thread, back to DRAFT.'],
+      ['Submission buttons', 'Publish/update or reject from the draft preview.'],
       ['/kelp panel', 'Browse the kelp farm catalog.'],
       ['/kelp add | edit | remove | setprice', 'Manage the kelp catalog.'],
     ],
@@ -828,6 +888,8 @@ const HELP_CATALOG = [
       ['/role grant <user> <role> [duration]', 'Grant a role.'],
       ['/role remove <user> <role>', 'Remove a role.'],
       ['/vouch add | remove | check', 'Manage member vouches.'],
+      ['/automod settings | rule | whitelist | blacklist', 'Configure automod.'],
+      ['/antiraid settings | mode | whitelist', 'Configure anti-raid.'],
     ],
   },
   {
@@ -845,7 +907,6 @@ const HELP_CATALOG = [
     blurb: 'Server configuration and management.',
     commands: [
       ['/level add | set | multiplier', 'Adjust levels and XP rate.'],
-      ['/panel list | send', 'Publish or list configurable panels.'],
       ['/spawner buy | sell | remove', 'Manage spawner prices.'],
       ['/application <type> <state>', 'Open or close applications.'],
       ['/stafflist edit', 'Edit staff-list IGNs and alts.'],
@@ -1122,6 +1183,10 @@ function buildSchematicPreviewComponents(sub) {
       .setCustomId(`publish_post:${sub.id}`)
       .setLabel(isPublished ? 'Update Forum Post' : 'Publish to Forum')
       .setStyle(isPublished ? ButtonStyle.Secondary : ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`publish_reject:${sub.id}`)
+      .setLabel('Reject')
+      .setStyle(ButtonStyle.Danger),
   );
   return [editRow, rotateRow, designersRow, creditsRow, publishRow];
 }
@@ -2094,6 +2159,8 @@ const CATEGORY_EXTRA_VIEWER_ROLES = {
   [C.TICKET_CATEGORIES.MOD_2]: [..._MOD_AND_ABOVE, C.ROLE_TRIAL_MOD].filter(Boolean),
   // Builder category — all builder roles + Trial Mod and above
   [C.TICKET_CATEGORIES.BUILDING]: [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, ..._MOD_AND_ABOVE].filter(Boolean),
+  // Giveaway claim tickets — builders and Trial Mod+ can see them.
+  [C.TICKET_CATEGORIES.GIVEAWAY]: [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, ..._MOD_AND_ABOVE].filter(Boolean),
   // Spawner categories — mod-and-above plus the dedicated spawner-ticket
   // access role. Support/staff roles should not see spawner tickets.
   [C.TICKET_CATEGORIES.SPAWNER_BUY]: [C.ROLE_OWNER, C.ROLE_CO_OWNER, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
@@ -2480,7 +2547,12 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
   }
   for (const rid of viewerRoleIds) {
     const role = guild.roles.cache.get(rid);
-    if (role) overwrites.push({ id: role, allow: STAFF_ALLOW });
+    if (!role) continue;
+    if (builderRoleIds.map(String).includes(String(rid))) {
+      overwrites.push({ id: role, allow: MEMBER_ALLOW, deny: [PermissionsBitField.Flags.ManageMessages] });
+    } else {
+      overwrites.push({ id: role, allow: STAFF_ALLOW });
+    }
   }
 
   const channel = await guild.channels.create({
@@ -2736,9 +2808,9 @@ function buildAppReviewActionRows({ appId, ticketChannelId, guildId, includeDeci
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`app_decide:accept:${appId}`).setLabel('Accept').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`app_decide:deny:${appId}`).setLabel('Deny').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`app_decide:deny:${appId}`).setLabel('Reject').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId(`app_decide:accept_reason:${appId}`).setLabel('Accept with reason').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`app_decide:deny_reason:${appId}`).setLabel('Deny with reason').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`app_decide:deny_reason:${appId}`).setLabel('Reject with reason').setStyle(ButtonStyle.Danger),
     ticketUrl
       ? new ButtonBuilder().setLabel('View Ticket').setStyle(ButtonStyle.Link).setURL(ticketUrl)
       : new ButtonBuilder().setCustomId(`app_open_ticket:${appId}`).setLabel('Open Ticket').setStyle(ButtonStyle.Secondary),
@@ -3464,6 +3536,8 @@ function buildTrackingEmbed(job, status, opts = {}) {
     case 'AWAITING_CONFIRM': color = 0xFF8C00; title = 'Awaiting Customer Confirmation'; break;
     case 'AWAITING_PAYOUT': color = 0x57f287; title = 'Customer Confirmed — Ready for Payout'; break;
     case 'COMPLETE': color = 0xFFFFFF; title = 'Build Complete'; break;
+    case 'REFUNDED': color = 0xed4245; title = 'Build Refunded'; break;
+    case 'REMOVED': color = 0x2b2d31; title = 'Build Removed'; break;
     case 'CANCELLED': color = 0xed4245; title = 'Build Cancelled'; break;
     default: color = 0xFFC300; title = 'Build In Progress';
   }
@@ -3497,6 +3571,20 @@ function buildTrackingEmbed(job, status, opts = {}) {
   }
   if (status === 'CANCELLED' && opts.cancelledBy) {
     fields.push({ name: `${E_INFO} Cancelled by`, value: `<@${opts.cancelledBy}>`, inline: true });
+  }
+  if (status === 'REMOVED') {
+    fields.push({ name: `${E_STATUS} Status`, value: opts.reason || job.removedReason || 'Removed from active queue.', inline: false });
+  }
+  if (status === 'REFUNDED' && job.refund) {
+    fields.push(
+      { name: `${E_PRICE} Refunded`, value: money(job.refund.amount), inline: true },
+      { name: `${E_INFO} Refund Reason`, value: String(job.refund.reason || 'No reason provided').slice(0, 1024), inline: false },
+      { name: `${E_RECEIVER} Refunded By`, value: job.refund.refundedBy ? `<@${job.refund.refundedBy}>` : 'Unknown', inline: true },
+      { name: `${E_PRICE} Builder Ledger Impact`, value: money(job.refund.builderLedgerImpact || 0), inline: true },
+    );
+  }
+  if (job.notes) {
+    fields.push({ name: `${E_INFO} Notes`, value: String(job.notes).slice(0, 1024), inline: false });
   }
   if (opts.dispute) {
     fields.push({ name: `${E_STATUS} Status`, value: 'Disputed — customer did not confirm receipt', inline: false });
@@ -4100,12 +4188,15 @@ client.once('clientReady', async () => {
             // roles get a reduced perm set (no ManageMessages); all other
             // roles keep the legacy staff allow-list.
             for (const rid of cachedAllowedRoles) {
+              const isSchematicSoft = rid === SCHEMATIC_HELPER_ROLE_ID || rid === SCHEMATIC_VIEWER_ROLE_ID;
+              const isBuilderSoft = [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, C.ROLE_BUILDER_TIER_1, C.ROLE_BUILDER_TIER_2, C.ROLE_BUILDER_TIER_3].filter(Boolean).map(String).includes(String(rid));
+              const perms = (isSchematicSoft || isBuilderSoft)
+                ? { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true, ManageMessages: false }
+                : { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, ManageMessages: true };
               if (!rolesWithAccess.includes(rid)) {
-                const isSchematicSoft = rid === SCHEMATIC_HELPER_ROLE_ID || rid === SCHEMATIC_VIEWER_ROLE_ID;
-                const perms = isSchematicSoft
-                  ? { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true }
-                  : { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, ManageMessages: true };
                 await ch.permissionOverwrites.create(rid, perms).catch(() => {});
+              } else if (isBuilderSoft) {
+                await ch.permissionOverwrites.edit(rid, perms).catch(() => {});
               }
             }
             if (catId === C.TICKET_CATEGORIES.SPAWNER_BUY || catId === C.TICKET_CATEGORIES.SPAWNER_SELL) {
@@ -4161,10 +4252,8 @@ client.once('clientReady', async () => {
         if (!buildMsg) continue;
         // Check if it already has a button — if no components, restore them
         if (!buildMsg.components?.length) {
-          const payBtn = new ButtonBuilder().setCustomId(`build_admin_pay:${job.id}`).setLabel('Pay Builder').setStyle(ButtonStyle.Success);
-          const row = new ActionRowBuilder().addComponents(payBtn);
           const restoredEmbed = buildTrackingEmbed(job, 'AWAITING_PAYOUT');
-          await buildMsg.edit({ embeds: [restoredEmbed], components: [row] }).catch(() => {});
+          await buildMsg.edit({ embeds: [restoredEmbed], components: payBuilderRow(job.id) }).catch(() => {});
         }
       } catch {}
     }
@@ -4199,6 +4288,46 @@ client.on('guildMemberAdd', async (member) => {
     await syncNickname(member);
   } catch (e) {
     console.error('welcome message error:', e);
+  }
+});
+
+client.on('guildMemberRemove', async (member) => {
+  try {
+    if (!member?.guild || member.user?.bot) return;
+    const guildId = member.guild.id;
+    const requests = await store.listBuildRequests(guildId).catch(() => []);
+    for (const req of requests) {
+      if (String(req.userId || req.customerDiscordId || '') !== String(member.id)) continue;
+      await store.deleteBuildRequest(req.id).catch(() => false);
+      const ch = await client.channels.fetch(req.ticketChannelId || req.channelId).catch(() => null);
+      if (ch?.isTextBased?.()) {
+        await ch.send({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Build Removed').setDescription('Requester left the server, so this queued build was removed.')] }).catch(() => {});
+      }
+    }
+
+    const activeStatuses = new Set(['WAITING_PAYMENT', 'PENDING', 'AWAITING_CONFIRM', 'AWAITING_PAYOUT']);
+    const jobs = await store.listBuildJobs().catch(() => []);
+    for (const job of jobs) {
+      if (!activeStatuses.has(String(job.status || '').toUpperCase())) continue;
+      if (String(job.customerDiscordId || job.requesterId || '') !== String(member.id)) continue;
+      const updated = await store.updateBuildJob(job.id, {
+        status: 'REMOVED',
+        removedAt: Date.now(),
+        removedBy: client.user?.id || null,
+        removedReason: 'Requester left the server'
+      }).catch(() => null);
+      if (updated?.buildMessageId && updated?.buildChannelId) {
+        const buildCh = await client.channels.fetch(updated.buildChannelId).catch(() => null);
+        const buildMsg = buildCh ? await buildCh.messages.fetch(updated.buildMessageId).catch(() => null) : null;
+        if (buildMsg) await buildMsg.edit({ embeds: [buildTrackingEmbed(updated, 'REMOVED')], components: [] }).catch(() => {});
+      }
+      const ticketCh = await client.channels.fetch(updated?.ticketChannelId || job.ticketChannelId).catch(() => null);
+      if (ticketCh?.isTextBased?.()) {
+        await ticketCh.send({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Build Removed').setDescription('Requester left the server, so this build was removed from active tracking.')] }).catch(() => {});
+      }
+    }
+  } catch (e) {
+    console.error('[build cleanup] member remove error:', e?.message || e);
   }
 });
 
@@ -4440,6 +4569,52 @@ async function updateVouchboard(guild) {
   }
 }
 
+async function maybeRespondWithAi(message) {
+  try {
+    const mentioned = message.mentions?.users?.has?.(client.user.id) || String(message.content || '').includes(`<@${client.user.id}>`);
+    const state = shouldAiRespond({
+      enabled: AI_ENABLED,
+      mentioned,
+      isBot: message.author?.bot,
+      now: Date.now(),
+      lastUserResponseAt: aiCooldowns.get(message.author.id) || 0,
+      cooldownMs: AI_COOLDOWN_MS
+    });
+    if (!state.allowed) return;
+    if (!process.env.ANTHROPIC_API_KEY) return;
+    aiCooldowns.set(message.author.id, Date.now());
+
+    const clean = String(message.content || '')
+      .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 800);
+    const prompt = clean || 'Say hi.';
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        max_tokens: 80,
+        temperature: 0.8,
+        system: 'You are DonutBot: tiny, useful, lightly funny, and brief. Reply in one or two short sentences. No slurs, no drama, no pretending to moderate.',
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    if (!res.ok) return;
+    const data = await res.json().catch(() => null);
+    const text = (data?.content || []).map(part => part?.text || '').join(' ').trim().slice(0, 600);
+    if (!text) return;
+    await message.reply({ content: text, allowedMentions: { repliedUser: false } }).catch(() => {});
+  } catch (e) {
+    console.error('[ai] mention responder error:', e?.message || e);
+  }
+}
+
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
@@ -4638,6 +4813,10 @@ client.on('messageCreate', async (message) => {
     }
   }
 
+
+  if (message.guildId) {
+    await maybeRespondWithAi(message);
+  }
 
   // --- AFK: clear on message ---
   try {
@@ -5471,6 +5650,78 @@ if (interaction.isButton() && interaction.customId.startsWith('schempend:')) {
   return;
 }
 
+// --- PUBLISH SCHEMATIC: Reject button ---
+if (interaction.isButton() && interaction.customId.startsWith('publish_reject:')) {
+  const subId = interaction.customId.split(':')[1];
+  const sub = await store.getSchematicSubmission(subId).catch(() => null);
+  if (!sub) return interaction.reply({ content: 'Submission record missing.', flags: 64 }).catch(() => {});
+  if (!canManageSchematicSubmission(interaction.member)) {
+    return interaction.reply({ content: 'Only a schematic manager can reject.', flags: 64 }).catch(() => {});
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(`publish_reject_modal:${subId}`)
+    .setTitle('Reject Submission')
+    .addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('reason')
+        .setLabel('Reason')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(1000)
+    ));
+  await interaction.showModal(modal);
+  return;
+}
+
+if (interaction.isModalSubmit() && interaction.customId.startsWith('publish_reject_modal:')) {
+  await interaction.deferReply({ flags: 64 }).catch(() => {});
+  const subId = interaction.customId.split(':')[1];
+  const sub = await store.getSchematicSubmission(subId).catch(() => null);
+  if (!sub) return safeIReply(interaction, { content: 'Submission record missing.', flags: 64 });
+  if (!canManageSchematicSubmission(interaction.member)) {
+    return safeIReply(interaction, { content: 'Only a schematic manager can reject.', flags: 64 });
+  }
+  const reason = (interaction.fields.getTextInputValue('reason') || '').trim();
+  await store.updateSchematicSubmission(sub.id, {
+    status: 'REJECTED',
+    rejectedById: interaction.user.id,
+    rejectedAt: Date.now(),
+    rejectionReason: reason,
+    updatedAt: Date.now(),
+  }).catch(() => {});
+
+  try {
+    const user = await interaction.client.users.fetch(sub.submitterId).catch(() => null);
+    const dm = user ? await user.createDM().catch(() => null) : null;
+    if (dm) {
+      await dm.send({
+        embeds: [new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle('Schematic Submission Rejected')
+          .setDescription(`Your schematic submission${sub.name ? ` **${sub.name}**` : ''} was rejected by ${interaction.user}.`)
+          .addFields({ name: 'Reason', value: reason.slice(0, 1024) || '-' })],
+      }).catch(() => {});
+    }
+  } catch {}
+
+  const channel = await interaction.guild.channels.fetch(sub.ticketChannelId || interaction.channelId).catch(() => null);
+  if (channel?.isTextBased?.()) {
+    await channel.send({
+      content: sub.submitterId ? `<@${sub.submitterId}>` : '',
+      allowedMentions: sub.submitterId ? { users: [sub.submitterId] } : { parse: [] },
+      embeds: [new EmbedBuilder()
+        .setColor(0xed4245)
+        .setTitle('Submission Rejected')
+        .setDescription(`Rejected by ${interaction.user}.`)
+        .addFields({ name: 'Reason', value: reason.slice(0, 1024) || '-' })],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`publish_new:${channel.id}`).setLabel('New Submission').setStyle(ButtonStyle.Secondary).setEmoji('ðŸ“¦'),
+      )],
+    }).catch(() => {});
+  }
+  return safeIReply(interaction, { content: 'Rejection logged. You can close the ticket when ready.', flags: 64 });
+}
+
 // --- PUBLISH SCHEMATIC: Publish-to-Forum button ---
 if (interaction.isButton() && interaction.customId.startsWith('publish_post:')) {
   const subId = interaction.customId.split(':')[1];
@@ -5510,12 +5761,34 @@ if (interaction.isButton() && interaction.customId.startsWith('publish_post:')) 
   return safeIReply(interaction, { content: `${verb} → <#${res.thread.id}>`, flags: 64 });
 }
 
+// --- GIVEAWAY: winner double-or-keep choices on the congrats message ---
+if (interaction.isButton() && (interaction.customId.startsWith('gw_keep:') || interaction.customId.startsWith('gw_double:'))) {
+  const [action, gwMsgId] = interaction.customId.split(':');
+  const gRaw = await store.getGiveaway(gwMsgId).catch(() => null);
+  const g = gRaw ? normalizeGiveawayClaim(gRaw) : null;
+  if (!g) return interaction.reply({ content: 'This giveaway could not be found.', flags: 64 }).catch(() => {});
+  if (g.claimOpen === false) return interaction.reply({ content: 'The claim window for this giveaway has expired.', flags: 64 }).catch(() => {});
+  const winnerIds = Array.isArray(g.winnerIds) ? g.winnerIds.map(String) : [];
+  if (!winnerIds.includes(String(interaction.user.id))) {
+    return interaction.reply({ content: 'Only the giveaway winner can choose this.', flags: 64 }).catch(() => {});
+  }
+  const choice = action === 'gw_double' ? 'double' : 'keep';
+  const choices = { ...(g.doubleOrKeepChoices || {}) };
+  choices[interaction.user.id] = { choice, at: Date.now() };
+  await store.updateGiveaway(g.messageId, { doubleOrKeepChoices: choices }).catch(() => {});
+  return interaction.reply({ content: `Choice saved: **${choice === 'double' ? 'Double' : 'Keep'}**.`, flags: 64 }).catch(() => {});
+}
+
 // --- GIVEAWAY: winner "Open Ticket" button on the congrats message ---
 if (interaction.isButton() && interaction.customId.startsWith('gw_claim:')) {
   const gwMsgId = interaction.customId.split(':')[1];
-  const g = await store.getGiveaway(gwMsgId).catch(() => null);
+  const gRaw = await store.getGiveaway(gwMsgId).catch(() => null);
+  const g = gRaw ? normalizeGiveawayClaim(gRaw) : null;
   if (!g) {
     return interaction.reply({ content: 'This giveaway could not be found.', flags: 64 }).catch(() => {});
+  }
+  if (g.claimOpen === false) {
+    return interaction.reply({ content: 'The claim window for this giveaway has expired.', flags: 64 }).catch(() => {});
   }
   const winnerIds = Array.isArray(g.winnerIds) ? g.winnerIds.map(String) : [];
   if (!winnerIds.includes(String(interaction.user.id))) {
@@ -5675,6 +5948,11 @@ if (interaction.isButton() && interaction.customId.startsWith('tk_ddbuy:')) {
 if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
   const typeId = interaction.customId.split(':')[1];
   const type = await store.getAppType(typeId).catch(() => null);
+  const gate = applicationGateForMember(interaction.member, typeId);
+  if (!gate.allowed) {
+    await interaction.reply({ content: gate.reason || 'You do not meet the requirements for this application.', flags: 64 }).catch(() => {});
+    return;
+  }
   const cooldown = await getApplicationCooldown(interaction.user.id, typeId);
   if (cooldown.blocked) {
     await interaction.reply({ embeds: [applicationCooldownEmbed(type?.title || typeId, cooldown)], flags: 64 }).catch(() => {});
@@ -6575,6 +6853,61 @@ ${sourceLink}`;
   // --- SCHEMATIC PURCHASE PANEL ---
 
 
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('build_job_edit_modal:')) {
+    await interaction.deferReply({ flags: 64 }).catch(() => {});
+    const buildId = interaction.customId.split(':')[1];
+    const job = await store.getBuildJob(buildId).catch(() => null);
+    if (!job) return interaction.editReply('Build not found.');
+    const isAdmin = interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+    const isAssignedBuilder = job.builderDiscordId && String(interaction.user.id) === String(job.builderDiscordId);
+    if (!isAdmin && !isAssignedBuilder && !isManagerPlus(interaction.member) && !isHeadBuilder(interaction.member)) {
+      return interaction.editReply('Only the assigned builder, Head Builder, or managers can edit this build.');
+    }
+    const statusRaw = interaction.fields.getTextInputValue('status')?.trim();
+    const builderIgnRaw = interaction.fields.getTextInputValue('builder_ign')?.trim();
+    const customerIgnRaw = interaction.fields.getTextInputValue('customer_ign')?.trim();
+    const priceRaw = interaction.fields.getTextInputValue('price')?.trim();
+    const notesRaw = interaction.fields.getTextInputValue('notes')?.trim();
+    const patch = { updatedAt: Date.now(), updatedBy: interaction.user.id };
+    if (statusRaw) {
+      const status = statusRaw.toUpperCase().replace(/\s+/g, '_');
+      const allowedStatuses = new Set(['WAITING_PAYMENT', 'PENDING', 'AWAITING_CONFIRM', 'AWAITING_PAYOUT', 'COMPLETE', 'CANCELLED', 'REFUNDED', 'REMOVED']);
+      if (!allowedStatuses.has(status)) return interaction.editReply('Invalid status. Use WAITING_PAYMENT, PENDING, AWAITING_CONFIRM, AWAITING_PAYOUT, COMPLETE, CANCELLED, REFUNDED, or REMOVED.');
+      patch.status = status;
+    }
+    if (builderIgnRaw) patch.builderIgn = sanitizeDisplayName(builderIgnRaw, { maxLen: 16 });
+    if (customerIgnRaw) patch.customerIgn = sanitizeDisplayName(customerIgnRaw, { maxLen: 16 });
+    if (priceRaw) {
+      const parsed = parseNumber(priceRaw);
+      if (!parsed || parsed <= 0) return interaction.editReply('Invalid price. Use formats like `5m`, `500k`, or `500000`.');
+      patch.price = parsed;
+    }
+    patch.notes = notesRaw || null;
+    const updated = await store.updateBuildJob(buildId, patch).catch(() => null);
+    if (!updated) return interaction.editReply('Could not update that build.');
+
+    if (updated.buildMessageId && updated.buildChannelId) {
+      const buildCh = await client.channels.fetch(updated.buildChannelId).catch(() => null);
+      const buildMsg = buildCh ? await buildCh.messages.fetch(updated.buildMessageId).catch(() => null) : null;
+      if (buildMsg) {
+        let components = buildMsg.components;
+        if (updated.status === 'PENDING') {
+          components = [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`build_edit_open:${buildId}`).setLabel('Edit').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`build_done:${buildId}`).setLabel('Mark Done').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`build_cancel:${buildId}`).setLabel('Cancel Build').setStyle(ButtonStyle.Danger),
+          )];
+        } else if (updated.status === 'AWAITING_PAYOUT') {
+          components = payBuilderRow(buildId);
+        } else if (['COMPLETE', 'CANCELLED', 'REFUNDED', 'REMOVED'].includes(updated.status)) {
+          components = [];
+        }
+        await buildMsg.edit({ embeds: [buildTrackingEmbed(updated, updated.status)], components }).catch(() => {});
+      }
+    }
+    return interaction.editReply(`Updated build \`${buildId}\`.`);
+  }
+
   if (interaction.isModalSubmit() && interaction.customId === 'sticky_create_modal') {
     await interaction.deferReply({ flags: 64 });
     const content = interaction.fields.getTextInputValue('sticky_content');
@@ -6697,6 +7030,29 @@ Entries: **${entryCount}**`.trim();
       return;
     }
 
+    if (interaction.customId.startsWith('build_edit_open:')) {
+      const buildId = interaction.customId.split(':')[1];
+      const job = await store.getBuildJob(buildId);
+      if (!job) return interaction.reply({ content: 'Build not found.', flags: 64 });
+      const isAdmin = interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+      const isAssignedBuilder = job.builderDiscordId && String(interaction.user.id) === String(job.builderDiscordId);
+      if (!isAdmin && !isAssignedBuilder && !isManagerPlus(interaction.member) && !isHeadBuilder(interaction.member)) {
+        return interaction.reply({ content: 'Only the assigned builder, Head Builder, or managers can edit this build.', flags: 64 });
+      }
+      const modal = new ModalBuilder()
+        .setCustomId(`build_job_edit_modal:${buildId}`)
+        .setTitle('Edit Build Tracking')
+        .addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('status').setLabel('Status').setStyle(TextInputStyle.Short).setRequired(false).setValue(String(job.status || '').slice(0, 40))),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('builder_ign').setLabel('Builder IGN').setStyle(TextInputStyle.Short).setRequired(false).setValue(String(job.builderIgn || '').slice(0, 40))),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('customer_ign').setLabel('Customer IGN').setStyle(TextInputStyle.Short).setRequired(false).setValue(String(job.customerIgn || '').slice(0, 40))),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Price or quote').setStyle(TextInputStyle.Short).setRequired(false).setValue(job.price ? String(job.price) : '')),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('notes').setLabel('Notes').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1000).setValue(String(job.notes || '').slice(0, 1000))),
+        );
+      await interaction.showModal(modal);
+      return;
+    }
+
     if (interaction.customId.startsWith('build_done:')) {
       const buildId = interaction.customId.split(':')[1];
       const job = await store.getBuildJob(buildId);
@@ -6752,9 +7108,6 @@ Entries: **${entryCount}**`.trim();
       await store.updateBuildJob(buildId, { status: 'AWAITING_PAYOUT', confirmedAt, taxRate });
 
       // Pay button — no emoji per requirement
-      const payBtn = new ButtonBuilder().setCustomId(`build_admin_pay:${buildId}`).setLabel('Pay Builder').setStyle(ButtonStyle.Success);
-      const row = new ActionRowBuilder().addComponents(payBtn);
-
       const updatedJob = { ...job, price: job.price, taxRate };
       const greenEmbed = buildTrackingEmbed(updatedJob, 'AWAITING_PAYOUT', { timestamp: confirmedAt });
 
@@ -6762,7 +7115,7 @@ Entries: **${entryCount}**`.trim();
         const buildCh = await client.channels.fetch(job.buildChannelId).catch(() => null);
         if (buildCh) {
           const buildMsg = await buildCh.messages.fetch(job.buildMessageId).catch(() => null);
-          if (buildMsg) await buildMsg.edit({ embeds: [greenEmbed], components: [row] }).catch(() => {});
+          if (buildMsg) await buildMsg.edit({ embeds: [greenEmbed], components: payBuilderRow(buildId) }).catch(() => {});
         }
       }
 
@@ -6799,9 +7152,10 @@ Entries: **${entryCount}**`.trim();
       await store.updateBuildJob(buildId, { status: 'PENDING', doneAt: null, doneBy: null });
 
       // Revert tracking embed to YELLOW (building again)
+      const editBtn = new ButtonBuilder().setCustomId(`build_edit_open:${buildId}`).setLabel('Edit').setStyle(ButtonStyle.Secondary);
       const cancelBtn = new ButtonBuilder().setCustomId(`build_cancel:${buildId}`).setLabel('Cancel Build').setStyle(ButtonStyle.Danger);
       const doneBtn = new ButtonBuilder().setCustomId(`build_done:${buildId}`).setLabel('Mark Done').setStyle(ButtonStyle.Success);
-      const row = new ActionRowBuilder().addComponents(doneBtn, cancelBtn);
+      const row = new ActionRowBuilder().addComponents(editBtn, doneBtn, cancelBtn);
       const yellowEmbed = buildTrackingEmbed(job, 'PENDING', { dispute: true });
 
       if (job.buildMessageId && job.buildChannelId) {
@@ -7264,6 +7618,112 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
       }
     }
 
+    if (commandName === 'rank') {
+      const target = options.getUser('user') || interaction.user;
+      await interaction.deferReply();
+
+      const ud = await store.getUserXp(target.id, interaction.guildId);
+      const curXp = ud.xp || 0;
+      const level = getLevelFromXp(curXp);
+      const rank = await store.getRank(target.id, interaction.guildId).catch(() => 0);
+      const prevXp = getXpForLevel(level);
+      const nextXp = getXpForLevel(level + 1);
+      const xpIntoLevel = Math.max(0, curXp - prevXp);
+      const xpNeeded = Math.max(1, nextXp - prevXp);
+      const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+
+      let tierLabel = 'COMMON';
+      let tierAccent = null;
+      if (member) {
+        const levelRoleEntries = Object.entries(C.LEVEL_ROLES || {})
+          .map(([lvl, cfg]) => ({ level: Number(lvl), id: cfg?.id, color: cfg?.color || null }))
+          .filter(r => r.id && member.roles.cache.has(r.id))
+          .sort((a, b) => b.level - a.level);
+        if (levelRoleEntries.length) {
+          const highest = levelRoleEntries[0];
+          const roleObj = interaction.guild.roles.cache.get(highest.id);
+          tierLabel = String(roleObj?.name || 'Rank').replace(/\s*role$/i, '').toUpperCase();
+          tierAccent = roleObj?.hexColor && roleObj.hexColor !== '#000000' ? roleObj.hexColor : (highest.color || null);
+        }
+      }
+
+      const [builderMetrics, staffMetrics, builderSaved, staffSaved] = await Promise.all([
+        store.getBuilderPointMetrics(interaction.guildId, target.id).catch(() => ({})),
+        store.getStaffPointMetrics(interaction.guildId, target.id).catch(() => ({})),
+        store.getPoints('builder', target.id, interaction.guildId).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+        store.getPoints('staff', target.id, interaction.guildId).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+      ]);
+      const builderPoints = calculateBuilderPoints({
+        ...builderMetrics,
+        manual: builderSaved.currentMonth || 0
+      });
+      const staffPoints = calculateStaffPoints({
+        ...staffMetrics,
+        manual: staffSaved.currentMonth || 0
+      });
+      const builderIncentives = getBuilderIncentives({
+        monthly: builderPoints.total,
+        lifetime: (builderSaved.lifetime || 0) + builderPoints.total
+      });
+      const staffIncentives = getStaffIncentives({
+        monthly: staffPoints.total,
+        lifetime: (staffSaved.lifetime || 0) + staffPoints.total
+      });
+
+      const cardBuf = await renderLevelCard({
+        username: member?.displayName || target.displayName || target.username,
+        avatarUrl: target.displayAvatarURL({ extension: 'png', size: 256 }),
+        level,
+        xpIntoLevel,
+        xpNeeded,
+        totalXp: curXp,
+        rank,
+        accent: tierAccent,
+        theme: 'default',
+        tierLabel,
+        tierValue: level,
+      });
+      const file = new AttachmentBuilder(cardBuf, { name: 'rank.png' });
+      const eb = new EmbedBuilder()
+        .setColor(0x2b2d31)
+        .setTitle(`${member?.displayName || target.username} Rank`)
+        .setDescription(`Builder Points: **${builderPoints.total}**\nStaff Points: **${staffPoints.total}**`)
+        .addFields(
+          { name: 'Builder point math', value: `Completed builds ${builderPoints.parts.completed}; build value ${builderPoints.parts.value}; on-time ${builderPoints.parts.onTime}; rating ${builderPoints.parts.rating}; refund penalty ${builderPoints.parts.refundPenalty}; manual ${builderPoints.parts.manual}.`, inline: false },
+          { name: 'Staff point math', value: `Resolved tickets ${staffPoints.parts.resolvedTickets}; application reviews ${staffPoints.parts.applicationReviews}; mod actions ${staffPoints.parts.modActions}; vouches ${staffPoints.parts.vouches}; ticket messages ${staffPoints.parts.messages}; penalties ${staffPoints.parts.overturned + staffPoints.parts.strikes}; manual ${staffPoints.parts.manual}.`, inline: false },
+          { name: 'Builder incentives', value: builderIncentives.length ? builderIncentives.join('\n') : 'Keep completing builds to unlock incentives.', inline: true },
+          { name: 'Staff incentives', value: staffIncentives.length ? staffIncentives.join('\n') : 'Help tickets and review apps to unlock incentives.', inline: true },
+        )
+        .setTimestamp();
+      return interaction.editReply({ embeds: [eb], files: [file] });
+    }
+
+    if (commandName === 'apply') {
+      const typeId = options.getSubcommand();
+      const type = await store.getAppType(typeId).catch(() => null);
+      const gate = applicationGateForMember(interaction.member, typeId);
+      if (!gate.allowed) return interaction.reply({ content: gate.reason || 'You do not meet the requirements for this application.', flags: 64 });
+      const cooldown = await getApplicationCooldown(interaction.user.id, typeId);
+      if (cooldown.blocked) return interaction.reply({ embeds: [applicationCooldownEmbed(type?.title || typeId, cooldown)], flags: 64 });
+      const isClosed = await store.getAppClosed(typeId).catch(() => false);
+      if (isClosed) {
+        return interaction.reply({
+          embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Applications closed').setDescription(`**${typeId}** applications are currently closed.`)],
+          flags: 64,
+        });
+      }
+      const eb = new EmbedBuilder()
+        .setColor(Colors.Green)
+        .setTitle('Application started')
+        .setDescription('Application has been started in your direct messages.');
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setLabel('Jump to application').setStyle(ButtonStyle.Link).setURL('https://discord.com/channels/@me')
+      );
+      await interaction.reply({ embeds: [eb], components: [row], flags: 64 }).catch(() => {});
+      try { startApplicationDmFlow(interaction, typeId); } catch {}
+      return;
+    }
+
 
     // --- TICKETS (slash commands) ---
     if (commandName === 'ticket') {
@@ -7524,10 +7984,23 @@ Only the ticket creator can continue.`);
 
         await interaction.deferReply({ flags: 64 });
 
-        const customerIgn = options.getString('customer_ign', true).trim();
-        const builderIgn = options.getString('builder_ign', true).trim();
+        const buildRequest = await findBuildRequestForTicket(interaction.guildId, channel.id);
+        const rawCustomerIgn = options.getString('customer_ign')
+          || buildRequest?.ign
+          || buildRequest?.customerIgn
+          || ticketRec.customerIgn
+          || ticketRec.ign
+          || '';
+        const customerIgn = sanitizeDisplayName(String(rawCustomerIgn).trim(), { maxLen: 16 });
+        if (!customerIgn) {
+          return interaction.editReply('Customer IGN could not be inferred. Add `customer_ign` to `/build start`.');
+        }
+        const builderIgn = sanitizeDisplayName((options.getString('builder_ign') || await getBuilderIgnForMember(interaction.member)).trim(), { maxLen: 16 });
         const buildType = options.getString('build_name', true).trim().replace(/\b\w/g, c => c.toUpperCase());
-        const customerUser = options.getUser('customer_discord', true);
+        const customerUser = options.getUser('customer_discord')
+          || (ticketRec.creatorId ? await client.users.fetch(ticketRec.creatorId).catch(() => null) : null)
+          || (buildRequest?.userId ? await client.users.fetch(buildRequest.userId).catch(() => null) : null)
+          || interaction.user;
         const priceRaw = options.getString('price', true);
         const price = parseNumber(priceRaw);
         if (!price || price <= 0) return interaction.editReply('Invalid price. Use formats like `5m`, `500k`.');
@@ -7617,6 +8090,9 @@ Only the ticket creator can continue.`);
           channelId: null, // tracking channel msg set after payment
           messageId: null,
         });
+        if (buildRequest?.id) {
+          await store.deleteBuildRequest(buildRequest.id).catch(() => false);
+        }
 
         // Keep the ticket yellow until customer payment is confirmed and tracking begins.
         await store.updateTicketRecord(channel.id, {
@@ -7763,8 +8239,7 @@ Only the ticket creator can continue.`);
                 const updatedEmbed = buildTrackingEmbed(updatedJob, updatedJob.status);
                 // If AWAITING_PAYOUT, make sure Pay button is there
                 if (updatedJob.status === 'AWAITING_PAYOUT') {
-                  const payBtn = new ButtonBuilder().setCustomId(`build_admin_pay:${buildId}`).setLabel('Pay Builder').setStyle(ButtonStyle.Success);
-                  components = [new ActionRowBuilder().addComponents(payBtn)];
+                  components = payBuilderRow(buildId);
                 }
                 await buildMsg.edit({ embeds: [updatedEmbed], components }).catch(() => {});
               }
@@ -7793,6 +8268,37 @@ Only the ticket creator can continue.`);
           || hasStaffRole(interaction.member)
           || isBuilderMember(interaction.member);
         if (!canManage) return interaction.editReply('Staff or builders only.');
+
+        const directId = options.getString('id');
+        if (directId) {
+          const buildId = directId.trim();
+          const queued = await store.getBuildRequest(buildId).catch(() => null);
+          if (queued) {
+            await store.deleteBuildRequest(buildId).catch(() => false);
+            if (queued.ticketChannelId || queued.channelId) {
+              const ticketCh = await client.channels.fetch(queued.ticketChannelId || queued.channelId).catch(() => null);
+              if (ticketCh?.isTextBased?.()) {
+                await ticketCh.send({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Build Removed').setDescription(`Build request \`${buildId}\` was removed from the queue.`)] }).catch(() => {});
+              }
+            }
+            return interaction.editReply(`Removed queued build \`${buildId}\`.`);
+          }
+
+          const job = await store.getBuildJob(buildId).catch(() => null);
+          if (!job) return interaction.editReply(`No queued build or tracked build found with ID \`${buildId}\`.`);
+          const updatedJob = await store.updateBuildJob(buildId, {
+            status: 'REMOVED',
+            removedAt: Date.now(),
+            removedBy: interaction.user.id,
+            removedReason: 'Removed by command'
+          }).catch(() => null);
+          if (updatedJob?.buildMessageId && updatedJob?.buildChannelId) {
+            const buildCh = await client.channels.fetch(updatedJob.buildChannelId).catch(() => null);
+            const buildMsg = buildCh ? await buildCh.messages.fetch(updatedJob.buildMessageId).catch(() => null) : null;
+            if (buildMsg) await buildMsg.edit({ embeds: [buildTrackingEmbed(updatedJob, 'REMOVED')], components: [] }).catch(() => {});
+          }
+          return interaction.editReply(`Removed tracked build \`${buildId}\`.`);
+        }
 
         const requests = (await store.listBuildRequests(interaction.guildId).catch(() => []))
           .filter(r => String(r.status || '').toLowerCase() === 'queued')
@@ -8126,6 +8632,12 @@ if (commandName === 'giveaway') {
         const entriesGoal = options.getInteger('entries_goal');
         const memberGoal = options.getInteger('member_goal');
         const note = options.getString('note');
+        const mode = options.getString('mode') || 'standard';
+        const claimTimeRaw = options.getString('claimtime');
+        const claimTimeMs = claimTimeRaw ? parseDuration(claimTimeRaw) : null;
+        if (claimTimeRaw && !claimTimeMs) {
+          return interaction.editReply('Invalid claimtime. Use values like `30m`, `2h`, or `1d`.');
+        }
 
         const durMs = durationRaw ? parseDuration(durationRaw) : null;
         const hasGoal = (typeof entriesGoal === 'number' && entriesGoal > 0) || (typeof memberGoal === 'number' && memberGoal > 0);
@@ -8143,6 +8655,8 @@ if (commandName === 'giveaway') {
         const baseDesc = [
           `Ends: ${endsBits.length ? endsBits.join(' • ') : 'When goals are met'}`,
           `Hosted by: <@${interaction.user.id}>`,
+          mode === 'double_or_keep' ? 'Mode: **Double or Keep**' : 'Mode: **Standard**',
+          claimTimeMs ? `Claim window: **${formatDuration(claimTimeMs)}** after end` : null,
           note ? `${note}` : null,
           `Entries: **0**`,
           `Winners: **${winnersCount}**`
@@ -8173,6 +8687,8 @@ if (commandName === 'giveaway') {
           endTime,
           entriesGoal: entriesGoal || null,
           memberGoal: memberGoal || null,
+          mode,
+          claimTimeMs: claimTimeMs || null,
           createdAt: Date.now(),
           ended: false
         });
@@ -8193,10 +8709,6 @@ if (commandName === 'giveaway') {
         const m = await ch.messages.fetch(g.messageId);
         await endGiveawayLogic(g, ch, m);
         await interaction.deleteReply().catch(() => {});
-        return;
-      }
-      if (sub === 'edit') {
-        await promptStickyEditDropdown(interaction);
         return;
       }
       if (sub === 'delete') {
@@ -8264,13 +8776,13 @@ if (commandName === 'giveaway') {
 
               // Reroll replaces the winner — sync the stored list so the
               // claim button only lets the new winner open a ticket.
-              await store.updateGiveaway(g.messageId, { winnerIds: [pick] }).catch(() => {});
+              const rerolledGiveaway = await store.updateGiveaway(g.messageId, { winnerIds: [pick] }).catch(() => null) || { ...g, winnerIds: [pick] };
               const ann = await msg.reply({
                 content: `🎉 Congratulations <@${pick}>, you won **${g.prize}**!`,
               }).catch(() => null);
               if (ann) await store.updateGiveaway(g.messageId, { lastAnnounceMessageId: ann.id }).catch(() => {});
               const claimMsg = await ch.send({
-                components: [buildGiveawayClaimRow(g.messageId)],
+                components: [buildGiveawayClaimRow(rerolledGiveaway)],
                 allowedMentions: { parse: [] },
               }).catch(() => null);
               if (claimMsg) await store.updateGiveaway(g.messageId, { lastClaimMessageId: claimMsg.id }).catch(() => {});
@@ -8285,6 +8797,178 @@ if (commandName === 'giveaway') {
         return;
       }
 
+    }
+
+    if (commandName === 'automod') {
+      if (!isManagerPlus(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 });
+      await interaction.deferReply({ flags: 64 });
+      const sub = options.getSubcommand();
+      const cfg = await store.getAutomodConfig(interaction.guildId).catch(() => ({})) || {};
+
+      if (sub === 'settings') {
+        const eb = new EmbedBuilder()
+          .setColor(0x2b2d31)
+          .setTitle('Automod Settings')
+          .addFields(
+            { name: 'Enabled', value: String(cfg.enabled !== false), inline: true },
+            { name: 'Spam', value: `${cfg.spam_limit || 5} msgs / ${formatDuration(cfg.spam_window_ms || 4000)}`, inline: true },
+            { name: 'Repeat', value: `${cfg.repeat_limit || 2} repeats / ${formatDuration(cfg.repeat_window_ms || 7000)}`, inline: true },
+            { name: 'Whitelist', value: `Users ${(cfg.exempt_user_ids || []).length}; Roles ${(cfg.exempt_role_ids || []).length}; Channels ${(cfg.exempt_channel_ids || []).length}`, inline: false },
+            { name: 'Blacklisted words', value: String((cfg.blocked_words || []).length), inline: true },
+          );
+        return interaction.editReply({ embeds: [eb] });
+      }
+
+      if (sub === 'rule') {
+        const rule = options.getString('rule', true);
+        const enabled = options.getBoolean('enabled');
+        const limit = options.getInteger('limit');
+        const windowRaw = options.getString('window');
+        const patch = { ...cfg };
+        if (rule === 'global' && enabled !== null) patch.enabled = !!enabled;
+        if (rule === 'spam') {
+          if (limit !== null) patch.spam_limit = Math.max(2, Math.min(20, limit));
+          if (windowRaw) patch.spam_window_ms = parseDuration(windowRaw) || patch.spam_window_ms || 4000;
+        }
+        if (rule === 'repeated_text') {
+          if (limit !== null) patch.repeat_limit = Math.max(2, Math.min(10, limit));
+          if (windowRaw) patch.repeat_window_ms = parseDuration(windowRaw) || patch.repeat_window_ms || 7000;
+        }
+        if (rule === 'links' && enabled !== null) {
+          patch.invite_filter_enabled = !!enabled;
+          patch.suspicious_link_filter_enabled = !!enabled;
+        }
+        if (rule === 'caps') {
+          if (enabled !== null) patch.caps_enabled = !!enabled;
+          if (limit !== null) patch.caps_min_chars = Math.max(10, Math.min(200, limit));
+        }
+        if (rule === 'attachments') {
+          if (limit !== null) patch.attachment_limit = Math.max(2, Math.min(10, limit));
+        }
+        await store.setAutomodConfig(interaction.guildId, patch);
+        return interaction.editReply(`Automod rule \`${rule}\` updated.`);
+      }
+
+      if (sub === 'whitelist') {
+        const action = options.getString('action', true);
+        const kind = options.getString('kind', true);
+        const value = options.getString('id');
+        const key = kind === 'user' ? 'exempt_user_ids' : kind === 'role' ? 'exempt_role_ids' : 'exempt_channel_ids';
+        const current = new Set((cfg[key] || []).map(String));
+        if (action === 'list') {
+          const list = [...current];
+          return interaction.editReply(list.length ? `${kind} whitelist:\n${list.map(x => `\`${x}\``).join('\n')}` : `No ${kind} whitelist entries.`);
+        }
+        if (!value) return interaction.editReply('Provide an `id` for add/remove.');
+        const clean = String(value).replace(/[<#@!&>]/g, '').trim();
+        if (action === 'add') current.add(clean);
+        if (action === 'remove') current.delete(clean);
+        await store.setAutomodConfig(interaction.guildId, { ...cfg, [key]: [...current] });
+        return interaction.editReply(`Automod ${kind} whitelist ${action === 'add' ? 'added' : 'removed'}: \`${clean}\`.`);
+      }
+
+      if (sub === 'blacklist') {
+        const action = options.getString('action', true);
+        const phrase = options.getString('phrase');
+        const words = new Set((cfg.blocked_words || []).map(x => String(x).trim()).filter(Boolean));
+        if (action === 'list') {
+          const list = [...words];
+          return interaction.editReply(list.length ? `Blacklisted words/phrases:\n${list.map(x => `\`${x}\``).join('\n')}` : 'No blacklisted words configured.');
+        }
+        if (!phrase) return interaction.editReply('Provide a `phrase` for add/remove.');
+        const clean = phrase.trim().slice(0, 120);
+        if (action === 'add') words.add(clean);
+        if (action === 'remove') words.delete(clean);
+        await store.setAutomodConfig(interaction.guildId, { ...cfg, blocked_words: [...words] });
+        return interaction.editReply(`Automod blacklist ${action === 'add' ? 'added' : 'removed'}: \`${clean}\`.`);
+      }
+    }
+
+    if (commandName === 'antiraid') {
+      if (!isManagerPlus(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 });
+      await interaction.deferReply({ flags: 64 });
+      const sub = options.getSubcommand();
+      const raw = await store.getConfigValue(interaction.guildId, 'ANTIRAID_CONFIG').catch(() => null);
+      let cfg = {};
+      if (raw) { try { cfg = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { cfg = {}; } }
+      cfg.mode ||= 'watch';
+      cfg.whitelist ||= { users: [], roles: [], channels: [] };
+      cfg.thresholds ||= {};
+
+      if (sub === 'settings') {
+        const eb = new EmbedBuilder()
+          .setColor(0x2b2d31)
+          .setTitle('Anti-Raid Settings')
+          .addFields(
+            { name: 'Mode', value: cfg.mode, inline: true },
+            { name: 'Whitelist', value: `Users ${(cfg.whitelist.users || []).length}; Roles ${(cfg.whitelist.roles || []).length}; Channels ${(cfg.whitelist.channels || []).length}`, inline: false },
+          );
+        return interaction.editReply({ embeds: [eb] });
+      }
+
+      if (sub === 'mode') {
+        cfg.mode = options.getString('mode', true);
+        await store.setConfigValue(interaction.guildId, 'ANTIRAID_CONFIG', JSON.stringify(cfg));
+        return interaction.editReply(`Anti-raid mode set to \`${cfg.mode}\`.`);
+      }
+
+      if (sub === 'whitelist') {
+        const action = options.getString('action', true);
+        const kind = options.getString('kind', true);
+        const value = options.getString('id');
+        const key = kind === 'user' ? 'users' : kind === 'role' ? 'roles' : 'channels';
+        const current = new Set((cfg.whitelist[key] || []).map(String));
+        if (action === 'list') {
+          const list = [...current];
+          return interaction.editReply(list.length ? `${kind} anti-raid whitelist:\n${list.map(x => `\`${x}\``).join('\n')}` : `No ${kind} anti-raid whitelist entries.`);
+        }
+        if (!value) return interaction.editReply('Provide an `id` for add/remove.');
+        const clean = String(value).replace(/[<#@!&>]/g, '').trim();
+        if (action === 'add') current.add(clean);
+        if (action === 'remove') current.delete(clean);
+        cfg.whitelist[key] = [...current];
+        await store.setConfigValue(interaction.guildId, 'ANTIRAID_CONFIG', JSON.stringify(cfg));
+        return interaction.editReply(`Anti-raid ${kind} whitelist ${action === 'add' ? 'added' : 'removed'}: \`${clean}\`.`);
+      }
+    }
+
+    if (commandName === 'refund') {
+      if (!canRefundBuilds(interaction.member)) {
+        return interaction.reply({ content: 'Manager+ or Head Builder only.', flags: 64 });
+      }
+      await interaction.deferReply({ flags: 64 });
+      const buildId = options.getString('id', true).trim();
+      const amountRaw = options.getString('amount', true).trim();
+      const reason = options.getString('reason', true).trim();
+      const amount = parseNumber(amountRaw);
+      if (!amount || amount <= 0) return interaction.editReply('Invalid amount. Use formats like `5m`, `500k`, or `500000`.');
+      const result = await store.recordBuildRefund(buildId, {
+        amount,
+        reason,
+        refundedBy: interaction.user.id,
+        now: Date.now()
+      }).catch(() => null);
+      if (!result?.build) return interaction.editReply(`No build found with ID \`${buildId}\`.`);
+      const updated = result.build;
+      if (updated.buildMessageId && updated.buildChannelId) {
+        const buildCh = await client.channels.fetch(updated.buildChannelId).catch(() => null);
+        const buildMsg = buildCh ? await buildCh.messages.fetch(updated.buildMessageId).catch(() => null) : null;
+        if (buildMsg) {
+          await buildMsg.edit({ embeds: [buildTrackingEmbed(updated, 'REFUNDED')], components: [] }).catch(() => {});
+        }
+      }
+      if (updated.ticketChannelId) {
+        const ticketCh = await client.channels.fetch(updated.ticketChannelId).catch(() => null);
+        if (ticketCh?.isTextBased?.()) {
+          await ticketCh.send({
+            embeds: [new EmbedBuilder()
+              .setColor(0xed4245)
+              .setTitle('Build Refunded')
+              .setDescription(`Refunded **${money(result.refund.amount)}**.\nReason: ${result.refund.reason}\nBuilder ledger impact: **${money(result.refund.builderLedgerImpact || 0)}**`)]
+          }).catch(() => {});
+        }
+      }
+      return interaction.editReply(`Refund recorded for \`${buildId}\`: ${money(result.refund.amount)}. Builder ledger impact: ${money(result.refund.builderLedgerImpact || 0)}.`);
     }
 
     // --- AFK ---
@@ -8626,6 +9310,10 @@ ${E_TIME} Created ${created}`)
         const modal = new ModalBuilder().setCustomId('sticky_create_modal').setTitle('Create Sticky Message');
         modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sticky_content').setLabel('Message Text (Optional)').setStyle(TextInputStyle.Paragraph).setRequired(false)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sticky_embed_title').setLabel('Embed Title (Optional)').setStyle(TextInputStyle.Short).setRequired(false)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sticky_embed_desc').setLabel('Embed Description (Optional)').setStyle(TextInputStyle.Paragraph).setRequired(false)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sticky_embed_color').setLabel('Embed Color (Hex)').setStyle(TextInputStyle.Short).setRequired(false)));
         await interaction.showModal(modal); return;
+      }
+      if (sub === 'edit') {
+        await promptStickyEditDropdown(interaction);
+        return;
       }
       if (sub === 'delete') {
         await interaction.deferReply({ flags: 64 });
@@ -8973,7 +9661,7 @@ ${E_TIME} Created ${created}`)
         }
       } catch (e) { console.error('[application] re-render error:', e?.message); }
 
-      const note = panelEdited ? '' : '\n⚠️ Applications panel has not been published yet (or its message is gone). Run `/panel send applications` to publish the updated buttons.';
+      const note = panelEdited ? '' : '\nApplications panel message was not found, so no buttons were refreshed.';
       return interaction.editReply(`✅ **${typeId}** application is now **${closed ? 'CLOSED' : 'OPEN'}**.${note}`);
     }
 
@@ -9099,7 +9787,10 @@ function canceledEmbed(w) {
 }
 function failedEmbed(w, msg) { return new EmbedBuilder().setColor(0xed4245).setDescription(`Error: ${msg}`); }
 function payBuilderRow(buildId) {
-  return [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`build_admin_pay:${buildId}`).setLabel('Pay Builder').setStyle(ButtonStyle.Success))];
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`build_edit_open:${buildId}`).setLabel('Edit').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`build_admin_pay:${buildId}`).setLabel('Pay Builder').setStyle(ButtonStyle.Success)
+  )];
 }
 async function restorePayBuilderButtonFromWatch(watch) {
   try {
@@ -9118,16 +9809,39 @@ async function safeEditOriginal(watch, embeds, enableCancel) { try { if (!watch.
 // "Open Ticket" button shown on a giveaway's congratulations message. Only the
 // stored winners can use it — the giveaway message id is carried in the
 // customId so the handler can look the giveaway (and its winner list) up.
-function buildGiveawayClaimRow(giveawayMessageId) {
-  return new ActionRowBuilder().addComponents(
+function buildGiveawayClaimRow(giveaway) {
+  const g = typeof giveaway === 'string' ? { messageId: giveaway } : normalizeGiveawayClaim(giveaway || {});
+  const messageId = g.messageId || g.id;
+  const claimOpen = g.claimOpen !== false;
+  const buttons = [];
+  if (String(g.mode || '').toLowerCase() === 'double_or_keep') {
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(`gw_keep:${messageId}`)
+        .setLabel('Keep')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(!claimOpen),
+      new ButtonBuilder()
+        .setCustomId(`gw_double:${messageId}`)
+        .setLabel('Double')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(!claimOpen),
+    );
+  }
+  buttons.push(
     new ButtonBuilder()
-      .setCustomId(`gw_claim:${giveawayMessageId}`)
-      .setLabel('Claim')
+      .setCustomId(`gw_claim:${messageId}`)
+      .setLabel(claimOpen ? 'Claim' : 'Claim expired')
       .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!claimOpen)
   );
+  return new ActionRowBuilder().addComponents(...buttons);
 }
 
 async function endGiveawayLogic(g, channel, msg) {
+  const endedAt = Date.now();
+  const claimTimeMs = Math.max(0, Number(g.claimTimeMs || 0));
+  const claimExpiresAt = claimTimeMs ? endedAt + claimTimeMs : null;
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('disabled').setLabel('Ended').setStyle(ButtonStyle.Secondary).setDisabled(true).setEmoji('🎉')
   );
@@ -9140,12 +9854,19 @@ async function endGiveawayLogic(g, channel, msg) {
     winnerText = winnerIds.map(w => `<@${w}>`).join(', ');
   }
   const oldEmbed = msg.embeds[0];
-  const newDesc = `Ended: ${tsR(Date.now())} (${ts(Date.now())})\nHosted by: <@${g.hostId}>\nEntries: **${g.entries.length}**\nWinners: ${winnerText}`;
+  const modeText = String(g.mode || 'standard') === 'double_or_keep' ? '\nMode: **Double or Keep**' : '';
+  const claimText = claimExpiresAt ? `\nClaim expires: ${tsR(claimExpiresAt)} (${ts(claimExpiresAt)})` : '';
+  const newDesc = `Ended: ${tsR(endedAt)} (${ts(endedAt)})\nHosted by: <@${g.hostId}>${modeText}${claimText}\nEntries: **${g.entries.length}**\nWinners: ${winnerText}`;
   await msg.edit({ embeds: [new EmbedBuilder(oldEmbed.data).setColor(0x2F3136).setDescription(newDesc)], components: [row] });
 
   // Persist the winners + end time so the claim button can verify who may
   // open a ticket and the ticket can show how long ago the giveaway ended.
-  await store.updateGiveaway(g.messageId, { winnerIds, endedAt: Date.now() }).catch(() => {});
+  const updatedGiveaway = await store.updateGiveaway(g.messageId, { winnerIds, endedAt, claimExpiresAt }).catch(() => null) || {
+    ...g,
+    winnerIds,
+    endedAt,
+    claimExpiresAt
+  };
 
   // Announce by replying to the original giveaway message
   try {
@@ -9168,7 +9889,7 @@ async function endGiveawayLogic(g, channel, msg) {
     // Claim button posted as its own message so it sits apart from the
     // congratulations line for a cleaner look.
     const claimMsg = await channel.send({
-      components: [buildGiveawayClaimRow(g.messageId)],
+      components: [buildGiveawayClaimRow(updatedGiveaway)],
       allowedMentions: { parse: [] },
     }).catch(() => null);
     if (claimMsg) await store.updateGiveaway(g.messageId, { lastClaimMessageId: claimMsg.id }).catch(() => {});
@@ -9206,6 +9927,19 @@ async function checkGiveaways() {
           }
         }
       }
+    }
+    const allGiveaways = await store.listGiveaways().catch(() => []);
+    for (const g of allGiveaways) {
+      if (!g.ended || !g.claimExpiresAt || g.claimExpired || now < Number(g.claimExpiresAt)) continue;
+      await store.updateGiveaway(g.messageId, { claimExpired: true }).catch(() => {});
+      try {
+        if (!g.lastClaimMessageId) continue;
+        const ch = await client.channels.fetch(g.channelId).catch(() => null);
+        const claimMsg = ch ? await ch.messages.fetch(g.lastClaimMessageId).catch(() => null) : null;
+        if (claimMsg) {
+          await claimMsg.edit({ components: [buildGiveawayClaimRow({ ...g, claimOpen: false })] }).catch(() => {});
+        }
+      } catch {}
     }
   } catch (e) {
     console.error('[Giveaway] checkGiveaways error:', e?.message || e);
@@ -9283,9 +10017,10 @@ async function handleWatchPaid(watchId) {
             const activatedAt = Date.now();
             const buildCh = await client.channels.fetch(C.CHANNEL_BUILD_TRACKING).catch(() => null);
             if (buildCh) {
+              const editBtn    = new ButtonBuilder().setCustomId(`build_edit_open:${job.id}`).setLabel('Edit').setStyle(ButtonStyle.Secondary);
               const doneBtn    = new ButtonBuilder().setCustomId(`build_done:${job.id}`).setLabel('Mark Done').setStyle(ButtonStyle.Success);
               const cancelBtn  = new ButtonBuilder().setCustomId(`build_cancel:${job.id}`).setLabel('Cancel Build').setStyle(ButtonStyle.Danger);
-              const trackRow   = new ActionRowBuilder().addComponents(doneBtn, cancelBtn);
+              const trackRow   = new ActionRowBuilder().addComponents(editBtn, doneBtn, cancelBtn);
               const trackEmbed = buildTrackingEmbed(job, 'PENDING', { customerPaidAt: activatedAt, timestamp: activatedAt });
               const msg = await buildCh.send({ embeds: [trackEmbed], components: [trackRow] }).catch(() => null);
               if (msg) {
@@ -9339,8 +10074,7 @@ async function handleWatchPaid(watchId) {
                 if (buildMsg) {
                   let comps = buildMsg.components;
                   if (job.status === 'AWAITING_PAYOUT') {
-                    const payBtn = new ButtonBuilder().setCustomId(`build_admin_pay:${job.id}`).setLabel('Pay Builder').setStyle(ButtonStyle.Success);
-                    comps = [new ActionRowBuilder().addComponents(payBtn)];
+                    comps = payBuilderRow(job.id);
                   }
                   await buildMsg.edit({ embeds: [buildTrackingEmbed(job, job.status)], components: comps }).catch(() => {});
                 }

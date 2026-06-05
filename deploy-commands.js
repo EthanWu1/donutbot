@@ -10,6 +10,17 @@ if (!APP_TOKEN || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
   process.exit(1);
 }
 
+const configActions = [
+  { name: 'Add', value: 'add' },
+  { name: 'Remove', value: 'remove' },
+  { name: 'List', value: 'list' },
+];
+const whitelistKinds = [
+  { name: 'User', value: 'user' },
+  { name: 'Role', value: 'role' },
+  { name: 'Channel', value: 'channel' },
+];
+
 const commands = [
   // --- HELP ---
   new SlashCommandBuilder()
@@ -38,6 +49,17 @@ const commands = [
       .setName('multiplier')
       .setDescription('Set the global XP multiplier')
       .addNumberOption(o => o.setName('value').setDescription('XP multiplier, e.g. 1, 1.5, 2').setRequired(true))),
+
+  new SlashCommandBuilder()
+    .setName('rank')
+    .setDescription('Show rank, XP, builder points, and staff points')
+    .addUserOption(o => o.setName('user').setDescription('Target user')),
+
+  new SlashCommandBuilder()
+    .setName('apply')
+    .setDescription('Start an application')
+    .addSubcommand(s => s.setName('builder').setDescription('Apply for builder (Rare+)'))
+    .addSubcommand(s => s.setName('staff').setDescription('Apply for staff (Epic+)')),
 
 
   // --- MODERATION ---
@@ -136,6 +158,12 @@ const commands = [
       .addStringOption(o => o.setName('duration').setDescription('Time (e.g. 30m, 1h). Leave empty if using goals.').setRequired(false))
       .addIntegerOption(o => o.setName('entries_goal').setDescription('End when X people join').setRequired(false))
       .addIntegerOption(o => o.setName('member_goal').setDescription('End when server reaches X members').setRequired(false))
+      .addStringOption(o => o.setName('mode').setDescription('Optional giveaway mode').setRequired(false)
+        .addChoices(
+          { name: 'Standard', value: 'standard' },
+          { name: 'Double or Keep', value: 'double_or_keep' },
+        ))
+      .addStringOption(o => o.setName('claimtime').setDescription('How long winners can claim after end, e.g. 30m, 2h').setRequired(false))
       .addStringOption(o => o.setName('note').setDescription('Optional note').setRequired(false)))
     .addSubcommand(s => s.setName('end').setDescription('End a giveaway early')
       .addStringOption(o => o.setName('message_id').setDescription('Message ID').setRequired(true)))
@@ -144,23 +172,50 @@ const commands = [
     .addSubcommand(s => s.setName('reroll').setDescription('Reroll a winner')
       .addStringOption(o => o.setName('message_id').setDescription('Message ID (Optional, defaults to last ended)').setRequired(false))),
 
-
-
-  // --- PANELS (consolidated) ---
   new SlashCommandBuilder()
-    .setName('panel')
-    .setDescription('Publish or list configurable panels')
-    .addSubcommand(s => s.setName('list').setDescription('List available panels'))
-    .addSubcommand(s => s.setName('send').setDescription('Send / refresh a panel')
-      .addStringOption(o => o.setName('type').setDescription('Panel to publish').setRequired(true)
+    .setName('automod')
+    .setDescription('Configure automod')
+    .addSubcommand(s => s.setName('settings').setDescription('View automod settings'))
+    .addSubcommand(s => s.setName('rule').setDescription('Configure an automod rule')
+      .addStringOption(o => o.setName('rule').setDescription('Rule to configure').setRequired(true)
         .addChoices(
-          { name: 'Ticket Center', value: 'ticket_center' },
-          { name: 'Building Services', value: 'building_services' },
-          { name: 'Applications', value: 'applications' },
-          { name: 'Spawner Prices', value: 'spawner_prices' },
-        )))
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+          { name: 'Global enabled', value: 'global' },
+          { name: 'Spam', value: 'spam' },
+          { name: 'Repeated text', value: 'repeated_text' },
+          { name: 'Invites/links', value: 'links' },
+          { name: 'Caps', value: 'caps' },
+          { name: 'Attachments', value: 'attachments' },
+          { name: 'Blacklisted words', value: 'blacklist' },
+        ))
+      .addBooleanOption(o => o.setName('enabled').setDescription('Enable/disable when supported').setRequired(false))
+      .addIntegerOption(o => o.setName('limit').setDescription('Threshold/count when supported').setRequired(false))
+      .addStringOption(o => o.setName('window').setDescription('Time window, e.g. 4s, 10s').setRequired(false)))
+    .addSubcommand(s => s.setName('whitelist').setDescription('Add/remove/list automod whitelist entries')
+      .addStringOption(o => o.setName('action').setDescription('Action').setRequired(true).addChoices(...configActions))
+      .addStringOption(o => o.setName('kind').setDescription('Whitelist kind').setRequired(true).addChoices(...whitelistKinds))
+      .addStringOption(o => o.setName('id').setDescription('User/role/channel ID or mention').setRequired(false)))
+    .addSubcommand(s => s.setName('blacklist').setDescription('Add/remove/list blacklisted words and phrases')
+      .addStringOption(o => o.setName('action').setDescription('Action').setRequired(true).addChoices(...configActions))
+      .addStringOption(o => o.setName('phrase').setDescription('Word or phrase').setRequired(false)))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
+  new SlashCommandBuilder()
+    .setName('antiraid')
+    .setDescription('Configure anti-raid')
+    .addSubcommand(s => s.setName('settings').setDescription('View anti-raid settings'))
+    .addSubcommand(s => s.setName('mode').setDescription('Set anti-raid mode')
+      .addStringOption(o => o.setName('mode').setDescription('Mode').setRequired(true)
+        .addChoices(
+          { name: 'Off', value: 'off' },
+          { name: 'Watch', value: 'watch' },
+          { name: 'Lockdown', value: 'lockdown' },
+          { name: 'Quarantine', value: 'quarantine' },
+        )))
+    .addSubcommand(s => s.setName('whitelist').setDescription('Add/remove/list anti-raid whitelist entries')
+      .addStringOption(o => o.setName('action').setDescription('Action').setRequired(true).addChoices(...configActions))
+      .addStringOption(o => o.setName('kind').setDescription('Whitelist kind').setRequired(true).addChoices(...whitelistKinds))
+      .addStringOption(o => o.setName('id').setDescription('User/role/channel ID or mention').setRequired(false)))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder()
     .setName('ticket')
     .setDescription('Ticket tools')
@@ -221,10 +276,10 @@ const commands = [
     .setDescription('Build tracking tools')
     .addSubcommand(s => s.setName('start').setDescription('Start tracking a new build')
       .addStringOption(o => o.setName('build_name').setDescription('Name of the build (e.g. Witch Farm, Cobblestone Base)').setRequired(true))
-      .addStringOption(o => o.setName('customer_ign').setDescription('Customer IGN').setRequired(true))
-      .addStringOption(o => o.setName('builder_ign').setDescription('Builder IGN (your IGN)').setRequired(true))
-      .addUserOption(o => o.setName('customer_discord').setDescription('Customer Discord user').setRequired(true))
       .addStringOption(o => o.setName('price').setDescription('Total build price (e.g. 5m, 500k)').setRequired(true))
+      .addStringOption(o => o.setName('customer_ign').setDescription('Optional override if the ticket IGN is missing').setRequired(false))
+      .addStringOption(o => o.setName('builder_ign').setDescription('Optional builder IGN override').setRequired(false))
+      .addUserOption(o => o.setName('customer_discord').setDescription('Optional customer Discord override').setRequired(false))
       .addStringOption(o => o.setName('receiver').setDescription('Payment receiver IGN (default iEtZ)').setRequired(false)
         .addChoices(
           { name: 'iEtZ',     value: 'iEtZ' },
@@ -237,9 +292,17 @@ const commands = [
       .addStringOption(o => o.setName('builder_ign').setDescription('New builder IGN').setRequired(false))
       .addStringOption(o => o.setName('customer_ign').setDescription('New customer IGN').setRequired(false))
       .addStringOption(o => o.setName('build_name').setDescription('New build/farm name').setRequired(false)))
-    .addSubcommand(s => s.setName('remove').setDescription('Remove an open build from tracking'))
+    .addSubcommand(s => s.setName('remove').setDescription('Remove a build from the queue/tracking')
+      .addStringOption(o => o.setName('id').setDescription('Build/request ID').setRequired(true)))
     .addSubcommand(s => s.setName('history').setDescription('Show completed build history for a builder')
       .addUserOption(o => o.setName('person').setDescription('The builder to view history for').setRequired(true))),
+
+  new SlashCommandBuilder()
+    .setName('refund')
+    .setDescription('Record a build refund')
+    .addStringOption(o => o.setName('id').setDescription('Build ID').setRequired(true))
+    .addStringOption(o => o.setName('amount').setDescription('Refund amount, e.g. 5m, 500k').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Refund reason').setRequired(true)),
 
   
 // --- PAYWATCH ---
@@ -330,9 +393,10 @@ new SlashCommandBuilder()
     ))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
+/*
 // --- PUBLISH SCHEMATIC ---
 new SlashCommandBuilder()
-  .setName('publish')
+  .setName('publish_removed')
   .setDescription('Manage a schematic submission in this Publish Schematic ticket')
   .addSubcommand(s => s.setName('render').setDescription('Force a fresh render from the latest .litematic'))
   .addSubcommand(s => s.setName('post').setDescription('Publish — or update — this submission in the schematic forum'))
@@ -340,6 +404,7 @@ new SlashCommandBuilder()
   .addSubcommand(s => s.setName('reject').setDescription('Reject this submission and DM the submitter')
     .addStringOption(o => o.setName('reason').setDescription('Why the submission is being rejected').setRequired(true))),
 
+*/
 // --- KELP FARM CATALOG ---
 new SlashCommandBuilder()
   .setName('kelp')

@@ -50,6 +50,16 @@ const DEFAULTS = {
   timeout_3: 600_000,          // 10 min
   timeout_4: 3_600_000,        // 1 hour
   log_channel_id: null,        // set via /set automod_log_channel
+  exempt_user_ids: [],
+  exempt_role_ids: [],
+  exempt_channel_ids: [],
+  blocked_words: [],
+  invite_filter_enabled: true,
+  suspicious_link_filter_enabled: true,
+  caps_enabled: true,
+  caps_min_chars: 25,
+  caps_ratio: 0.75,
+  attachment_limit: 4,
 };
 
 // ── Suspicious / ad link patterns ─────────────────────────────────────────────
@@ -125,6 +135,8 @@ function isExempt(member, cfg) {
   if (!member) return false;
   if (member.permissions?.has(PermissionsBitField.Flags.ManageMessages)) return true;
   if (member.permissions?.has(PermissionsBitField.Flags.Administrator)) return true;
+  const exemptUsers = cfg.exempt_user_ids || [];
+  if (exemptUsers.map(String).includes(String(member.id))) return true;
   const exemptRoles = cfg.exempt_role_ids || [];
   if (exemptRoles.some(rid => member.roles.cache.has(rid))) return true;
   return false;
@@ -271,19 +283,31 @@ async function handleMessage(message, store) {
   // 3 ── Mentions are allowed; only tracked below for ghost-ping logging.
 
   // 3.5 ── Flood / wall-of-text / emoji burst detection ─────────────────────
+  const letters = content.replace(/[^a-z]/gi, '');
+  const upper = letters.replace(/[^A-Z]/g, '');
+  if (cfg.caps_enabled !== false && !isSpamExempt && letters.length >= cfg.caps_min_chars && upper.length / Math.max(1, letters.length) >= cfg.caps_ratio) {
+    await enforce(message, 'Spam', 'avoid excessive caps', cfg, store);
+    return;
+  }
+
   if (!isSpamExempt && hasFloodContent(content)) {
     await enforce(message, 'Spam', 'stop flooding the chat', cfg, store);
     return;
   }
 
+  if (!isSpamExempt && message.attachments?.size >= cfg.attachment_limit) {
+    await enforce(message, 'Spam', 'too many attachments at once', cfg, store);
+    return;
+  }
+
   // 4 ── Invite / ad link filtering ──────────────────────────────────────────
-  if (AD_PATTERNS.some(p => p.test(content))) {
+  if (cfg.invite_filter_enabled !== false && AD_PATTERNS.some(p => p.test(content))) {
     await enforce(message, 'Invite Link', 'no invite links in this server', cfg, store);
     return;
   }
 
   // 5 ── Suspicious link filtering ───────────────────────────────────────────
-  if (SUSPICIOUS_PATTERNS.some(p => p.test(content))) {
+  if (cfg.suspicious_link_filter_enabled !== false && SUSPICIOUS_PATTERNS.some(p => p.test(content))) {
     await enforce(message, 'Suspicious Link', 'suspicious/phishing link detected', cfg, store);
     return;
   }

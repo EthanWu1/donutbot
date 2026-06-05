@@ -5,8 +5,11 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test \"test/*.test.js\"",
+    "test": "node --test test/*.test.js",
     "deploy": "node deploy-commands.js",
+    "data:inspect": "node data-tools.js inspect",
+    "data:backup": "node data-tools.js backup",
+    "data:restore": "node data-tools.js restore",
     "setup-render": "node lib/litematicRender/setupAssets.js && npm run bundle-render",
     "bundle-render": "esbuild lib/litematicRender/bundle-entry.mjs --bundle --format=iife --platform=browser --outfile=lib/litematicRender/assets/deepslate-bundle.js"
   },

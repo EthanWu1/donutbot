@@ -412,7 +412,23 @@ async function handleClaim(interaction, reqId, store) {
   const categoryId = C.TICKET_CATEGORIES.BUILDING;
   if (!categoryId) return interaction.followUp({ content: '❌ Building category is missing in config.', flags: 64 });
 
-  const staffRoleIds = filterCachedRoleIds([C.ROLE_MANAGER, C.ROLE_ADMIN, C.ROLE_CO_OWNER, C.ROLE_OWNER], guild.roles);
+  const staffRoleIds = filterCachedRoleIds([
+    C.ROLE_TRIAL_MOD,
+    C.ROLE_MOD,
+    C.ROLE_CHIEF_MOD,
+    C.ROLE_MANAGER,
+    C.ROLE_ADMIN,
+    C.ROLE_CO_OWNER,
+    C.ROLE_OWNER,
+  ], guild.roles);
+  const builderRoleIds = filterCachedRoleIds([
+    C.ROLE_BUILDER_1,
+    C.ROLE_BUILDER_2,
+    C.ROLE_BUILDER_3,
+    C.ROLE_BUILDER_TIER_1,
+    C.ROLE_BUILDER_TIER_2,
+    C.ROLE_BUILDER_TIER_3,
+  ], guild.roles);
 
   // Channel name: 🟡builder-username
   const builderSlug = interaction.user.username.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 20);
@@ -438,6 +454,11 @@ async function handleClaim(interaction, reqId, store) {
     { id: interaction.user.id, allow: ALLOW },
     { id: req.userId, allow: ALLOW },
     ...staffRoleIds.map(rid => guild.roles.cache.get(rid)).filter(Boolean).map(role => ({ id: role, allow: STAFF_ALLOW })),
+    ...builderRoleIds.map(rid => guild.roles.cache.get(rid)).filter(Boolean).map(role => ({
+      id: role,
+      allow: ALLOW,
+      deny: [PermissionsBitField.Flags.ManageMessages],
+    })),
   ];
 
   let ticketCh;

@@ -2,6 +2,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { randomUUID } = require('node:crypto');
 const { getLevelFromXp } = require('./utils');
+const { applyRefundToBuild } = require('./botFeatures');
 
 // NOTE:
 // lowdb's default writer (steno) uses a fixed temp filename (".data.json.tmp").
@@ -45,6 +46,9 @@ const DEFAULT_DATA = {
   builderFinishedCountsById: {},
   // /build start jobs
   buildJobs: {},
+  refunds: [],
+  pointEvents: [],
+  points: { builders: {}, staff: {} },
   // Weekly staff pay tracking: { weekStart: number, boardMessageId: string|null, members: { [userId]: { paid: bool, streak: number } } }
   staffPay: { weekStart: 0, boardMessageId: null, members: {} },
   staffList: { support: {}, builders: {}, supportMessageId: null, buildersMessageId: null },
@@ -87,6 +91,24 @@ async function safeReadJsonWithBackup(primary, backup) {
   return b;
 }
 
+function envFlag(name) {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env[name] || '').toLowerCase());
+}
+
+function assertDataSafeForStartup(existing, { primaryExists = false, backupExists = false } = {}) {
+  if (envFlag('ALLOW_EMPTY_DATA') || envFlag('DATA_ALLOW_EMPTY')) return;
+  if (!existing && (primaryExists || backupExists)) {
+    throw new Error('Refusing to start: data.json/data.json.bak exists but could not be parsed. Restore a backup or set ALLOW_EMPTY_DATA=true intentionally.');
+  }
+  const minXpRows = Math.max(0, Math.trunc(Number(process.env.DATA_MIN_XP_ROWS || 0) || 0));
+  if (minXpRows > 0) {
+    const xpRows = Array.isArray(existing?.xp) ? existing.xp.length : 0;
+    if (xpRows < minXpRows) {
+      throw new Error(`Refusing to start: XP rows (${xpRows}) are below DATA_MIN_XP_ROWS (${minXpRows}). Check backups before booting.`);
+    }
+  }
+}
+
 function clampArray(arr, max) {
   if (!Array.isArray(arr)) return [];
   if (!Number.isFinite(max) || max <= 0) return [];
@@ -127,7 +149,10 @@ function pruneData(d) {
   d.watches = clampArray(d.watches, 50);         // completed watches accumulate fast
   d.giveaways = clampArray(d.giveaways, 50);
   d.schematics = clampArray(d.schematics, 200);
-  d.xp = clampArray(d.xp, 2000);                // XP is the biggest array
+  // Do not prune XP by default. Losing older XP rows looks like random level
+  // resets to members, and data.json is still small enough for this bot.
+  const xpMax = Number(process.env.DATA_MAX_XP_ROWS || 0);
+  if (xpMax > 0) d.xp = clampArray(d.xp, xpMax);
   if (d.ticketSystem) pruneTicketRecords(d.ticketSystem);
   // Prune finished/cancelled build jobs older than 7 days
   if (d.buildJobs && typeof d.buildJobs === 'object') {
@@ -182,6 +207,11 @@ function normalizeData(d) {
   out.builderWork ||= {};
   out.builderBoard ||= {};
   out.buildJobs ||= {};
+  out.refunds ||= [];
+  out.pointEvents ||= [];
+  out.points ||= { builders: {}, staff: {} };
+  out.points.builders ||= {};
+  out.points.staff ||= {};
   out.builderFinishedCountsById ||= {};
   out.autonick ||= {};
   out.loas ||= [];
@@ -353,7 +383,10 @@ process.once('SIGTERM', async () => {
 
 async function init() {
   if (isReady) return;
+  const primaryExists = !!(await fs.stat(file).catch(() => null));
+  const backupExists = !!(await fs.stat(bakFile).catch(() => null));
   const existing = await safeReadJsonWithBackup(file, bakFile);
+  assertDataSafeForStartup(existing, { primaryExists, backupExists });
   data = normalizeData(existing);
   await writeDb();
   isReady = true;
@@ -650,18 +683,21 @@ async function removeVouchesAmount(userId, guildId, amount) {
 // --- EVENTS ---
 async function createGiveaway(g) { await ensureDb(); dataStore().giveaways.push(g); scheduleDbWrite(); return g; }
 async function getActiveGiveaways() { await ensureDb(); return dataStore().giveaways.filter(g => !g.ended); }
-async function getGiveaway(id) { await ensureDb(); return dataStore().giveaways.find(g => g.messageId === id); }
+function giveawayIdMatches(g, id) {
+  return String(g?.messageId || '') === String(id || '') || String(g?.id || '') === String(id || '');
+}
+async function getGiveaway(id) { await ensureDb(); return dataStore().giveaways.find(g => giveawayIdMatches(g, id)); }
 async function updateGiveaway(messageId, patch) {
   await ensureDb();
-  const g = dataStore().giveaways.find(x => x.messageId === messageId);
+  const g = dataStore().giveaways.find(x => giveawayIdMatches(x, messageId));
   if (!g) return null;
   Object.assign(g, patch || {});
   scheduleDbWrite();
   return g;
 }
 async function addGiveawayEntry(id, uid) { await ensureDb(); const g = dataStore().giveaways.find(x => x.id === id); if(g && !g.entries.includes(uid)) { g.entries.push(uid); scheduleDbWrite(); return true; } return false; }
-async function endGiveaway(id) { await ensureDb(); const g = dataStore().giveaways.find(x => x.messageId === id); if(g) { g.ended = true; scheduleDbWrite(); } return g; }
-async function deleteGiveaway(id) { await ensureDb(); dataStore().giveaways = dataStore().giveaways.filter(g => g.messageId !== id); scheduleDbWrite(); }
+async function endGiveaway(id) { await ensureDb(); const g = dataStore().giveaways.find(x => giveawayIdMatches(x, id)); if(g) { g.ended = true; scheduleDbWrite(); } return g; }
+async function deleteGiveaway(id) { await ensureDb(); dataStore().giveaways = dataStore().giveaways.filter(g => !giveawayIdMatches(g, id)); scheduleDbWrite(); }
 async function listGiveaways(guildId) { await ensureDb(); let list = dataStore().giveaways; if (guildId) list = list.filter(g => g.guildId === guildId); return list.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)); }
 async function getLastEndedGiveaway(guildId) { await ensureDb(); const list = await listGiveaways(guildId); return list.find(g => g.ended) || null; }
 async function addWatch(w) { await ensureDb(); dataStore().watches.push(w); scheduleDbWrite(); return w; }
@@ -812,6 +848,38 @@ async function getTicketStats(guildId) {
   return dataStore().ticketStats?.[guildId] || {};
 }
 
+async function getStaffPointMetrics(guildId, userId) {
+  await ensureDb();
+  const uid = String(userId || '');
+  const gid = String(guildId || '');
+  const stats = dataStore().ticketStats?.[gid]?.[uid] || {};
+  const appSubs = Object.values(dataStore().ticketSystem?.applications?.submissions || {});
+  const applicationReviews = appSubs.filter(s =>
+    String(s?.decidedById || '') === uid &&
+    (!gid || !s?.guildId || String(s.guildId) === gid)
+  ).length;
+  const warnings = (dataStore().warnings || []).filter(w =>
+    String(w?.moderatorId || '') === uid &&
+    (!gid || !w?.guildId || String(w.guildId) === gid)
+  ).length;
+  const strikes = (dataStore().strikes || []).filter(s =>
+    String(s?.moderatorId || '') === uid &&
+    (!gid || !s?.guildId || String(s.guildId) === gid)
+  ).length;
+  const vouchRow = (dataStore().vouches || []).find(v =>
+    String(v?.userId || '') === uid &&
+    (!gid || !v?.guildId || String(v.guildId) === gid)
+  );
+  return {
+    resolvedTickets: Number(stats.closed || 0),
+    claimedTickets: Number(stats.claimed || 0),
+    ticketMessages: Number(stats.messageCount || 0),
+    applicationReviews,
+    validModActions: warnings + strikes,
+    vouches: Array.isArray(vouchRow?.vouchers) ? vouchRow.vouchers.length : 0
+  };
+}
+
 // Applications
 async function listAppTypes() { const ts = await getTicketSystem(); return ts.applications.types || {}; }
 async function getAppType(id) { const ts = await getTicketSystem(); return ts.applications.types?.[id] || null; }
@@ -957,6 +1025,23 @@ async function listBuildRecords(guildId, opts) {
   return filtered.slice().sort((a,b) => (b.at||0) - (a.at||0));
 }
 
+async function getBuilderPointMetrics(guildId, userId) {
+  await ensureDb();
+  const records = await listBuildRecordsByDiscord(guildId, userId);
+  const finished = records.filter(r => String(r.status || 'FINISHED').toUpperCase() === 'FINISHED');
+  const amount = finished.reduce((sum, r) => sum + Number(r.price ?? r.amount ?? 0), 0);
+  const refunds = (dataStore().refunds || []).filter(r => {
+    const job = dataStore().buildJobs?.[r.buildId];
+    return job && String(job.builderDiscordId || '') === String(userId) && (!guildId || String(job.guildId || '') === String(guildId));
+  });
+  return {
+    completedBuilds: finished.length,
+    amount,
+    refunds: refunds.length,
+    records: finished
+  };
+}
+
 async function getBuilderFinishedCounts(guildId) {
   await ensureDb();
   return dataStore().builderFinishedCounts?.[guildId] || {};
@@ -983,6 +1068,72 @@ async function updateBuildJob(id, patch) {
   Object.assign(j, patch);
   scheduleDbWrite();
   return j;
+}
+
+async function recordBuildRefund(buildId, refund) {
+  await ensureDb();
+  const id = String(buildId || '').trim();
+  const job = dataStore().buildJobs?.[id];
+  if (!job) return null;
+  dataStore().refunds ||= [];
+
+  const refundAmount = Math.max(0, Math.trunc(Number(refund?.amount) || 0));
+  const taxRate = Number.isFinite(Number(job.taxRate)) ? Number(job.taxRate) : 0.90;
+  const builderPayout = Math.floor(Number(job.price || 0) * taxRate);
+  const payoutWatch = job.builderPaywatchId
+    ? (dataStore().watches || []).find(w => String(w?.id || '') === String(job.builderPaywatchId))
+    : null;
+  const builderAlreadyPaid = !!job.finalizedAt ||
+    String(job.status || '').toUpperCase() === 'COMPLETE' ||
+    ['PAID', 'DELIVERED'].includes(String(payoutWatch?.status || '').toUpperCase());
+  const builderLedgerImpact = builderAlreadyPaid ? Math.min(refundAmount, builderPayout) : 0;
+  const record = {
+    id: refund?.id || randomUUID(),
+    buildId: id,
+    amount: refundAmount,
+    reason: String(refund?.reason || 'No reason provided').slice(0, 500),
+    refundedBy: refund?.refundedBy ? String(refund.refundedBy) : null,
+    refundedAt: Number(refund?.refundedAt || refund?.now || Date.now()),
+    builderLedgerImpact
+  };
+  const updated = applyRefundToBuild(job, record);
+  dataStore().buildJobs[id] = updated;
+  dataStore().refunds.push(record);
+  scheduleDbWrite();
+  return { build: updated, refund: record };
+}
+
+function monthKey(ts = Date.now()) {
+  return new Date(ts).toISOString().slice(0, 7);
+}
+
+async function addPoints(kind, userId, guildId, amount, reason, meta = {}) {
+  await ensureDb();
+  const bucketName = kind === 'staff' ? 'staff' : 'builders';
+  dataStore().points ||= { builders: {}, staff: {} };
+  dataStore().points[bucketName] ||= {};
+  const key = `${guildId}:${userId}`;
+  const profile = dataStore().points[bucketName][key] || { userId, guildId, lifetime: 0, monthly: {}, events: 0 };
+  const value = Math.trunc(Number(amount) || 0);
+  const month = monthKey(meta.timestamp || Date.now());
+  profile.lifetime += value;
+  profile.monthly[month] = (profile.monthly[month] || 0) + value;
+  profile.events += 1;
+  dataStore().points[bucketName][key] = profile;
+  const event = { id: randomUUID(), kind: bucketName, userId, guildId, amount: value, reason, timestamp: Date.now(), meta };
+  dataStore().pointEvents ||= [];
+  dataStore().pointEvents.push(event);
+  scheduleDbWrite();
+  return { profile, event };
+}
+
+async function getPoints(kind, userId, guildId) {
+  await ensureDb();
+  const bucketName = kind === 'staff' ? 'staff' : 'builders';
+  const key = `${guildId}:${userId}`;
+  const profile = dataStore().points?.[bucketName]?.[key] || { userId, guildId, lifetime: 0, monthly: {}, events: 0 };
+  const month = monthKey();
+  return { ...profile, currentMonth: profile.monthly?.[month] || 0 };
 }
 
 async function deleteBuildJob(id) {
@@ -1409,8 +1560,8 @@ module.exports = {
   setGuildTheme, getGuildTheme,
   setBuilderWork, getBuilderWork, listBuilderWork,
   setBuilderBoard, getBuilderBoard, listBuilderBoards,
-  addBuildRecord, listBuildRecords, getBuilderFinishedCounts, getBuilderFinishedCountsById, listBuildRecordsByDiscord,
-  addBuildJob, getBuildJob, updateBuildJob, deleteBuildJob, listBuildJobs,
+  addBuildRecord, listBuildRecords, getBuilderFinishedCounts, getBuilderFinishedCountsById, listBuildRecordsByDiscord, getBuilderPointMetrics,
+  addBuildJob, getBuildJob, updateBuildJob, deleteBuildJob, listBuildJobs, recordBuildRefund, addPoints, getPoints,
   setAfk, clearAfk, getAfk,
   getReceiverIgn, getReceiverIgnGlobal, setReceiverIgnGlobal, setChannelReceiverIgn, clearChannelReceiverIgn,
   getXpMultiplierGlobal, setXpMultiplierGlobal, getChannelXpMultiplier, setChannelXpMultiplier, clearChannelXpMultiplier,
@@ -1426,7 +1577,7 @@ module.exports = {
   getTicketSystem, getTicketConfig, setTicketConfig,
   listTicketPanels, getTicketPanel, setTicketPanel, deleteTicketPanel,
   nextTicketId, createTicketRecord, getTicketRecord, updateTicketRecord, deleteTicketRecord, findOpenTicketByUserButton, listOpenSpawnerTickets,
-  recordTicketResponse, recordTicketClosed, recordTicketClaimed, recordTicketOpened, recordTicketRenamed, recordTicketMessage, getTicketStats,
+  recordTicketResponse, recordTicketClosed, recordTicketClaimed, recordTicketOpened, recordTicketRenamed, recordTicketMessage, getTicketStats, getStaffPointMetrics,
   listAppTypes, getAppType, setAppType, deleteAppType, createAppSubmission, getAppSubmission, updateAppSubmission,
 getAutoNickConfig, setAutoNickPrefix, seedAutoNickDefaults,
 addLoa, getLoas, revokeLoa, getActiveLoa,

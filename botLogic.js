@@ -13,7 +13,11 @@ function isSpawnerButton(buttonKey) {
 }
 
 function getTicketViewerRoleIds({ buttonKey, isBuilding, staffRoleIds, builderRoleIds, spawnerRoleId, config }) {
-  if (isBuilding) return uniq(builderRoleIds);
+  if (isBuilding) return uniq([...(staffRoleIds || []), ...(builderRoleIds || [])]);
+  const key = String(buttonKey || '').toLowerCase();
+  if (key.startsWith('gw_') || key.includes('giveaway') || key.includes('reward')) {
+    return uniq([...(staffRoleIds || []), ...(builderRoleIds || [])]);
+  }
 
   if (isSpawnerButton(buttonKey)) {
     // Spawner tickets are restricted to mod-and-above plus the dedicated
