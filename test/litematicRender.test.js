@@ -2,27 +2,24 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 const nbt = require('prismarine-nbt');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { ensureAssets } = require('../lib/litematicRender/setupAssets');
-const { getBrowserLaunchOptions } = require('../lib/litematicRender/renderer');
-
-const VIEWER_URL = pathToFileURL(path.join(__dirname, '..', 'lib', 'litematicRender', 'viewer.html')).href;
+const { getBrowserLaunchOptions, startAssetServer, stopAssetServer } = require('../lib/litematicRender/renderer');
 
 let browser;
 let page;
 
 async function launchViewer() {
   await ensureAssets();
+  const origin = await startAssetServer();
   const puppeteer = require('puppeteer');
   browser = await puppeteer.launch(await getBrowserLaunchOptions());
   page = await browser.newPage();
   page.on('pageerror', (err) => {
     throw err;
   });
-  await page.goto(VIEWER_URL, { waitUntil: 'load', timeout: 60_000 });
+  await page.goto(`${origin}/viewer.html`, { waitUntil: 'load', timeout: 60_000 });
   await page.waitForFunction(() => window.__ready === true, { timeout: 30_000 });
 }
 
@@ -31,6 +28,7 @@ test.before(launchViewer);
 test.after(async () => {
   if (page) await page.close();
   if (browser) await browser.close();
+  await stopAssetServer();
 });
 
 async function renderPayload(payload, opts = {}) {
