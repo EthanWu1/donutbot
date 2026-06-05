@@ -70,6 +70,7 @@ const {
   shouldAiRespond,
   resolveAiModel,
   buildAiPersonalityPrompt,
+  buildAiConversationPrompt,
 } = require('./botFeatures');
 
 // All litematic rendering now goes through the shared render service
@@ -4571,12 +4572,70 @@ async function updateVouchboard(guild) {
   }
 }
 
+function cleanAiDiscordContent(content, botId = client.user?.id) {
+  return String(content || '')
+    .replace(botId ? new RegExp(`<@!?${botId}>`, 'g') : /$^/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function aiContextEntryFromMessage(msg) {
+  if (!msg) return null;
+  const content = cleanAiDiscordContent(msg.content);
+  if (!content) return null;
+  return {
+    id: msg.id,
+    authorName: msg.member?.displayName || msg.author?.globalName || msg.author?.username || 'User',
+    isBot: msg.author?.id === client.user?.id,
+    content,
+    createdTimestamp: msg.createdTimestamp || 0
+  };
+}
+
+async function fetchReferencedDiscordMessage(message) {
+  const messageId = message.reference?.messageId;
+  if (!messageId || !message.channel?.messages?.fetch) return null;
+  return message.channel.messages.fetch(messageId).catch(() => null);
+}
+
+async function fetchAiReplyChain(message, { maxMessages = 10 } = {}) {
+  const chain = [];
+  const seen = new Set([message.id]);
+  let nextId = message.reference?.messageId || null;
+
+  while (nextId && chain.length < maxMessages && !seen.has(nextId)) {
+    seen.add(nextId);
+    const referenced = await message.channel.messages.fetch(nextId).catch(() => null);
+    if (!referenced) break;
+    const entry = aiContextEntryFromMessage(referenced);
+    if (entry) chain.push(entry);
+    nextId = referenced.reference?.messageId || null;
+  }
+
+  return chain.reverse();
+}
+
+async function fetchRecentAiBotReplies(message, { limit = 3, scan = 50, excludeIds = new Set() } = {}) {
+  if (!message.channel?.messages?.fetch || !client.user?.id) return [];
+  const fetched = await message.channel.messages.fetch({ limit: scan }).catch(() => null);
+  if (!fetched) return [];
+  return [...fetched.values()]
+    .filter(msg => msg.author?.id === client.user.id && msg.id !== message.id && !excludeIds.has(msg.id))
+    .sort((a, b) => (a.createdTimestamp || 0) - (b.createdTimestamp || 0))
+    .slice(-limit)
+    .map(aiContextEntryFromMessage)
+    .filter(Boolean);
+}
+
 async function maybeRespondWithAi(message) {
   try {
     const mentioned = message.mentions?.users?.has?.(client.user.id) || String(message.content || '').includes(`<@${client.user.id}>`);
+    const referencedMessage = await fetchReferencedDiscordMessage(message);
+    const repliedToBot = referencedMessage?.author?.id === client.user?.id;
     const state = shouldAiRespond({
       enabled: AI_ENABLED,
       mentioned,
+      repliedToBot,
       isBot: message.author?.bot,
       now: Date.now(),
       lastUserResponseAt: aiCooldowns.get(message.author.id) || 0,
@@ -4591,7 +4650,7 @@ async function maybeRespondWithAi(message) {
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 800);
-    const prompt = clean || 'Say hi.';
+    const basePrompt = clean || 'Say hi.';
     const authorMember = message.member || (message.guild ? await message.guild.members.fetch(message.author.id).catch(() => null) : null);
     const authorHasOwnerRole = Boolean(C.ROLE_OWNER && authorMember?.roles?.cache?.has?.(C.ROLE_OWNER));
     const configuredOwnerId = String(
@@ -4628,6 +4687,15 @@ async function maybeRespondWithAi(message) {
       currentUserName: authorMember?.displayName || message.author.username,
       isOwner,
       extraServerContext: process.env.AI_SERVER_CONTEXT || ''
+    });
+    const replyChain = repliedToBot ? await fetchAiReplyChain(message) : [];
+    const chainIds = new Set(replyChain.map(entry => entry.id).filter(Boolean));
+    const recentBotReplies = await fetchRecentAiBotReplies(message, { excludeIds: chainIds });
+    const prompt = buildAiConversationPrompt({
+      currentUserName: authorMember?.displayName || message.author.username,
+      currentPrompt: basePrompt,
+      replyChain,
+      recentBotReplies
     });
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',

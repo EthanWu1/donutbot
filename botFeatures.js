@@ -180,10 +180,10 @@ function getStaffIncentives({ monthly = 0, lifetime = 0 } = {}) {
   return incentives;
 }
 
-function shouldAiRespond({ enabled, mentioned, isBot, now = Date.now(), lastUserResponseAt = 0, cooldownMs = 60_000 } = {}) {
+function shouldAiRespond({ enabled, mentioned, repliedToBot = false, isBot, now = Date.now(), lastUserResponseAt = 0, cooldownMs = 60_000 } = {}) {
   if (!enabled) return { allowed: false, reason: 'disabled' };
   if (isBot) return { allowed: false, reason: 'bot' };
-  if (!mentioned) return { allowed: false, reason: 'not_mentioned' };
+  if (!mentioned && !repliedToBot) return { allowed: false, reason: 'not_triggered' };
   if (now - lastUserResponseAt < cooldownMs) return { allowed: false, reason: 'cooldown' };
   return { allowed: true };
 }
@@ -241,6 +241,49 @@ function buildAiPersonalityPrompt({
   ].join('\n');
 }
 
+function compactAiContextText(value, maxLength = 220) {
+  const text = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function formatAiContextEntry(entry = {}, fallbackName = 'User') {
+  const name = compactAiContextText(entry.authorName || entry.name || (entry.isBot ? 'DonutBot' : fallbackName), 40) || fallbackName;
+  const content = compactAiContextText(entry.content || entry.cleanContent || entry.text || '', 220);
+  if (!content) return null;
+  return `${name}: ${content}`;
+}
+
+function buildAiConversationPrompt({
+  currentUserName = 'User',
+  currentPrompt = '',
+  replyChain = [],
+  recentBotReplies = []
+} = {}) {
+  const sections = [];
+  const cleanCurrentUserName = compactAiContextText(currentUserName || 'User', 40) || 'User';
+  const cleanPrompt = compactAiContextText(currentPrompt || 'Say hi.', 800) || 'Say hi.';
+  const chainLines = (replyChain || [])
+    .slice(-10)
+    .map(entry => formatAiContextEntry(entry, cleanCurrentUserName))
+    .filter(Boolean);
+  const recentBotLines = (recentBotReplies || [])
+    .slice(-3)
+    .map(entry => formatAiContextEntry({ ...entry, authorName: entry.authorName || entry.name || 'DonutBot', isBot: true }, 'DonutBot'))
+    .filter(Boolean);
+
+  if (chainLines.length) {
+    sections.push(`Conversation being replied to (oldest to newest):\n${chainLines.join('\n')}`);
+  }
+  if (recentBotLines.length) {
+    sections.push(`Recent DonutBot replies in this channel (oldest to newest, max 3):\n${recentBotLines.join('\n')}`);
+  }
+  sections.push(`Current message from ${cleanCurrentUserName}: ${cleanPrompt}`);
+  return sections.join('\n\n');
+}
+
 function shouldSyncTicketPermissions({ parentId, buildCategoryIds = [], giveawayCategoryIds = [] } = {}) {
   const parent = String(parentId || '');
   if (buildCategoryIds.map(String).includes(parent)) return { shouldSync: true, type: 'build' };
@@ -267,5 +310,6 @@ module.exports = {
   shouldAiRespond,
   resolveAiModel,
   buildAiPersonalityPrompt,
+  buildAiConversationPrompt,
   shouldSyncTicketPermissions
 };

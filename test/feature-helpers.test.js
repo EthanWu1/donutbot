@@ -17,7 +17,8 @@ const {
   shouldSyncTicketPermissions,
   shouldAiRespond,
   resolveAiModel,
-  buildAiPersonalityPrompt
+  buildAiPersonalityPrompt,
+  buildAiConversationPrompt
 } = require('../botFeatures');
 
 function memberWithRoles(roleIds = [], roleNames = []) {
@@ -189,6 +190,16 @@ test('ai responder only responds to mentions when enabled and not cooled down', 
     lastUserResponseAt: 9_000,
     cooldownMs: 5_000
   }).allowed, false);
+
+  assert.equal(shouldAiRespond({
+    enabled: true,
+    mentioned: false,
+    repliedToBot: true,
+    isBot: false,
+    now: 10_000,
+    lastUserResponseAt: 0,
+    cooldownMs: 5_000
+  }).allowed, true);
 });
 
 test('ai model defaults to current cheapest Haiku when unset', () => {
@@ -220,4 +231,32 @@ test('ai personality prompt is server-aware and owner-safe while allowing light 
   assert.match(prompt, /light roasts/i);
   assert.match(prompt, /Never use slurs/i);
   assert.match(prompt, /embarrass/i);
+});
+
+test('ai conversation prompt includes reply chain and only the last three bot replies', () => {
+  const prompt = buildAiConversationPrompt({
+    currentUserName: 'Builder One',
+    currentPrompt: 'what did you mean?',
+    replyChain: [
+      { authorName: 'Builder One', isBot: false, content: 'rate my dirt hut' },
+      { authorName: 'DonutBot', isBot: true, content: 'That dirt hut has starter base energy.' },
+      { authorName: 'Builder One', isBot: false, content: 'keep going' }
+    ],
+    recentBotReplies: [
+      { content: 'old reply one' },
+      { content: 'recent reply two' },
+      { content: 'recent reply three' },
+      { content: 'recent reply four' }
+    ]
+  });
+
+  assert.match(prompt, /Conversation being replied to/);
+  assert.match(prompt, /Builder One: rate my dirt hut/);
+  assert.match(prompt, /DonutBot: That dirt hut has starter base energy/);
+  assert.match(prompt, /Current message from Builder One: what did you mean/);
+  assert.doesNotMatch(prompt, /old reply one/);
+  assert.match(prompt, /recent reply two/);
+  assert.match(prompt, /recent reply three/);
+  assert.match(prompt, /recent reply four/);
+  assert.ok(prompt.indexOf('Builder One: rate my dirt hut') < prompt.indexOf('DonutBot: That dirt hut'));
 });
