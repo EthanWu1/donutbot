@@ -4,6 +4,8 @@ const DEFAULT_ROLE_IDS = {
   headBuilder: '1483584432735785101'
 };
 
+const DEFAULT_AI_MODEL = 'claude-haiku-4-5-20251001';
+
 function clampNumber(value, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return min;
@@ -186,6 +188,11 @@ function shouldAiRespond({ enabled, mentioned, isBot, now = Date.now(), lastUser
   return { allowed: true };
 }
 
+function resolveAiModel(env = process.env) {
+  const configured = String(env.AI_MODEL || env.ANTHROPIC_MODEL || env.CLAUDE_MODEL || '').trim();
+  return configured || DEFAULT_AI_MODEL;
+}
+
 function shouldSyncTicketPermissions({ parentId, buildCategoryIds = [], giveawayCategoryIds = [] } = {}) {
   const parent = String(parentId || '');
   if (buildCategoryIds.map(String).includes(parent)) return { shouldSync: true, type: 'build' };
@@ -195,6 +202,7 @@ function shouldSyncTicketPermissions({ parentId, buildCategoryIds = [], giveaway
 
 module.exports = {
   DEFAULT_ROLE_IDS,
+  DEFAULT_AI_MODEL,
   calculateBuilderPoints,
   calculateStaffPoints,
   roleIdsFromMember,
@@ -209,5 +217,6 @@ module.exports = {
   getBuilderIncentives,
   getStaffIncentives,
   shouldAiRespond,
+  resolveAiModel,
   shouldSyncTicketPermissions
 };

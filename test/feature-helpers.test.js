@@ -15,7 +15,8 @@ const {
   getBuilderIncentives,
   getStaffIncentives,
   shouldSyncTicketPermissions,
-  shouldAiRespond
+  shouldAiRespond,
+  resolveAiModel
 } = require('../botFeatures');
 
 function memberWithRoles(roleIds = [], roleNames = []) {
@@ -187,4 +188,10 @@ test('ai responder only responds to mentions when enabled and not cooled down', 
     lastUserResponseAt: 9_000,
     cooldownMs: 5_000
   }).allowed, false);
+});
+
+test('ai model defaults to current cheapest Haiku when unset', () => {
+  assert.equal(resolveAiModel({}), 'claude-haiku-4-5-20251001');
+  assert.equal(resolveAiModel({ AI_MODEL: 'custom-model' }), 'custom-model');
+  assert.equal(resolveAiModel({ CLAUDE_MODEL: 'claude-alt' }), 'claude-alt');
 });

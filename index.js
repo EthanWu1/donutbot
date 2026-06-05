@@ -68,6 +68,7 @@ const {
   getBuilderIncentives,
   getStaffIncentives,
   shouldAiRespond,
+  resolveAiModel,
 } = require('./botFeatures');
 
 // All litematic rendering now goes through the shared render service
@@ -431,7 +432,7 @@ const HEAD_BUILDER_ROLE_ID = process.env.HEAD_BUILDER_ROLE_ID || C.ROLE_BUILDER_
 const AI_ENABLED = process.env.AI_ENABLED === undefined
   ? !!process.env.ANTHROPIC_API_KEY
   : ['1', 'true', 'yes', 'on'].includes(String(process.env.AI_ENABLED).toLowerCase());
-const AI_MODEL = process.env.AI_MODEL || 'claude-3-haiku-20240307';
+const AI_MODEL = resolveAiModel(process.env);
 const AI_COOLDOWN_MS = Math.max(10_000, Number(process.env.AI_COOLDOWN_MS || 60_000));
 const aiCooldowns = new Map();
 // Category where the Members/Channels/Roles stat voice channels live.
@@ -4605,7 +4606,11 @@ async function maybeRespondWithAi(message) {
         messages: [{ role: 'user', content: prompt }]
       })
     });
-    if (!res.ok) return;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`[ai] Anthropic rejected model ${AI_MODEL}: ${res.status} ${body.slice(0, 300)}`);
+      return;
+    }
     const data = await res.json().catch(() => null);
     const text = (data?.content || []).map(part => part?.text || '').join(' ').trim().slice(0, 600);
     if (!text) return;
