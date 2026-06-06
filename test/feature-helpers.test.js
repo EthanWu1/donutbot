@@ -85,6 +85,7 @@ test('staff points emphasize closed tickets and devalue raw messages', () => {
 
 test('point progress uses builder and expanded staff rank thresholds', () => {
   assert.deepEqual(POINT_ROLE_THRESHOLDS.builder, [
+    { points: 0, label: 'Tier 1 Builder' },
     { points: 25, label: 'Tier 2 Builder' },
     { points: 75, label: 'Tier 3 Builder' }
   ]);
@@ -99,6 +100,17 @@ test('point progress uses builder and expanded staff rank thresholds', () => {
     progressPoints: 15,
     neededPoints: 50,
     ratio: 0.3,
+    complete: false
+  });
+
+  assert.deepEqual(getRoleAwarePointProgress('builder', 0, 'Tier 1 Builder'), {
+    currentLabel: 'Tier 1 Builder',
+    nextLabel: 'Tier 2 Builder',
+    currentFloor: 0,
+    nextPoints: 25,
+    progressPoints: 0,
+    neededPoints: 25,
+    ratio: 0,
     complete: false
   });
 

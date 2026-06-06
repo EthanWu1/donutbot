@@ -3999,7 +3999,7 @@ function antiraidWhitelistText(cfg = {}) {
 
 function hasStaffOrBuilderCategory(member, category, saved = {}, calculated = 0) {
   if (category === 'builder') return isBuilderMember(member) || Number(saved.currentMonth || 0) || Number(saved.lifetime || 0) || Number(calculated || 0);
-  if (category === 'staff') return isStaffMember(member, null) || member?.permissions?.has?.(PermissionsBitField.Flags.Administrator) || Number(saved.currentMonth || 0) || Number(saved.lifetime || 0) || Number(calculated || 0);
+  if (category === 'staff') return !!pointRoleLabelForMember(member, 'staff');
   return false;
 }
 
@@ -4085,8 +4085,8 @@ function buildPointProgressImage({ categories = [] } = {}) {
   return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'points-progress.png' });
 }
 
-function estimatedLifetimePoints(saved = {}, monthlyCalculated = 0) {
-  return Math.max(0, Math.round((Number(saved.lifetime || 0) + Number(monthlyCalculated || 0) - Number(saved.currentMonth || 0)) * 10) / 10);
+function dataLifetimePoints(pointResult = {}, saved = {}) {
+  return Math.max(0, Math.round((Number(pointResult.total || 0) + Number(saved.lifetime || 0)) * 10) / 10);
 }
 
 function pointsManageRows(userId) {
@@ -4106,8 +4106,16 @@ async function buildPointsPayload(guild, targetUser, viewerMember) {
   ]);
   const builderPoints = calculateBuilderPoints({ ...builderMetrics, manual: builderSaved.currentMonth || 0 });
   const staffPoints = calculateStaffPoints({ ...staffMetrics, manual: staffSaved.currentMonth || 0 });
-  const builderLifetime = estimatedLifetimePoints(builderSaved, builderPoints.total);
-  const staffLifetime = estimatedLifetimePoints(staffSaved, staffPoints.total);
+  const builderLifetimePoints = calculateBuilderPoints({
+    completedBuilds: builderMetrics.lifetimeCompletedBuilds || 0,
+    amount: builderMetrics.lifetimeAmount || 0,
+    avoidableRefund: Number(builderMetrics.lifetimeRefunds || 0) > 0,
+  });
+  const staffLifetimePoints = calculateStaffPoints({
+    ...(staffMetrics.lifetime || {}),
+  });
+  const builderLifetime = dataLifetimePoints(builderLifetimePoints, builderSaved);
+  const staffLifetime = dataLifetimePoints(staffLifetimePoints, staffSaved);
   const displayName = member?.displayName || targetUser.displayName || targetUser.username;
   const embed = new EmbedBuilder()
     .setColor(0x2b2d31)

@@ -23,6 +23,7 @@ function resolveBuildPaymentReceiver() {
 
 const POINT_ROLE_THRESHOLDS = {
   builder: [
+    { points: 0, label: 'Tier 1 Builder' },
     { points: 25, label: 'Tier 2 Builder' },
     { points: 75, label: 'Tier 3 Builder' }
   ],

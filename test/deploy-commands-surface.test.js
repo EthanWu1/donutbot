@@ -123,3 +123,10 @@ test('refund flow has an action button and payout deduction tracking', () => {
   assert.match(indexSource, /resolveHeadAdminRoleId/);
   assert.match(indexSource, /toLowerCase\(\) === 'head admin'/);
 });
+
+test('points panel uses data-derived lifetime metrics and staff role visibility', () => {
+  assert.match(indexSource, /builderMetrics\.lifetimeAmount/);
+  assert.match(indexSource, /staffMetrics\.lifetime/);
+  assert.match(indexSource, /if \(category === 'staff'\) return !!pointRoleLabelForMember\(member, 'staff'\)/);
+  assert.doesNotMatch(indexSource, /category === 'staff'[\s\S]{0,180}Number\(saved\.currentMonth/);
+});

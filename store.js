@@ -922,34 +922,39 @@ async function getStaffPointMetrics(guildId, userId) {
   const gid = String(guildId || '');
   const month = monthKey();
   const monthStart = Date.parse(`${month}-01T00:00:00.000Z`);
-  const stats = dataStore().ticketStats?.[gid]?.[uid]?.monthly?.[month] || {};
+  const row = dataStore().ticketStats?.[gid]?.[uid] || {};
+  const stats = row?.monthly?.[month] || {};
   const appSubs = Object.values(dataStore().ticketSystem?.applications?.submissions || {});
-  const applicationReviews = appSubs.filter(s =>
+  const reviewedApps = appSubs.filter(s =>
     String(s?.decidedById || '') === uid &&
-    (!gid || !s?.guildId || String(s.guildId) === gid) &&
+    (!gid || !s?.guildId || String(s.guildId) === gid)
+  );
+  const applicationReviews = reviewedApps.filter(s =>
     Number(s?.decidedAt || s?.updatedAt || 0) >= monthStart
   ).length;
-  const warnings = (dataStore().warnings || []).filter(w =>
+  const allWarnings = (dataStore().warnings || []).filter(w =>
     String(w?.moderatorId || '') === uid &&
-    (!gid || !w?.guildId || String(w.guildId) === gid) &&
-    Number(w?.timestamp || 0) >= monthStart
-  ).length;
-  const strikes = (dataStore().strikes || []).filter(s =>
+    (!gid || !w?.guildId || String(w.guildId) === gid)
+  );
+  const warnings = allWarnings.filter(w => Number(w?.timestamp || 0) >= monthStart).length;
+  const allStrikes = (dataStore().strikes || []).filter(s =>
     String(s?.moderatorId || '') === uid &&
-    (!gid || !s?.guildId || String(s.guildId) === gid) &&
-    Number(s?.timestamp || 0) >= monthStart
-  ).length;
+    (!gid || !s?.guildId || String(s.guildId) === gid)
+  );
+  const strikes = allStrikes.filter(s => Number(s?.timestamp || 0) >= monthStart).length;
   const vouchRow = (dataStore().vouches || []).find(v =>
     String(v?.userId || '') === uid &&
     (!gid || !v?.guildId || String(v.guildId) === gid)
   );
-  const hostedGiveawayPrizeValue = (dataStore().giveaways || [])
-    .filter(g =>
-      String(g?.hostId || '') === uid &&
-      (!gid || !g?.guildId || String(g.guildId) === gid) &&
-      Number(g?.createdAt || g?.endedAt || 0) >= monthStart
-    )
+  const hostedGiveaways = (dataStore().giveaways || []).filter(g =>
+    String(g?.hostId || '') === uid &&
+    (!gid || !g?.guildId || String(g.guildId) === gid)
+  );
+  const hostedGiveawayPrizeValue = hostedGiveaways
+    .filter(g => Number(g?.createdAt || g?.endedAt || 0) >= monthStart)
     .reduce((sum, g) => sum + giveawayPrizeValue(g), 0);
+  const lifetimeGiveawayPrizeValue = hostedGiveaways.reduce((sum, g) => sum + giveawayPrizeValue(g), 0);
+  const vouches = Array.isArray(vouchRow?.vouchers) ? vouchRow.vouchers.length : 0;
   return {
     resolvedTickets: Number(stats.closed || 0),
     claimedTickets: Number(stats.claimed || 0),
@@ -960,7 +965,19 @@ async function getStaffPointMetrics(guildId, userId) {
     applicationReviews,
     validModActions: warnings + strikes,
     giveawayPrizeValue: hostedGiveawayPrizeValue,
-    vouches: Array.isArray(vouchRow?.vouchers) ? vouchRow.vouchers.length : 0
+    vouches,
+    lifetime: {
+      resolvedTickets: Number(row.closed || 0),
+      claimedTickets: Number(row.claimed || 0),
+      renamedTickets: Number(row.renameCount || 0),
+      ticketMessages: Number(row.messageCount || 0),
+      supportTicketMessages: Number(row.messageCount || 0),
+      standardMessages: Number(row.standardMessageCount || 0),
+      applicationReviews: reviewedApps.length,
+      validModActions: allWarnings.length + allStrikes.length,
+      giveawayPrizeValue: lifetimeGiveawayPrizeValue,
+      vouches
+    }
   };
 }
 
@@ -1117,12 +1134,15 @@ async function getBuilderPointMetrics(guildId, userId) {
   const nextMonth = new Date(monthStart);
   nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
   const monthEnd = nextMonth.getTime();
-  const finished = records.filter(r =>
-    String(r.status || 'FINISHED').toUpperCase() === 'FINISHED' &&
+  const finishedAll = records.filter(r =>
+    String(r.status || 'FINISHED').toUpperCase() === 'FINISHED'
+  );
+  const finished = finishedAll.filter(r =>
     Number(r.at || 0) >= monthStart &&
     Number(r.at || 0) < monthEnd
   );
   const amount = finished.reduce((sum, r) => sum + Number(r.price ?? r.amount ?? 0), 0);
+  const lifetimeAmount = finishedAll.reduce((sum, r) => sum + Number(r.price ?? r.amount ?? 0), 0);
   const refunds = (dataStore().refunds || []).filter(r => {
     const job = dataStore().buildJobs?.[r.buildId];
     return job && String(job.builderDiscordId || '') === String(userId) && (!guildId || String(job.guildId || '') === String(guildId));
@@ -1131,7 +1151,11 @@ async function getBuilderPointMetrics(guildId, userId) {
     completedBuilds: finished.length,
     amount,
     refunds: refunds.length,
-    records: finished
+    records: finished,
+    lifetimeCompletedBuilds: finishedAll.length,
+    lifetimeAmount,
+    lifetimeRefunds: refunds.length,
+    lifetimeRecords: finishedAll
   };
 }
 
