@@ -16,6 +16,7 @@ const {
   formatDiscordUserLabel,
   getRoleAwarePointProgress,
   resolveBuildPaymentReceiver,
+  buildRefundAccounting,
   markBuildRemoved,
   applyRefundToBuild,
   computeNamePrefix,
@@ -199,6 +200,31 @@ test('build removal and refunds update tracking state', () => {
   assert.equal(refunded.status, 'REFUNDED');
 });
 
+test('refund accounting recovers from paid builders or deducts unpaid payout', () => {
+  const paid = buildRefundAccounting({
+    price: 100_000_000,
+    taxRate: 0.8,
+    refundAmount: 50_000_000,
+    status: 'COMPLETE',
+    payoutWatchStatus: 'PAID'
+  });
+  assert.equal(paid.builderAlreadyPaid, true);
+  assert.equal(paid.builderLedgerImpact, 50_000_000);
+  assert.equal(paid.builderPayoutDeduction, 0);
+  assert.equal(paid.builderPayoutAfterRefund, 80_000_000);
+
+  const unpaid = buildRefundAccounting({
+    price: 100_000_000,
+    taxRate: 0.8,
+    refundAmount: 50_000_000,
+    status: 'AWAITING_PAYOUT'
+  });
+  assert.equal(unpaid.builderAlreadyPaid, false);
+  assert.equal(unpaid.builderLedgerImpact, 0);
+  assert.equal(unpaid.builderPayoutDeduction, 50_000_000);
+  assert.equal(unpaid.builderPayoutAfterRefund, 30_000_000);
+});
+
 test('build payment receiver is locked to EmpireBot with iEtZ secondary', () => {
   assert.deepEqual(resolveBuildPaymentReceiver({ receiverOption: 'iEtZ', defaultReceiverIgn: 'Vi2910NC' }), {
     receiverIgn: 'EmpireBot',
@@ -314,8 +340,12 @@ test('ai personality prompt is server-aware and owner-safe while allowing light 
   assert.match(prompt, /giveaways/i);
   assert.match(prompt, /applications/i);
   assert.match(prompt, /willing to roast people/i);
+  assert.match(prompt, /mildly mean/i);
+  assert.match(prompt, /more bite/i);
   assert.match(prompt, /human/i);
   assert.match(prompt, /not customer support/i);
+  assert.match(prompt, /do not recycle/i);
+  assert.match(prompt, /iron golems/i);
   assert.match(prompt, /Do not use em dashes/i);
   assert.match(prompt, /No emojis/i);
   assert.match(prompt, /Never use slurs/i);
@@ -352,6 +382,8 @@ test('ai conversation prompt includes reply chain and only the last three bot re
   assert.match(prompt, /Builder One: rate my dirt hut/);
   assert.match(prompt, /DonutBot: That dirt hut has starter base energy/);
   assert.match(prompt, /Current message from Builder One: what did you mean/);
+  assert.match(prompt, /Avoid repeating/i);
+  assert.match(prompt, /iron golems/i);
   assert.doesNotMatch(prompt, /old reply one/);
   assert.match(prompt, /recent reply two/);
   assert.match(prompt, /recent reply three/);

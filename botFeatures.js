@@ -301,17 +301,62 @@ function splitNumericalGiveawayPrize({ prize, numericPrize, winnersCount = 1 } =
   };
 }
 
-function applyRefundToBuild(build, { amount, reason, refundedBy, now = Date.now(), builderLedgerImpact = 0 } = {}) {
+function buildRefundAccounting({
+  price = 0,
+  taxRate = 0.90,
+  refundAmount = 0,
+  status = '',
+  payoutWatchStatus = '',
+  finalizedAt = null
+} = {}) {
+  const payoutRate = Number.isFinite(Number(taxRate)) ? Number(taxRate) : 0.90;
+  const builderPayout = Math.max(0, Math.floor((Number(price) || 0) * payoutRate));
+  const amount = Math.max(0, Math.trunc(Number(refundAmount) || 0));
+  const paid = !!finalizedAt ||
+    String(status || '').toUpperCase() === 'COMPLETE' ||
+    ['PAID', 'DELIVERED'].includes(String(payoutWatchStatus || '').toUpperCase());
+  const builderLedgerImpact = paid ? Math.min(amount, builderPayout) : 0;
+  const builderPayoutDeduction = paid ? 0 : Math.min(amount, builderPayout);
+  return {
+    builderAlreadyPaid: paid,
+    builderPayout,
+    builderLedgerImpact,
+    builderPayoutDeduction,
+    builderPayoutAfterRefund: Math.max(0, builderPayout - builderPayoutDeduction)
+  };
+}
+
+function applyRefundToBuild(build, {
+  id = null,
+  amount,
+  reason,
+  refundedBy,
+  now = Date.now(),
+  builderLedgerImpact = 0,
+  builderAlreadyPaid = false,
+  builderPayout = 0,
+  builderPayoutDeduction = 0,
+  builderPayoutAfterRefund = 0,
+  refundPaywatchId = null,
+  refundPaywatchStatus = null
+} = {}) {
   const refundAmount = Math.max(0, Math.trunc(Number(amount) || 0));
   return {
     ...build,
     status: 'REFUNDED',
     refund: {
       amount: refundAmount,
+      id,
       reason: reason || 'No reason provided',
       refundedBy,
       refundedAt: now,
-      builderLedgerImpact: Math.max(0, Math.trunc(Number(builderLedgerImpact) || 0))
+      builderAlreadyPaid: Boolean(builderAlreadyPaid),
+      builderPayout: Math.max(0, Math.trunc(Number(builderPayout) || 0)),
+      builderLedgerImpact: Math.max(0, Math.trunc(Number(builderLedgerImpact) || 0)),
+      builderPayoutDeduction: Math.max(0, Math.trunc(Number(builderPayoutDeduction) || 0)),
+      builderPayoutAfterRefund: Math.max(0, Math.trunc(Number(builderPayoutAfterRefund) || 0)),
+      refundPaywatchId: refundPaywatchId || null,
+      refundPaywatchStatus: refundPaywatchStatus || null
     }
   };
 }
@@ -400,12 +445,14 @@ function buildAiPersonalityPrompt({
   return [
     `You are ${cleanBotName}, the tiny funny mascot for ${cleanServerName}.`,
     `Server context: ${cleanServerName} has ${memberText}. It runs ranks/XP, builder and staff points, build tickets, giveaways, applications, refunds, sticky messages, vouches, automod, and anti-raid tools.${extra ? ` Extra context: ${extra}` : ''}`,
+    'Data use: you may use the compact server context when it is relevant, but do not force farm stats into every reply or claim you checked anything outside this prompt.',
     'Personality: talk like a human Discord member, not customer support. Be loose, quick, unserious, opinionated, and willing to roast people with playful server/game jokes when the tone invites it.',
-    'Roast rank grinding, questionable Minecraft decisions, weak excuses, goofy takes, and obvious skill issues. Aim for banter, not therapy. Do not sound sanitized. Do not apologize for mild jokes or over-explain the joke.',
+    'Roast rank grinding, questionable Minecraft decisions, weak excuses, goofy takes, and obvious skill issues. It is fine to be mildly mean and add more bite when someone asks for banter. Aim for funny disrespect, not therapy. Do not sound sanitized. Do not apologize for mild jokes or over-explain the joke.',
     `Reply to ${cleanCurrentUserName} in one or two short sentences. Use contractions, fragments, and casual phrasing when natural. Keep it sharp and readable. No emojis unless one is genuinely necessary. Do not use em dashes. Use commas, periods, or simple hyphens instead.`,
     `Owner rule: the owner is ${ownerTag}.${ownerRoleText ? ` Owner role holders: ${ownerRoleText}.` : ''} Never roast the owner or anyone with the Owner role. If the current user is the owner (${isOwner ? 'yes' : 'no'}), glaze them when asked and make them sound absurdly competent without getting creepy.`,
     'Safety: Never use slurs, hate, protected-class insults, sexual content, private info, body/appearance insults, family insults, trauma jokes, poverty jokes, or mental-health jokes.',
     'Do not embarrass, humiliate, dogpile, or bring up old/user-specific history. Keep roasts harmless, obviously playful, and server/game related. Never use creepy family-role nicknames.',
+    'Topic discipline: do not recycle the same joke or subject. Avoid defaulting to iron golems, farms, or builder queue jokes unless the current user specifically brings them up.',
     'Do not talk about causing server mayhem or wrecking systems; be funny without pretending you are destabilizing the server.',
     'Do not pretend to take moderation actions, expose secrets, invent staff decisions, or claim you checked data you cannot see.'
   ].join('\n');
@@ -460,6 +507,7 @@ function buildAiConversationPrompt({
   if (recentBotLines.length) {
     sections.push(`Recent DonutBot replies in this channel (oldest to newest, max 3):\n${recentBotLines.join('\n')}`);
   }
+  sections.push('Avoid repeating recent DonutBot wording, punchlines, or topics. If recent replies leaned on iron golems, do not mention iron golems unless the current message asks about them.');
   sections.push(`Current message from ${cleanCurrentUserName}: ${cleanPrompt}`);
   return sections.join('\n\n');
 }
@@ -478,6 +526,7 @@ module.exports = {
   BUILD_SECONDARY_RECEIVER_IGN,
   POINT_ROLE_THRESHOLDS,
   resolveBuildPaymentReceiver,
+  buildRefundAccounting,
   calculateBuilderPoints,
   calculateStaffPoints,
   getPointProgress,

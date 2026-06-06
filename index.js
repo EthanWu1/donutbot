@@ -444,6 +444,7 @@ const LEVEL_UP_CHANNEL_ID = C.CHANNEL_LEVEL_UP;
 // Channel that gets a plain milestone shout every 5 levels.
 const LEVEL_MILESTONE_CHANNEL_ID = '1505582865813999789';
 const HEAD_BUILDER_ROLE_ID = process.env.HEAD_BUILDER_ROLE_ID || C.ROLE_BUILDER_1 || DEFAULT_ROLE_IDS.headBuilder;
+const HEAD_ADMIN_ROLE_ID = process.env.HEAD_ADMIN_ROLE_ID || C.ROLE_HEAD_ADMIN || C.ROLE_ADMIN;
 const AI_ENABLED = process.env.AI_ENABLED === undefined
   ? !!process.env.ANTHROPIC_API_KEY
   : ['1', 'true', 'yes', 'on'].includes(String(process.env.AI_ENABLED).toLowerCase());
@@ -3618,11 +3619,17 @@ async function getBuilderTaxRate(guild, builderDiscordId) {
   } catch { return 0.90; }
 }
 
+function builderPayoutAmounts(job, payoutRate = 0.90) {
+  const base = Math.max(0, Math.floor((Number(job?.price) || 0) * payoutRate));
+  const deduction = Math.min(base, Math.max(0, Math.trunc(Number(job?.refund?.builderPayoutDeduction) || 0)));
+  return { base, deduction, due: Math.max(0, base - deduction) };
+}
+
 // Build a consistent tracking embed for any build job status
 function buildTrackingEmbed(job, status, opts = {}) {
   const payoutRate = Number.isFinite(Number(job.taxRate)) ? Number(job.taxRate) : 0.90;
   const payoutPct = formatPayoutRate(payoutRate);
-  const builderPayout = Math.floor(job.price * payoutRate);
+  const builderPayout = builderPayoutAmounts(job, payoutRate);
   let color, title;
   switch (status) {
     case 'PENDING': color = 0xFFC300; title = 'Build In Progress'; break;
@@ -3647,7 +3654,10 @@ function buildTrackingEmbed(job, status, opts = {}) {
   ];
 
   if (status === 'AWAITING_PAYOUT' || status === 'COMPLETE') {
-    fields.push({ name: `${E_PRICE} Builder Payout`, value: `${money(builderPayout)} (${payoutPct})`, inline: true });
+    const payoutText = builderPayout.deduction > 0
+      ? `${money(builderPayout.due)} (${payoutPct}, ${money(builderPayout.deduction)} refund deduction)`
+      : `${money(builderPayout.base)} (${payoutPct})`;
+    fields.push({ name: `${E_PRICE} Builder Payout`, value: payoutText, inline: true });
   }
   if (status === 'AWAITING_PAYOUT') {
     fields.push({ name: `${E_STATUS} Status`, value: job.receiverDiscordId ? `Awaiting payment from <@${job.receiverDiscordId}>` : `Awaiting payment to \`${job.receiverIgn}\``, inline: false });
@@ -3676,6 +3686,12 @@ function buildTrackingEmbed(job, status, opts = {}) {
       { name: `${E_RECEIVER} Refunded By`, value: job.refund.refundedBy ? `<@${job.refund.refundedBy}>` : 'Unknown', inline: true },
       { name: `${E_PRICE} Builder Ledger Impact`, value: money(job.refund.builderLedgerImpact || 0), inline: true },
     );
+    if (Number(job.refund.builderPayoutDeduction || 0) > 0) {
+      fields.push({ name: `${E_PRICE} Adjusted Builder Payout`, value: `${money(job.refund.builderPayoutAfterRefund || builderPayout.due)} after ${money(job.refund.builderPayoutDeduction)} deduction`, inline: true });
+    }
+    if (job.refund.refundPaywatchStatus) {
+      fields.push({ name: `${E_STATUS} Refund Watch`, value: String(job.refund.refundPaywatchStatus), inline: true });
+    }
   }
   if (job.notes) {
     fields.push({ name: `${E_INFO} Notes`, value: String(job.notes).slice(0, 1024), inline: false });
@@ -3991,10 +4007,10 @@ function pointsCategoryText(kind, monthlyPoints, lifetimePoints, statsText) {
   return lines.join('\n');
 }
 
-function buildPointProgressImage({ displayName, avatarUrl, categories = [] } = {}) {
+function buildPointProgressImage({ categories = [] } = {}) {
   const rows = categories.filter(c => c && c.progress);
   const width = 900;
-  const height = Math.max(190, 118 + rows.length * 104);
+  const height = Math.max(112, 28 + rows.length * 82);
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
   const bg = ctx.createLinearGradient(0, 0, width, height);
@@ -4009,16 +4025,8 @@ function buildPointProgressImage({ displayName, avatarUrl, categories = [] } = {
     ctx.fillRect(0, x, width, 1);
   }
 
-  const safeName = sanitizeDisplayName(displayName || 'Member', { maxLen: 28 });
-  ctx.fillStyle = '#eff7fb';
-  ctx.font = '800 34px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
-  ctx.fillText(safeName, 42, 54);
-  ctx.font = '600 15px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
-  ctx.fillStyle = 'rgba(220,236,242,0.68)';
-  ctx.fillText('Role progress', 44, 80);
-
   rows.forEach((row, idx) => {
-    const y = 116 + idx * 104;
+    const y = 52 + idx * 82;
     const accent = row.color || '#08a4a7';
     const ratio = Math.max(0, Math.min(1, Number(row.progress.ratio) || 0));
     ctx.fillStyle = 'rgba(6,11,20,0.62)';
@@ -4131,11 +4139,7 @@ async function buildPointsPayload(guild, targetUser, viewerMember) {
     embed.setDescription(`${targetUser} has no builder or staff point categories yet.`);
   }
   if (progressRows.length) embed.setImage('attachment://points-progress.png');
-  const files = progressRows.length ? [buildPointProgressImage({
-    displayName,
-    avatarUrl: targetUser.displayAvatarURL({ extension: 'png', size: 128 }),
-    categories: progressRows
-  })] : [];
+  const files = progressRows.length ? [buildPointProgressImage({ categories: progressRows })] : [];
   return {
     embeds: [embed],
     files,
@@ -8744,7 +8748,11 @@ Entries: **${entryCount}**`.trim();
       const buildId = interaction.customId.split(':')[1];
       const job = await store.getBuildJob(buildId);
       if (!job) return interaction.reply({ content: 'Build not found.', flags: 64 });
-      if (job.status !== 'AWAITING_PAYOUT') return interaction.reply({ content: 'Build is not awaiting payout.', flags: 64 });
+      const refundAdjustedPayout = String(job.status || '').toUpperCase() === 'REFUNDED'
+        && job.refund
+        && !job.refund.builderAlreadyPaid
+        && Number(job.refund.builderPayoutAfterRefund || 0) > 0;
+      if (job.status !== 'AWAITING_PAYOUT' && !refundAdjustedPayout) return interaction.reply({ content: 'Build is not awaiting payout.', flags: 64 });
       if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
         return interaction.reply({ content: 'Admins only.', flags: 64 });
       }
@@ -8753,7 +8761,13 @@ Entries: **${entryCount}**`.trim();
 
       // Use stored tax rate, fall back to re-computing if missing
       const taxRate = job.taxRate || await getBuilderTaxRate(interaction.guild, job.builderDiscordId);
-      const builderPay = Math.floor(job.price * taxRate);
+      const builderPay = builderPayoutAmounts(job, taxRate).due;
+      if (builderPay <= 0) {
+        const finalAt = Date.now();
+        await store.updateBuildJob(buildId, { status: 'COMPLETE', finalizedAt: finalAt, taxRate }).catch(() => {});
+        await interaction.message.edit({ embeds: [buildTrackingEmbed({ ...job, taxRate }, 'COMPLETE', { finalizedAt: finalAt, timestamp: finalAt })], components: [] }).catch(() => {});
+        return interaction.followUp({ content: 'Builder payout is already fully covered by refund deductions.', flags: 64 }).catch(() => {});
+      }
 
       if (!DONUTSMP_API_KEY) {
         return interaction.followUp({ content: '❌ DONUTSMP_API_KEY missing.', flags: 64 });
@@ -8797,6 +8811,96 @@ Entries: **${entryCount}**`.trim();
 
       // Remove pay button from the embed while paywatch is active
       await interaction.message.edit({ components: [] }).catch(() => {});
+      return;
+    }
+
+    if (interaction.customId.startsWith('refund_pay_start:')) {
+      const [, buildId, refundId] = interaction.customId.split(':');
+      const job = await store.getBuildJob(buildId).catch(() => null);
+      const refund = job?.refund && String(job.refund.id || '') === String(refundId || '') ? job.refund : null;
+      if (!job || !refund) return interaction.reply({ content: 'Refund record not found.', flags: 64 });
+
+      const builderAlreadyPaid = Boolean(refund.builderAlreadyPaid);
+      const isAdmin = interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+      const allowed = builderAlreadyPaid
+        ? (String(interaction.user.id) === String(job.builderDiscordId) || canRefundBuilds(interaction.member) || isAdmin)
+        : (canRefundBuilds(interaction.member) || isAdmin);
+      if (!allowed) {
+        return interaction.reply({ content: builderAlreadyPaid ? 'Only the builder or refund managers can start this refund watch.' : 'Manager+ or Head Builder only.', flags: 64 });
+      }
+      if (refund.refundPaywatchId) {
+        const existing = await store.getWatch(refund.refundPaywatchId).catch(() => null);
+        if (existing && String(existing.status || '').toUpperCase() === 'WATCHING') {
+          return interaction.reply({ content: `Refund watch already started: \`${existing.id}\`.`, flags: 64 });
+        }
+      }
+      if (!DONUTSMP_API_KEY) {
+        return interaction.reply({ content: 'DONUTSMP_API_KEY missing. Cannot start refund paywatch.', flags: 64 });
+      }
+
+      await interaction.deferUpdate().catch(() => {});
+      const { receiverIgn } = resolveBuildPaymentReceiver();
+      const amount = builderAlreadyPaid
+        ? Math.max(0, Math.trunc(Number(refund.builderLedgerImpact || refund.amount) || 0))
+        : Math.max(0, Math.trunc(Number(refund.amount) || 0));
+      if (amount <= 0) {
+        return interaction.followUp({ content: 'Refund amount is zero, no paywatch needed.', flags: 64 }).catch(() => {});
+      }
+      const payerIgn = builderAlreadyPaid ? job.builderIgn : (job.receiverIgn || receiverIgn);
+      const payReceiverIgn = builderAlreadyPaid ? (job.receiverIgn || receiverIgn) : job.customerIgn;
+      if (!payerIgn || !payReceiverIgn) {
+        return interaction.followUp({ content: 'Missing payer or receiver IGN for this refund watch.', flags: 64 }).catch(() => {});
+      }
+
+      let payerStart = null;
+      let receiverStart = null;
+      try {
+        payerStart = await getUserBalance({ baseUrl: DONUTSMP_BASE_URL, pathTemplate: DONUTSMP_STATS_PATH, apiKey: DONUTSMP_API_KEY, user: payerIgn, balancePath: DONUTSMP_BALANCE_PATH });
+        receiverStart = await getUserBalance({ baseUrl: DONUTSMP_BASE_URL, pathTemplate: DONUTSMP_STATS_PATH, apiKey: DONUTSMP_API_KEY, user: payReceiverIgn, balancePath: DONUTSMP_BALANCE_PATH });
+      } catch (e) {
+        return interaction.followUp({ content: `Could not read balances. Check IGN spelling. (${e.message})`, flags: 64 }).catch(() => {});
+      }
+
+      const watchId = generateId();
+      const created = Date.now();
+      const w = await store.addWatch({
+        id: watchId,
+        status: 'WATCHING',
+        guild_id: interaction.guildId,
+        channel_id: interaction.channelId,
+        creator_id: interaction.user.id,
+        payer_discord_id: builderAlreadyPaid ? job.builderDiscordId : interaction.user.id,
+        payer_ign: payerIgn,
+        receiver_ign: payReceiverIgn,
+        amount,
+        schematic: null,
+        schematic_id: null,
+        file_path: null,
+        note: `Refund ${refund.id} for build ${job.id}`,
+        payer_start_balance: payerStart,
+        receiver_start_balance: receiverStart,
+        payer_end_balance: payerStart,
+        receiver_end_balance: receiverStart,
+        created_at: created,
+        expires_at: created + PAYWATCH_MAX_MINUTES * 60 * 1000,
+        last_check_at: null,
+        message_id: interaction.message.id,
+        refundBuildId: job.id,
+        refundId: refund.id,
+        refundMode: builderAlreadyPaid ? 'builder_repay' : 'customer_refund',
+      });
+      const updatedRefund = { ...refund, refundPaywatchId: watchId, refundPaywatchStatus: 'WATCHING' };
+      const updatedJob = await store.updateBuildJob(job.id, { refund: updatedRefund }).catch(() => ({ ...job, refund: updatedRefund }));
+      await interaction.message.edit({ content: '', embeds: [watchEmbed(w).setTitle('Refund Paywatch Started')], components: cancelRow(watchId, true) }).catch(() => {});
+      if (updatedJob?.buildMessageId && updatedJob?.buildChannelId) {
+        const buildCh = await client.channels.fetch(updatedJob.buildChannelId).catch(() => null);
+        const buildMsg = buildCh ? await buildCh.messages.fetch(updatedJob.buildMessageId).catch(() => null) : null;
+        if (buildMsg) {
+          const refundPayoutDue = !updatedJob.refund?.builderAlreadyPaid && Number(updatedJob.refund?.builderPayoutAfterRefund || 0) > 0;
+          await buildMsg.edit({ embeds: [buildTrackingEmbed(updatedJob, 'REFUNDED')], components: refundPayoutDue ? payBuilderRow(updatedJob.id) : [] }).catch(() => {});
+        }
+      }
+      startPaywatchPolling(watchId);
       return;
     }
 
@@ -10423,21 +10527,35 @@ if (commandName === 'giveaway') {
         const buildCh = await client.channels.fetch(updated.buildChannelId).catch(() => null);
         const buildMsg = buildCh ? await buildCh.messages.fetch(updated.buildMessageId).catch(() => null) : null;
         if (buildMsg) {
-          await buildMsg.edit({ embeds: [buildTrackingEmbed(updated, 'REFUNDED')], components: [] }).catch(() => {});
+          const refundPayoutDue = !updated.refund?.builderAlreadyPaid && Number(updated.refund?.builderPayoutAfterRefund || 0) > 0;
+          await buildMsg.edit({ embeds: [buildTrackingEmbed(updated, 'REFUNDED')], components: refundPayoutDue ? payBuilderRow(updated.id) : [] }).catch(() => {});
         }
       }
-      if (updated.ticketChannelId) {
-        const ticketCh = await client.channels.fetch(updated.ticketChannelId).catch(() => null);
-        if (ticketCh?.isTextBased?.()) {
-          await ticketCh.send({
-            embeds: [new EmbedBuilder()
-              .setColor(0xed4245)
-              .setTitle('Build Refunded')
-              .setDescription(`Refunded **${money(result.refund.amount)}**.\nReason: ${result.refund.reason}\nBuilder ledger impact: **${money(result.refund.builderLedgerImpact || 0)}**`)]
-          }).catch(() => {});
+      const actionChannel = updated.ticketChannelId
+        ? await client.channels.fetch(updated.ticketChannelId).catch(() => null)
+        : (updated.buildChannelId ? await client.channels.fetch(updated.buildChannelId).catch(() => null) : interaction.channel);
+      if (actionChannel?.isTextBased?.()) {
+        const mentionUsers = [];
+        const mentionRoles = [];
+        let content = '';
+        if (result.refund.builderAlreadyPaid && updated.builderDiscordId) {
+          content = `<@${updated.builderDiscordId}>`;
+          mentionUsers.push(String(updated.builderDiscordId));
+        } else if (HEAD_ADMIN_ROLE_ID) {
+          content = `<@&${HEAD_ADMIN_ROLE_ID}>`;
+          mentionRoles.push(String(HEAD_ADMIN_ROLE_ID));
         }
+        await actionChannel.send({
+          content,
+          embeds: [refundActionEmbed(updated, result.refund)],
+          components: refundActionRow(updated.id, result.refund.id),
+          allowedMentions: { users: mentionUsers, roles: mentionRoles }
+        }).catch(() => {});
       }
-      return interaction.editReply(`Refund recorded for \`${buildId}\`: ${money(result.refund.amount)}. Builder ledger impact: ${money(result.refund.builderLedgerImpact || 0)}.`);
+      const impactText = result.refund.builderAlreadyPaid
+        ? `Builder repayment needed: ${money(result.refund.builderLedgerImpact || 0)}.`
+        : `Builder payout deduction: ${money(result.refund.builderPayoutDeduction || 0)}.`;
+      return interaction.editReply(`Refund recorded for \`${buildId}\`: ${money(result.refund.amount)}. ${impactText}`);
     }
 
     // --- AFK ---
@@ -11298,6 +11416,8 @@ function paidEmbed(w) {
 }
 
 function paidEmbedTitle(w) {
+  if (w.refundBuildId && w.refundMode === 'builder_repay') return 'Builder Refund Returned';
+  if (w.refundBuildId) return 'Customer Refund Paid';
   if (w.buildEditJobId) return 'Build Price Adjustment';
   if (w.pendingBuildId) return 'Build Payment';
   if (w.buildJobId) return 'Builder Payment';
@@ -11305,10 +11425,37 @@ function paidEmbedTitle(w) {
 }
 
 function canceledEmbed(w) {
-  const label = (w.pendingBuildId || w.buildJobId || w.buildEditJobId) ? 'build payment' : `payment for **${w.schematic}**`;
+  const label = w.refundBuildId
+    ? 'refund payment'
+    : (w.pendingBuildId || w.buildJobId || w.buildEditJobId) ? 'build payment' : `payment for **${w.schematic}**`;
   return new EmbedBuilder().setColor(0x9b9b9b).setDescription(`Cancelled ${label}.`);
 }
 function failedEmbed(w, msg) { return new EmbedBuilder().setColor(0xed4245).setDescription(`Error: ${msg}`); }
+function refundActionRow(buildId, refundId) {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`refund_pay_start:${buildId}:${refundId}`).setLabel('Refund').setStyle(ButtonStyle.Danger)
+  )];
+}
+function refundActionEmbed(job, refund) {
+  const builderAlreadyPaid = Boolean(refund?.builderAlreadyPaid);
+  const action = builderAlreadyPaid
+    ? `Builder must return **${money(refund.builderLedgerImpact || refund.amount)}** to \`${job.receiverIgn || resolveBuildPaymentReceiver().receiverIgn}\`.`
+    : `Refund customer **${money(refund.amount)}**. Builder payout is reduced by **${money(refund.builderPayoutDeduction || 0)}**.`;
+  return new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('Build Refund Action')
+    .setDescription(action)
+    .addFields(
+      { name: 'Build ID', value: `\`${job.id}\``, inline: true },
+      { name: 'Build', value: job.buildType || 'Build', inline: true },
+      { name: 'Refund Amount', value: money(refund.amount), inline: true },
+      { name: 'Customer', value: job.customerDiscordId ? `<@${job.customerDiscordId}> (\`${job.customerIgn || 'unknown'}\`)` : `\`${job.customerIgn || 'unknown'}\``, inline: true },
+      { name: 'Builder', value: job.builderDiscordId ? `<@${job.builderDiscordId}> (\`${job.builderIgn || 'unknown'}\`)` : `\`${job.builderIgn || 'unknown'}\``, inline: true },
+      { name: 'Reason', value: String(refund.reason || 'No reason provided').slice(0, 1024), inline: false },
+    )
+    .setFooter({ text: builderAlreadyPaid ? 'Builder repayment watch starts from this button.' : 'Customer refund watch starts from this button.' })
+    .setTimestamp(refund.refundedAt || Date.now());
+}
 function payBuilderRow(buildId) {
   return [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`build_edit_open:${buildId}`).setLabel('Edit').setStyle(ButtonStyle.Secondary),
@@ -11562,6 +11709,28 @@ async function handleWatchPaid(watchId) {
       try { if (paid.message_id) { const ch0 = await client.channels.fetch(paid.channel_id).catch(() => null); const m0 = ch0 ? await ch0.messages.fetch(paid.message_id).catch(() => null) : null; if (m0) await m0.edit({ embeds: [paidEmbed(paid)], components: [] }).catch(() => {}); } } catch {}
       const logCh = await client.channels.fetch(PAYMENT_LOG_CHANNEL_ID).catch(() => null); 
       if (logCh) await logCh.send({ embeds: [paidEmbed(paid).setTitle(paidEmbedTitle(paid))] }); 
+      if (paid.refundBuildId) {
+        try {
+          const job = await store.getBuildJob(paid.refundBuildId).catch(() => null);
+          if (job?.refund) {
+            const updatedRefund = {
+              ...job.refund,
+              refundPaywatchId: paid.id,
+              refundPaywatchStatus: 'PAID',
+              refundPaywatchPaidAt: Date.now(),
+            };
+            const updatedJob = await store.updateBuildJob(job.id, { refund: updatedRefund }).catch(() => ({ ...job, refund: updatedRefund }));
+            if (updatedJob?.buildMessageId && updatedJob?.buildChannelId) {
+              const buildCh = await client.channels.fetch(updatedJob.buildChannelId).catch(() => null);
+              const buildMsg = buildCh ? await buildCh.messages.fetch(updatedJob.buildMessageId).catch(() => null) : null;
+              if (buildMsg) {
+                const refundPayoutDue = !updatedJob.refund?.builderAlreadyPaid && Number(updatedJob.refund?.builderPayoutAfterRefund || 0) > 0;
+                await buildMsg.edit({ embeds: [buildTrackingEmbed(updatedJob, 'REFUNDED')], components: refundPayoutDue ? payBuilderRow(updatedJob.id) : [] }).catch(() => {});
+              }
+            }
+          }
+        } catch {}
+      }
       
       // ── If this watch is a PRE-BUILD customer payment, activate the build ──────
       if (paid.pendingBuildId) {

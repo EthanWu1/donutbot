@@ -74,6 +74,8 @@ test('admin and points panels expose editable settings and image progress', () =
   assert.match(indexSource, /admin_panel_modal:antiraid:settings/);
   assert.match(indexSource, /buildPointProgressImage/);
   assert.match(indexSource, /attachment:\/\/points-progress\.png/);
+  assert.doesNotMatch(indexSource, /ctx\.fillText\(safeName/);
+  assert.doesNotMatch(indexSource, /Role progress/);
   assert.doesNotMatch(indexSource, /Manual adjustments:/);
 });
 
@@ -111,4 +113,11 @@ test('manage level adjustment only appears on the level view', () => {
   const levelRowsEnd = indexSource.indexOf('function formatLogRows', levelRowsStart);
   const levelRowsBlock = indexSource.slice(levelRowsStart, levelRowsEnd);
   assert.match(levelRowsBlock, /manage_level_adjust/);
+});
+
+test('refund flow has an action button and payout deduction tracking', () => {
+  assert.match(indexSource, /refund_pay_start:/);
+  assert.match(indexSource, /setLabel\('Refund'\)/);
+  assert.match(indexSource, /builderPayoutDeduction/);
+  assert.match(indexSource, /refundBuildId/);
 });

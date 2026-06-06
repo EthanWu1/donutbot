@@ -2,7 +2,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { randomUUID } = require('node:crypto');
 const { getLevelFromXp } = require('./utils');
-const { applyRefundToBuild } = require('./botFeatures');
+const { applyRefundToBuild, buildRefundAccounting } = require('./botFeatures');
 
 // NOTE:
 // lowdb's default writer (steno) uses a fixed temp filename (".data.json.tmp").
@@ -1172,14 +1172,17 @@ async function recordBuildRefund(buildId, refund) {
 
   const refundAmount = Math.max(0, Math.trunc(Number(refund?.amount) || 0));
   const taxRate = Number.isFinite(Number(job.taxRate)) ? Number(job.taxRate) : 0.90;
-  const builderPayout = Math.floor(Number(job.price || 0) * taxRate);
   const payoutWatch = job.builderPaywatchId
     ? (dataStore().watches || []).find(w => String(w?.id || '') === String(job.builderPaywatchId))
     : null;
-  const builderAlreadyPaid = !!job.finalizedAt ||
-    String(job.status || '').toUpperCase() === 'COMPLETE' ||
-    ['PAID', 'DELIVERED'].includes(String(payoutWatch?.status || '').toUpperCase());
-  const builderLedgerImpact = builderAlreadyPaid ? Math.min(refundAmount, builderPayout) : 0;
+  const accounting = buildRefundAccounting({
+    price: job.price,
+    taxRate,
+    refundAmount,
+    status: job.status,
+    payoutWatchStatus: payoutWatch?.status,
+    finalizedAt: job.finalizedAt
+  });
   const record = {
     id: refund?.id || randomUUID(),
     buildId: id,
@@ -1187,7 +1190,7 @@ async function recordBuildRefund(buildId, refund) {
     reason: String(refund?.reason || 'No reason provided').slice(0, 500),
     refundedBy: refund?.refundedBy ? String(refund.refundedBy) : null,
     refundedAt: Number(refund?.refundedAt || refund?.now || Date.now()),
-    builderLedgerImpact
+    ...accounting
   };
   const updated = applyRefundToBuild(job, record);
   dataStore().buildJobs[id] = updated;
