@@ -12,34 +12,76 @@ function clampNumber(value, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
+const POINT_ROLE_THRESHOLDS = {
+  builder: [
+    { points: 25, label: 'Tier 1 Builder' },
+    { points: 75, label: 'Tier 2 Builder' },
+    { points: 150, label: 'Tier 3 Builder' }
+  ],
+  staff: [
+    { points: 30, label: 'Trial Helper' },
+    { points: 90, label: 'Helper' },
+    { points: 180, label: 'Moderator' }
+  ]
+};
+
+function expectedBuildDurationMs(amount) {
+  const value = Math.max(0, Number(amount) || 0);
+  const day = 24 * 60 * 60 * 1000;
+  if (value >= 300_000_000) return 7 * day;
+  if (value >= 150_000_000) return 5 * day;
+  if (value >= 50_000_000) return 3 * day;
+  return 1 * day;
+}
+
+function builderSpeedBoostRate(input = {}) {
+  const amount = Math.max(0, Number(input.amount) || 0);
+  const expectedMs = Math.max(1, Number(input.expectedMs || input.quotedDurationMs || expectedBuildDurationMs(amount)) || 1);
+  const completedMs = Number(input.completedInMs || input.durationMs || 0);
+  if (!completedMs || completedMs <= 0) return 0;
+  const ratio = completedMs / expectedMs;
+  if (ratio <= 0.5) return 0.25;
+  if (ratio <= 0.75) return 0.15;
+  if (ratio <= 1) return 0.05;
+  return 0;
+}
+
 function calculateBuilderPoints(input = {}) {
   const amount = Math.max(0, Number(input.amount) || 0);
-  const rating = Math.floor(clampNumber(input.rating || 0, 0, 5));
-  const ratingBonus = rating >= 2 ? (rating - 1) * 5 : 0;
-  const completed = Math.max(0, Math.trunc(Number(input.completedBuilds) || 0));
+  const value = Math.floor(amount / 50_000_000);
+  const boostRate = builderSpeedBoostRate(input);
+  const speedBonus = Math.round(value * boostRate * 10) / 10;
   const parts = {
-    completed: completed * 20,
-    value: Math.min(60, Math.floor(amount / 1_000_000)),
-    onTime: input.onTime ? 10 : 0,
-    rating: ratingBonus,
-    refundPenalty: input.avoidableRefund ? -25 : 0,
+    value,
+    speedBonus,
+    refundPenalty: input.avoidableRefund ? -5 : 0,
     manual: Math.trunc(Number(input.manual) || 0)
   };
-  return { total: Object.values(parts).reduce((sum, v) => sum + v, 0), parts };
+  const total = Math.max(0, Math.round(Object.values(parts).reduce((sum, v) => sum + v, 0) * 10) / 10);
+  return { total, parts, thresholds: POINT_ROLE_THRESHOLDS.builder, speedBoostRate: boostRate };
 }
 
 function calculateStaffPoints(input = {}) {
+  const closedTickets = Math.max(0, Math.trunc(Number(input.resolvedTickets || input.closedTickets) || 0)) * 6;
+  const renamedTickets = Math.max(0, Math.trunc(Number(input.renamedTickets || input.ticketRenames) || 0)) * 1;
+  const applicationReviews = Math.max(0, Math.trunc(Number(input.applicationReviews) || 0)) * 2;
+  const modActions = Math.min(30, Math.max(0, Math.trunc(Number(input.validModActions) || 0)) * 3);
+  const supportMessages = Math.min(15, Math.floor(Math.max(0, Math.trunc(Number(input.supportTicketMessages) || 0)) / 10));
+  const messages = Math.min(5, Math.floor(Math.max(0, Math.trunc(Number(input.ticketMessages) || 0)) / 100));
   const parts = {
-    resolvedTickets: Math.max(0, Math.trunc(Number(input.resolvedTickets) || 0)) * 5,
-    applicationReviews: Math.max(0, Math.trunc(Number(input.applicationReviews) || 0)) * 6,
-    modActions: Math.min(30, Math.max(0, Math.trunc(Number(input.validModActions) || 0)) * 3),
-    vouches: Math.max(0, Math.trunc(Number(input.vouches) || 0)) * 4,
-    messages: Math.min(25, Math.floor(Math.max(0, Math.trunc(Number(input.ticketMessages) || 0)) / 20) * 2),
+    closedTickets,
+    renamedTickets,
+    applicationReviews,
+    modActions,
+    supportMessages,
+    messages,
+    vouches: Math.max(0, Math.trunc(Number(input.vouches) || 0)) * 1,
     overturned: Math.max(0, Math.trunc(Number(input.overturnedActions) || 0)) * -10,
-    strikes: Math.max(0, Math.trunc(Number(input.strikes) || 0)) * -30,
+    strikes: Math.max(0, Math.trunc(Number(input.strikes) || 0)) * -10,
     manual: Math.trunc(Number(input.manual) || 0)
   };
-  return { total: Object.values(parts).reduce((sum, v) => sum + v, 0), parts };
+  const total = Math.max(0, Math.round(Object.values(parts).reduce((sum, v) => sum + v, 0) * 10) / 10);
+  return { total, parts, thresholds: POINT_ROLE_THRESHOLDS.staff };
 }
 
 function roleIdsFromMember(member) {
@@ -306,8 +348,11 @@ function shouldSyncTicketPermissions({ parentId, buildCategoryIds = [], giveaway
 module.exports = {
   DEFAULT_ROLE_IDS,
   DEFAULT_AI_MODEL,
+  POINT_ROLE_THRESHOLDS,
   calculateBuilderPoints,
   calculateStaffPoints,
+  expectedBuildDurationMs,
+  builderSpeedBoostRate,
   roleIdsFromMember,
   hasRoleIdOrName,
   canApplyForRole,

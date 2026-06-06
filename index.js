@@ -63,6 +63,7 @@ const {
   DEFAULT_ROLE_IDS,
   calculateBuilderPoints,
   calculateStaffPoints,
+  POINT_ROLE_THRESHOLDS,
   canApplyForRole,
   normalizeGiveawayClaim,
   getBuilderIncentives,
@@ -89,6 +90,10 @@ function getLitematicRender() {
 // FEATURE BLOCK: AUTONICK / LOA / CATALOG
 // ═══════════════════════════════════════════════════════════════════════════
 const LOA_ROLE_ID = C.ROLE_LOA;
+const LOA_REQUEST_CHANNEL_ID = '1483225253089120454';
+const ACTIVITY_CHECK_CHANNEL_ID = '1501307122858590338';
+const ACTIVITY_STRIKE_LOG_CHANNEL_ID = '1483225253089120457';
+const ACTIVITY_CHECK_DURATION_MS = 12 * 60 * 60 * 1000;
 const CATALOG_STAFF_ROLE_IDS = new Set(C.ROLES_CATALOG_STAFF.filter(Boolean));
 function isCatalogStaff(member) {
   if (!member) return false;
@@ -821,13 +826,12 @@ const HELP_CATALOG = [
     id: 'general', label: 'General', tier: 'member',
     blurb: 'Everyday commands for all members.',
     commands: [
-      ['/help', 'Open this command menu.'],
+      ['!help', 'Open this command menu.'],
       ['/serverinfo', 'Show server information.'],
-      ['/afk [reason]', 'Mark yourself as AFK.'],
+      ['!afk [reason]', 'Mark yourself as AFK.'],
       ['/suggestion <text>', 'Submit a suggestion to staff.'],
-      ['/level check [user]', 'Check a level and XP progress.'],
-      ['/points [user]', 'Show XP plus builder/staff points.'],
-      ['/apply builder | staff', 'Start an application if eligible.'],
+      ['/level [user] or !level [user]', 'Check level and XP progress.'],
+      ['/points [user]', 'Show builder/staff points.'],
     ],
   },
   {
@@ -880,8 +884,7 @@ const HELP_CATALOG = [
     id: 'stats', label: 'Stats', tier: 'staff',
     blurb: 'Staff and builder performance.',
     commands: [
-      ['/leaderboard <type>', 'Staff or builder leaderboard.'],
-      ['/stats [member]', 'Staff and builder stats for a member.'],
+      ['/leaderboard <type>', 'Monthly staff or builder point leaderboard.'],
     ],
   },
   {
@@ -891,8 +894,8 @@ const HELP_CATALOG = [
       ['/purge <amount>', 'Bulk-delete messages (1-100).'],
       ['/lock', 'Lock the current channel.'],
       ['/unlock', 'Unlock the current channel.'],
-      ['/role grant <user> <role> [duration]', 'Grant a role.'],
-      ['/role remove <user> <role>', 'Remove a role.'],
+      ['!warn / !strike / !ban', 'Prefix moderation with required reasons.'],
+      ['!unwarn / !unstrike / !unban', 'Reverse warnings, strikes, and bans.'],
       ['/vouches <member>', 'Check a member vouch count.'],
       ['/manage <member>', 'Open a compact member management view.'],
       ['/automod', 'Open the automod control panel.'],
@@ -913,7 +916,6 @@ const HELP_CATALOG = [
     id: 'admin', label: 'Admin', tier: 'admin',
     blurb: 'Server configuration and management.',
     commands: [
-      ['/level add | set | multiplier', 'Adjust levels and XP rate.'],
       ['/spawner buy | sell | remove', 'Manage spawner prices.'],
       ['/application <type> <state>', 'Open or close applications.'],
       ['/stafflist edit', 'Edit staff-list IGNs and alts.'],
@@ -3351,6 +3353,7 @@ const client = new Client({
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildPresences
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction]
@@ -3711,6 +3714,50 @@ async function handleLevelUp(member, newLevel, oldLevel, currentXp) {
   }
 }
 
+async function buildLevelCardFile(guild, target) {
+  const targetUser = target?.user || target;
+  const member = target?.user ? target : await guild.members.fetch(targetUser.id).catch(() => null);
+  const ud = await store.getUserXp(targetUser.id, guild.id);
+  const curXp = ud.xp || 0;
+  const level = getLevelFromXp(curXp);
+  const rank = await store.getRank(targetUser.id, guild.id).catch(() => 0);
+  const prevXp = getXpForLevel(level);
+  const nextXp = getXpForLevel(level + 1);
+  const xpIntoLevel = Math.max(0, curXp - prevXp);
+  const xpNeeded = Math.max(1, nextXp - prevXp);
+  let tierLabel = 'COMMON';
+  let tierAccent = null;
+  let tierValue = 0;
+  if (member) {
+    const levelRoleEntries = Object.entries(C.LEVEL_ROLES || {})
+      .map(([lvl, cfg]) => ({ level: Number(lvl), id: cfg?.id, color: cfg?.color || null }))
+      .filter(r => r.id && member.roles.cache.has(r.id))
+      .sort((a, b) => b.level - a.level);
+    if (levelRoleEntries.length) {
+      const highest = levelRoleEntries[0];
+      const roleObj = guild.roles.cache.get(highest.id);
+      const rawName = String(roleObj?.name || '').trim();
+      tierLabel = rawName ? rawName.replace(/\s*role$/i, '').toUpperCase() : 'COMMON';
+      tierAccent = roleObj?.hexColor && roleObj.hexColor !== '#000000' ? roleObj.hexColor : (highest.color || null);
+      tierValue = highest.level || 0;
+    }
+  }
+  const cardBuf = await renderLevelCard({
+    username: member?.displayName || targetUser.displayName || targetUser.username,
+    avatarUrl: targetUser.displayAvatarURL({ extension: 'png', size: 256 }),
+    level,
+    xpIntoLevel,
+    xpNeeded,
+    totalXp: curXp,
+    rank,
+    accent: tierAccent,
+    theme: 'default',
+    tierLabel,
+    tierValue,
+  });
+  return new AttachmentBuilder(cardBuf, { name: 'level.png' });
+}
+
 const ACTIVE_BUILD_STATUSES = ['PENDING', 'WAITING_PAYMENT', 'AWAITING_CONFIRM', 'AWAITING_PAYOUT'];
 function getActiveBuildJobsForGuild(guildId, jobs) {
   return (jobs || []).filter(j => (!j?.guildId || j.guildId === guildId) && ACTIVE_BUILD_STATUSES.includes(String(j.status || '').toUpperCase()));
@@ -3728,6 +3775,7 @@ function buildRemoveSelectOption(job) {
 
 const statsPanelSessions = new Map();
 const buildRemoveSessions = new Map();
+const pendingLoaRequests = new Map();
 
 function chunkItems(items, size = 10) {
   const out = [];
@@ -3768,6 +3816,38 @@ function renderBuilderStatsEmbed(rows, page, totalPages) {
     .setTitle('Builder Leaderboard')
     .setDescription(desc)
     .setFooter({ text: `Page ${page + 1}/${totalPages} • Top Builders` })
+    .setTimestamp();
+}
+
+function currentMonthKey(tsValue = Date.now()) {
+  return new Date(tsValue).toISOString().slice(0, 7);
+}
+
+function renderMonthlyStaffStatsEmbed(rows, page, totalPages) {
+  const pageRows = chunkItems(rows, 10)[page] || [];
+  const desc = pageRows.length ? pageRows.map((r, i) => {
+    const n = page * 10 + i + 1;
+    return `**${n}.** <@${r.staffId}> - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Closed \`${r.closed}\` | Renamed \`${r.renamed}\` | Support msgs \`${r.supportMessages}\`\n> Valid punishments \`${r.validModActions}\` | Manual \`${r.manual || 0}\``;
+  }).join('\n\n') : 'No staff points yet this month.';
+  return new EmbedBuilder()
+    .setColor(0x00A8FF)
+    .setTitle('Staff Monthly Points')
+    .setDescription(desc)
+    .setFooter({ text: `Page ${page + 1}/${totalPages} - Resets on the 1st` })
+    .setTimestamp();
+}
+
+function renderMonthlyBuilderStatsEmbed(rows, page, totalPages) {
+  const pageRows = chunkItems(rows, 10)[page] || [];
+  const desc = pageRows.length ? pageRows.map((r, i) => {
+    const n = page * 10 + i + 1;
+    return `**${n}.** <@${r.discordId}> - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Builds \`${r.finished}\` | Value \`${money(r.earned || 0)}\` | Manual \`${r.manual || 0}\``;
+  }).join('\n\n') : 'No builder points yet this month.';
+  return new EmbedBuilder()
+    .setColor(0xFFB300)
+    .setTitle('Builder Monthly Points')
+    .setDescription(desc)
+    .setFooter({ text: `Page ${page + 1}/${totalPages} - Resets on the 1st` })
     .setTimestamp();
 }
 
@@ -3816,13 +3896,86 @@ function antiraidWhitelistText(cfg = {}) {
   ].join('\n\n');
 }
 
+function hasStaffOrBuilderCategory(member, category, saved = {}, calculated = 0) {
+  if (category === 'builder') return isBuilderMember(member) || Number(saved.currentMonth || 0) || Number(saved.lifetime || 0) || Number(calculated || 0);
+  if (category === 'staff') return isStaffMember(member, null) || member?.permissions?.has?.(PermissionsBitField.Flags.Administrator) || Number(saved.currentMonth || 0) || Number(saved.lifetime || 0) || Number(calculated || 0);
+  return false;
+}
+
+function nextPointThreshold(kind, points) {
+  const thresholds = POINT_ROLE_THRESHOLDS[kind] || [];
+  return thresholds.find(t => Number(points || 0) < t.points) || null;
+}
+
+function pointsCategoryText(kind, points, saved, statsText) {
+  const next = nextPointThreshold(kind, points);
+  const lines = [
+    `Monthly points: **${Number(points || 0).toLocaleString('en-US')}**`,
+    `Manual adjustments: **${Number(saved?.currentMonth || 0).toLocaleString('en-US')}** this month, **${Number(saved?.lifetime || 0).toLocaleString('en-US')}** lifetime`,
+  ];
+  if (next) lines.push(`Next role: **${next.label}** at **${next.points}** monthly points`);
+  else lines.push('Top threshold reached for now.');
+  if (statsText) lines.push(statsText);
+  return lines.join('\n');
+}
+
+function pointsManageRows(userId) {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`points_adjust:add:${userId}`).setLabel('Add Points').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`points_adjust:remove:${userId}`).setLabel('Remove Points').setStyle(ButtonStyle.Danger),
+  )];
+}
+
+async function buildPointsPayload(guild, targetUser, viewerMember) {
+  const member = await guild.members.fetch(targetUser.id).catch(() => null);
+  const [builderMetrics, staffMetrics, builderSaved, staffSaved] = await Promise.all([
+    store.getBuilderPointMetrics(guild.id, targetUser.id).catch(() => ({})),
+    store.getStaffPointMetrics(guild.id, targetUser.id).catch(() => ({})),
+    store.getPoints('builder', targetUser.id, guild.id).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+    store.getPoints('staff', targetUser.id, guild.id).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+  ]);
+  const builderPoints = calculateBuilderPoints({ ...builderMetrics, manual: builderSaved.currentMonth || 0 });
+  const staffPoints = calculateStaffPoints({ ...staffMetrics, manual: staffSaved.currentMonth || 0 });
+  const displayName = member?.displayName || targetUser.displayName || targetUser.username;
+  const embed = new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setAuthor({ name: `${displayName} Points`, iconURL: targetUser.displayAvatarURL({ extension: 'png', size: 128 }) })
+    .setDescription(`${targetUser}'s current monthly point snapshot.`)
+    .setTimestamp();
+  if (hasStaffOrBuilderCategory(member, 'builder', builderSaved, builderPoints.total)) {
+    embed.addFields({
+      name: 'Builder',
+      value: pointsCategoryText('builder', builderPoints.total, builderSaved, `Builds: **${builderMetrics.completedBuilds || 0}** | Value: **${money(builderMetrics.amount || 0)}**`),
+      inline: false
+    });
+  }
+  if (hasStaffOrBuilderCategory(member, 'staff', staffSaved, staffPoints.total)) {
+    embed.addFields({
+      name: 'Staff',
+      value: pointsCategoryText('staff', staffPoints.total, staffSaved, `Closed: **${staffMetrics.resolvedTickets || 0}** | Renamed: **${staffMetrics.renamedTickets || 0}** | Ticket msgs: **${staffMetrics.ticketMessages || 0}**`),
+      inline: false
+    });
+  }
+  if (!embed.data.fields?.length) {
+    embed.setDescription(`${targetUser} has no builder or staff point categories yet.`);
+  }
+  return {
+    embeds: [embed],
+    components: adminPanelAllowed(viewerMember) ? pointsManageRows(targetUser.id) : [],
+    allowedMentions: { parse: [] }
+  };
+}
+
 async function buildMemberManageEmbed(guild, userId) {
   const member = await guild.members.fetch(userId).catch(() => null);
   if (!member) return null;
-  const [builderSaved, staffSaved, vouchCount] = await Promise.all([
+  const [builderSaved, staffSaved, vouchCount, warnings, strikes, logs] = await Promise.all([
     store.getPoints('builder', userId, guild.id).catch(() => ({ currentMonth: 0, lifetime: 0 })),
     store.getPoints('staff', userId, guild.id).catch(() => ({ currentMonth: 0, lifetime: 0 })),
     getVouchCountForUser(guild.id, userId).catch(() => 0),
+    store.listWarnings(userId, guild.id).catch(() => []),
+    store.listStrikes(userId, guild.id).catch(() => []),
+    store.listMemberLogs(guild.id, userId, 3).catch(() => []),
   ]);
   const roles = member.roles.cache
     .filter(role => role.id !== guild.roles.everyone.id)
@@ -3830,17 +3983,202 @@ async function buildMemberManageEmbed(guild, userId) {
     .map(role => role.toString())
     .slice(0, 12)
     .join(' ') || 'No roles.';
+  const lastLogs = logs.length
+    ? logs.map(l => `${tsR(l.timestamp)} ${l.message}`).join('\n').slice(0, 1024)
+    : 'No log entries yet.';
   return new EmbedBuilder()
     .setColor(member.displayHexColor && member.displayHexColor !== '#000000' ? member.displayHexColor : 0x2b2d31)
     .setAuthor({ name: member.displayName, iconURL: member.user.displayAvatarURL({ extension: 'png', size: 128 }) })
+    .setDescription(`${member} management snapshot.`)
     .addFields(
       { name: 'User', value: `${member.user.tag}\n${member.id}`, inline: true },
       { name: 'Joined', value: member.joinedTimestamp ? ts(member.joinedTimestamp) : 'Unknown', inline: true },
-      { name: 'Points', value: `Builder ${builderSaved.currentMonth || 0} mo / ${builderSaved.lifetime || 0} life\nStaff ${staffSaved.currentMonth || 0} mo / ${staffSaved.lifetime || 0} life\nVouches ${vouchCount}`, inline: false },
+      { name: 'Infractions', value: `Warnings **${warnings.length}**\nStrikes **${strikes.length}**`, inline: true },
+      { name: 'Points', value: `Builder **${builderSaved.currentMonth || 0}** monthly / **${builderSaved.lifetime || 0}** lifetime\nStaff **${staffSaved.currentMonth || 0}** monthly / **${staffSaved.lifetime || 0}** lifetime\nVouches **${vouchCount}**`, inline: false },
+      { name: 'Recent Log', value: lastLogs, inline: false },
       { name: 'Roles', value: roles.slice(0, 1024), inline: false },
     )
-    .setFooter({ text: 'Use /role, moderation commands, and ticket tools for exact actions.' })
+    .setFooter({ text: 'Use the buttons below for details.' })
     .setTimestamp();
+}
+
+function manageRows(userId) {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`manage_view:level:${userId}`).setLabel('Level').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`manage_view:infractions:${userId}`).setLabel('Infractions').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`manage_view:details:${userId}`).setLabel('Details').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`manage_view:log:${userId}`).setLabel('Log').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`manage_level_adjust:${userId}`).setLabel('Adjust Level').setStyle(ButtonStyle.Primary),
+  )];
+}
+
+function formatLogRows(rows = [], empty = 'Nothing recorded yet.') {
+  if (!rows.length) return empty;
+  return rows.map(row => {
+    const stamp = row.timestamp ? tsR(row.timestamp) : 'unknown time';
+    const actor = row.actorId || row.moderatorId ? ` by <@${row.actorId || row.moderatorId}>` : '';
+    const reason = row.reason || row.message || 'No reason.';
+    return `${stamp}${actor}: ${String(reason).slice(0, 160)}`;
+  }).join('\n').slice(0, 3800);
+}
+
+async function buildManageLevelEmbed(guild, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return null;
+  const ud = await store.getUserXp(userId, guild.id).catch(() => ({ xp: 0 }));
+  const xp = Number(ud.xp || 0);
+  const level = getLevelFromXp(xp);
+  const rank = await store.getRank(userId, guild.id).catch(() => 0);
+  const prevXp = getXpForLevel(level);
+  const nextXp = getXpForLevel(level + 1);
+  return new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setAuthor({ name: `${member.displayName} Level`, iconURL: member.user.displayAvatarURL({ extension: 'png', size: 128 }) })
+    .addFields(
+      { name: 'Level', value: `**${level}**`, inline: true },
+      { name: 'Rank', value: rank ? `#${rank}` : 'Unranked', inline: true },
+      { name: 'XP', value: `${xp.toLocaleString('en-US')} total\n${Math.max(0, xp - prevXp).toLocaleString('en-US')} / ${Math.max(1, nextXp - prevXp).toLocaleString('en-US')} this level`, inline: false },
+    )
+    .setTimestamp();
+}
+
+async function buildManageInfractionsEmbed(guild, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return null;
+  const [warnings, strikes] = await Promise.all([
+    store.listWarnings(userId, guild.id).catch(() => []),
+    store.listStrikes(userId, guild.id).catch(() => []),
+  ]);
+  return new EmbedBuilder()
+    .setColor(0xed4245)
+    .setAuthor({ name: `${member.displayName} Infractions`, iconURL: member.user.displayAvatarURL({ extension: 'png', size: 128 }) })
+    .addFields(
+      { name: `Warnings (${warnings.length})`, value: formatLogRows(warnings.slice(0, 8), 'No warnings.'), inline: false },
+      { name: `Strikes (${strikes.length})`, value: formatLogRows(strikes.slice(0, 8), 'No strikes.'), inline: false },
+    )
+    .setTimestamp();
+}
+
+async function buildManageDetailsEmbed(guild, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return null;
+  const [stats, records, jobs, builderSaved, staffSaved, vouchCount] = await Promise.all([
+    store.getTicketStats(guild.id).catch(() => ({})),
+    store.listBuildRecordsByDiscord(guild.id, userId).catch(() => []),
+    store.listBuildJobs().catch(() => []),
+    store.getPoints('builder', userId, guild.id).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+    store.getPoints('staff', userId, guild.id).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+    getVouchCountForUser(guild.id, userId).catch(() => 0),
+  ]);
+  const s = stats?.[userId] || {};
+  const activeBuilds = (jobs || []).filter(j => String(j.guildId || guild.id) === String(guild.id) && String(j.builderDiscordId || j.claimedById || '') === String(userId) && ACTIVE_BUILD_STATUSES.includes(String(j.status || '').toUpperCase())).length;
+  const earned = (records || []).reduce((a, r) => a + Number(r.price ?? r.amount ?? 0), 0);
+  return new EmbedBuilder()
+    .setColor(0x08a4a7)
+    .setAuthor({ name: `${member.displayName} Details`, iconURL: member.user.displayAvatarURL({ extension: 'png', size: 128 }) })
+    .addFields(
+      { name: 'Tickets', value: `Closed **${Number(s.closed || 0)}**\nRenamed **${Number(s.renameCount || 0)}**\nMessages **${Number(s.messageCount || 0)}**`, inline: true },
+      { name: 'Builds', value: `Completed **${records.length}**\nActive **${activeBuilds}**\nValue **${money(earned)}**`, inline: true },
+      { name: 'Reputation', value: `Vouches **${vouchCount}**\nBuilder points **${builderSaved.currentMonth || 0}** monthly\nStaff points **${staffSaved.currentMonth || 0}** monthly`, inline: false },
+    )
+    .setTimestamp();
+}
+
+async function buildManageLogEmbed(guild, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return null;
+  const [logs, pointEvents] = await Promise.all([
+    store.listMemberLogs(guild.id, userId, 12).catch(() => []),
+    store.listPointEvents(guild.id, userId, 8).catch(() => []),
+  ]);
+  const pointLines = pointEvents.map(e => ({
+    timestamp: e.timestamp,
+    actorId: e.meta?.actorId || null,
+    message: `${Number(e.amount || 0) >= 0 ? '+' : ''}${e.amount} ${String(e.kind || '').replace(/s$/, '')} points: ${e.reason || 'No reason.'}`
+  }));
+  const rows = [...logs, ...pointLines].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 15);
+  return new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setAuthor({ name: `${member.displayName} Log`, iconURL: member.user.displayAvatarURL({ extension: 'png', size: 128 }) })
+    .setDescription(formatLogRows(rows, 'No member log yet.'))
+    .setTimestamp();
+}
+
+async function buildVouchesPayload(guild, targetUser, viewerMember) {
+  const member = await guild.members.fetch(targetUser.id).catch(() => null);
+  const count = await getVouchCountForUser(guild.id, targetUser.id).catch(() => 0);
+  const eb = new EmbedBuilder()
+    .setColor(member?.displayHexColor && member.displayHexColor !== '#000000' ? member.displayHexColor : 0x2b2d31)
+    .setAuthor({ name: member?.displayName || targetUser.username, iconURL: targetUser.displayAvatarURL({ extension: 'png', size: 128 }) })
+    .setTitle('Vouches')
+    .setDescription(`${targetUser} has **${count}** ${count === 1 ? 'vouch' : 'vouches'}.`)
+    .setTimestamp();
+  const buttons = [
+    new ButtonBuilder().setCustomId(`vouch_action:view:${targetUser.id}`).setLabel('View').setStyle(ButtonStyle.Secondary),
+  ];
+  if (adminPanelAllowed(viewerMember)) {
+    buttons.push(
+      new ButtonBuilder().setCustomId(`vouch_action:add:${targetUser.id}`).setLabel('Add').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`vouch_action:remove:${targetUser.id}`).setLabel('Remove').setStyle(ButtonStyle.Danger),
+    );
+  }
+  return { embeds: [eb], components: [new ActionRowBuilder().addComponents(...buttons)], allowedMentions: { parse: [] } };
+}
+
+function activityRoleIds(guild) {
+  return [...new Set([
+    C.ROLE_STAFF,
+    C.ROLE_CHIEF_MOD,
+    C.ROLE_MOD,
+    C.ROLE_TRIAL_MOD,
+    C.ROLE_SUPPORT,
+    C.ROLE_BUILDER_1,
+    C.ROLE_BUILDER_2,
+    C.ROLE_BUILDER_3,
+    C.ROLE_BUILDER_TIER_1,
+    C.ROLE_BUILDER_TIER_2,
+    C.ROLE_BUILDER_TIER_3,
+  ].filter(id => id && guild.roles.cache.has(id)).map(String))];
+}
+
+async function getActivityAudience(guild) {
+  await guild.members.fetch().catch(() => null);
+  const roleIds = new Set(activityRoleIds(guild));
+  return guild.members.cache
+    .filter(member => !member.user.bot && member.roles.cache.some(role => roleIds.has(role.id)))
+    .map(member => member.id);
+}
+
+async function processDueActivityChecks() {
+  const due = await store.listDueActivityChecks(Date.now()).catch(() => []);
+  for (const check of due) {
+    const guild = client.guilds.cache.get(check.guildId) || await client.guilds.fetch(check.guildId).catch(() => null);
+    if (!guild) {
+      await store.updateActivityCheck(check.id, { processed: true, processedAt: Date.now(), skippedReason: 'guild_missing' }).catch(() => {});
+      continue;
+    }
+    const reacted = new Set((check.reactedUserIds || []).map(String));
+    const missing = (check.requiredUserIds || []).map(String).filter(id => !reacted.has(id));
+    const struck = [];
+    for (const userId of missing) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (!member || member.user.bot) continue;
+      const reason = `Missed activity check ${check.id}`;
+      const count = await store.addStrike(userId, guild.id, reason, client.user?.id || 'activity-check').catch(() => 0);
+      await store.addMemberLog(guild.id, userId, 'strike', reason, client.user?.id || null).catch(() => {});
+      await logStrikeEvent(guild, userId, client.user?.id || 'activity-check', reason, count).catch(() => {});
+      struck.push(userId);
+    }
+    await store.updateActivityCheck(check.id, { processed: true, processedAt: Date.now(), struckUserIds: struck }).catch(() => {});
+    const ch = await guild.channels.fetch(check.channelId).catch(() => null);
+    const msg = ch?.isTextBased?.() && check.messageId ? await ch.messages.fetch(check.messageId).catch(() => null) : null;
+    if (msg) {
+      const eb = EmbedBuilder.from(msg.embeds[0] || new EmbedBuilder())
+        .setColor(struck.length ? 0xed4245 : 0x57f287)
+        .addFields({ name: 'Result', value: struck.length ? `${struck.map(id => `<@${id}>`).join(', ')} missed the check and were struck.` : 'Everyone checked in.', inline: false });
+      await msg.edit({ embeds: [eb], allowedMentions: { parse: [] } }).catch(() => {});
+    }
+  }
 }
 
 function automodSettingsEmbed(cfg = {}) {
@@ -5181,8 +5519,175 @@ async function maybeRespondWithAi(message) {
   }
 }
 
+function parseMentionId(value) {
+  return String(value || '').replace(/[<@!>]/g, '').trim();
+}
+
+function canUsePrefixModeration(member) {
+  if (!member) return false;
+  if (member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) return true;
+  if (member.permissions?.has?.(PermissionsBitField.Flags.ManageMessages)) return true;
+  return isStaffMember(member, null);
+}
+
+async function resolvePrefixTargetMember(message, raw) {
+  const id = parseMentionId(raw);
+  if (!id) return null;
+  return message.guild.members.fetch(id).catch(() => null);
+}
+
+async function sendModerationLog(guild, payload, preferredChannelId = null) {
+  const ids = [preferredChannelId, C.CHANNEL_MOD_LOG, C.CHANNEL_GENERAL_LOG].filter(Boolean);
+  for (const id of ids) {
+    const ch = await guild.channels.fetch(id).catch(() => null);
+    if (ch?.isTextBased?.()) {
+      await ch.send(payload).catch(() => {});
+      return;
+    }
+  }
+}
+
+async function logStrikeEvent(guild, userId, moderatorId, reason, count) {
+  const eb = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('Strike Issued')
+    .addFields(
+      { name: 'Member', value: `<@${userId}>`, inline: true },
+      { name: 'Moderator', value: `<@${moderatorId}>`, inline: true },
+      { name: 'Strike Count', value: `**${count}**`, inline: true },
+      { name: 'Reason', value: String(reason || 'No reason.').slice(0, 1024), inline: false },
+    )
+    .setTimestamp();
+  await sendModerationLog(guild, { embeds: [eb], allowedMentions: { parse: [] } }, ACTIVITY_STRIKE_LOG_CHANNEL_ID);
+}
+
+async function handlePrefixCommand(message) {
+  if (!message.guildId || !message.content?.startsWith('!')) return false;
+  const raw = String(message.content || '').trim();
+  const parts = raw.slice(1).split(/\s+/).filter(Boolean);
+  const command = String(parts.shift() || '').toLowerCase();
+  if (!command) return false;
+
+  if (command === 'help') {
+    const eb = buildHelpOverviewEmbed(getHelpTier(message.member));
+    await message.reply({ embeds: [eb], components: buildHelpComponents(getHelpTier(message.member), 'overview'), allowedMentions: { repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  if (command === 'afk') {
+    const reason = parts.join(' ').trim();
+    await store.setAfk(message.guildId, message.author.id, reason).catch(() => {});
+    const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+    if (member) await syncNickname(member).catch(() => {});
+    const pub = await message.reply({
+      embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription(`${message.author} is now AFK${reason ? `: ${reason}` : '.'}`)],
+      allowedMentions: { users: [message.author.id], repliedUser: false },
+    }).catch(() => null);
+    if (pub) setTimeout(() => pub.delete().catch(() => {}), 30000);
+    return true;
+  }
+
+  if (command === 'level') {
+    const target = parts[0]
+      ? await resolvePrefixTargetMember(message, parts[0]).catch(() => null)
+      : (message.member || await message.guild.members.fetch(message.author.id).catch(() => null));
+    const subject = target || message.author;
+    const file = await buildLevelCardFile(message.guild, subject);
+    await message.reply({ files: [file], allowedMentions: { repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  if (!['warn', 'strike', 'unwarn', 'unstrike', 'ban', 'unban'].includes(command)) return false;
+  if (!canUsePrefixModeration(message.member)) {
+    await message.reply({ content: 'Staff only.', allowedMentions: { repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  const targetRaw = parts.shift();
+  const targetId = parseMentionId(targetRaw);
+  if (!targetId) {
+    await message.reply({ content: `Usage: \`!${command} @user reason\``, allowedMentions: { repliedUser: false } }).catch(() => {});
+    return true;
+  }
+  const index = ['unwarn', 'unstrike'].includes(command) && /^\d+$/.test(parts[0] || '') ? Number(parts.shift()) : null;
+  const reason = parts.join(' ').trim();
+  if (['warn', 'strike', 'ban', 'unban'].includes(command) && !reason) {
+    await message.reply({ content: `Add a reason. Usage: \`!${command} @user reason\``, allowedMentions: { repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  const targetMember = await resolvePrefixTargetMember(message, targetRaw).catch(() => null);
+  if (['warn', 'strike', 'unwarn', 'unstrike', 'ban'].includes(command) && !targetMember) {
+    await message.reply({ content: 'That member is not in this server.', allowedMentions: { repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  if (command === 'warn') {
+    const count = await store.addWarning(targetMember.id, message.guildId, reason, message.author.id);
+    await store.addMemberLog(message.guildId, targetMember.id, 'warn', `Warned: ${reason}`, message.author.id).catch(() => {});
+    await sendModerationLog(message.guild, { embeds: [new EmbedBuilder().setColor(0xffc857).setTitle('Warning Issued').setDescription(`${targetMember} now has **${count}** warning(s).\nReason: ${reason}`).setTimestamp()], allowedMentions: { parse: [] } });
+    await message.reply({ content: `Warned ${targetMember}. Total warnings: **${count}**.`, allowedMentions: { users: [targetMember.id], repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  if (command === 'strike') {
+    const count = await store.addStrike(targetMember.id, message.guildId, reason, message.author.id);
+    await store.addMemberLog(message.guildId, targetMember.id, 'strike', `Struck: ${reason}`, message.author.id).catch(() => {});
+    await logStrikeEvent(message.guild, targetMember.id, message.author.id, reason, count);
+    await message.reply({ content: `Struck ${targetMember}. Total strikes: **${count}**.`, allowedMentions: { users: [targetMember.id], repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  if (command === 'unwarn') {
+    const ok = await store.removeWarning(targetMember.id, message.guildId, index);
+    if (ok) await store.addMemberLog(message.guildId, targetMember.id, 'unwarn', `Warning removed${index ? ` #${index}` : ''}.`, message.author.id).catch(() => {});
+    await message.reply({ content: ok ? `Removed warning${index ? ` #${index}` : ''} from ${targetMember}.` : 'No warning found.', allowedMentions: { users: [targetMember.id], repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  if (command === 'unstrike') {
+    const ok = await store.removeStrike(targetMember.id, message.guildId, index);
+    if (ok) await store.addMemberLog(message.guildId, targetMember.id, 'unstrike', `Strike removed${index ? ` #${index}` : ''}.`, message.author.id).catch(() => {});
+    await message.reply({ content: ok ? `Removed strike${index ? ` #${index}` : ''} from ${targetMember}.` : 'No strike found.', allowedMentions: { users: [targetMember.id], repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  if (command === 'ban') {
+    if (!message.member.permissions?.has?.(PermissionsBitField.Flags.BanMembers) && !isManagerPlus(message.member)) {
+      await message.reply({ content: 'Ban Members or Manager+ only.', allowedMentions: { repliedUser: false } }).catch(() => {});
+      return true;
+    }
+    const banned = await targetMember.ban({ reason: `${reason} | by ${message.author.tag}` }).then(() => true).catch(() => false);
+    if (!banned) {
+      await message.reply({ content: 'Ban failed. Check my role position and permissions.', allowedMentions: { repliedUser: false } }).catch(() => {});
+      return true;
+    }
+    await store.addMemberLog(message.guildId, targetMember.id, 'ban', `Banned: ${reason}`, message.author.id).catch(() => {});
+    await message.reply({ content: `Banned ${targetMember.user.tag}.`, allowedMentions: { repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  if (command === 'unban') {
+    if (!message.member.permissions?.has?.(PermissionsBitField.Flags.BanMembers) && !isManagerPlus(message.member)) {
+      await message.reply({ content: 'Ban Members or Manager+ only.', allowedMentions: { repliedUser: false } }).catch(() => {});
+      return true;
+    }
+    const unbanned = await message.guild.bans.remove(targetId, `${reason} | by ${message.author.tag}`).then(() => true).catch(() => false);
+    if (!unbanned) {
+      await message.reply({ content: 'Unban failed. Use a valid banned user ID.', allowedMentions: { repliedUser: false } }).catch(() => {});
+      return true;
+    }
+    await store.addMemberLog(message.guildId, targetId, 'unban', `Unbanned: ${reason}`, message.author.id).catch(() => {});
+    await message.reply({ content: `Unbanned \`${targetId}\`.`, allowedMentions: { repliedUser: false } }).catch(() => {});
+    return true;
+  }
+
+  return false;
+}
+
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+  if (await handlePrefixCommand(message).catch(e => { console.error('prefix command error:', e?.message || e); return false; })) return;
 
   // --- PUBLISH SCHEMATIC: strict author check for forum threads ---
   // Every message in a tracked schematic forum thread must come from the
@@ -5493,18 +5998,12 @@ client.on('messageCreate', async (message) => {
   try {
     if (message.guildId && !message.author?.bot) {
       const cfg = await store.getTicketConfig().catch(() => null);
-      if (cfg) {
-        const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
-        if (isStaffMember(member, cfg)) {
-          await store.recordTicketMessage(message.guildId, message.author.id).catch(() => {});
-        }
-      }
-
       if (message.channel?.type === ChannelType.GuildText) {
         const rec = await store.getTicketRecord(message.channelId).catch(() => null);
         if (rec && rec.status === 'OPEN') {
           const isStaff = cfg ? isStaffMember(message.member, cfg) : false;
           if (isStaff) {
+            await store.recordTicketMessage(message.guildId, message.author.id).catch(() => {});
             if (!rec.firstStaffMessageAt) {
               await store.updateTicketRecord(message.channelId, {
                 firstStaffMessageAt: Date.now(),
@@ -6360,9 +6859,62 @@ if (interaction.isButton() && (interaction.customId.startsWith('gw_keep:') || in
   }
   const choice = action === 'gw_double' ? 'double' : 'keep';
   const choices = { ...(g.doubleOrKeepChoices || {}) };
+  if (choices[interaction.user.id]) {
+    return interaction.reply({ content: 'You already chose for this giveaway.', flags: 64 }).catch(() => {});
+  }
   choices[interaction.user.id] = { choice, at: Date.now() };
   await store.updateGiveaway(g.messageId, { doubleOrKeepChoices: choices }).catch(() => {});
-  return interaction.reply({ content: `Choice saved: **${choice === 'double' ? 'Double' : 'Keep'}**.`, flags: 64 }).catch(() => {});
+  if (choice === 'keep') {
+    return interaction.reply({ content: 'Choice saved: **Keep**. Open a claim ticket when you are ready.', flags: 64 }).catch(() => {});
+  }
+
+  const numericPrize = Number(g.numericPrize || parseNumber(g.prize));
+  if (!numericPrize || numericPrize <= 0) {
+    return interaction.reply({ content: 'This giveaway prize was not numerical, so it cannot be doubled.', flags: 64 }).catch(() => {});
+  }
+  const ch = await client.channels.fetch(g.channelId).catch(() => null);
+  if (!ch?.isTextBased?.()) return interaction.reply({ content: 'Could not find the giveaway channel.', flags: 64 }).catch(() => {});
+  const originalDuration = g.endTime && g.createdAt ? Math.max(60_000, Number(g.endTime) - Number(g.createdAt)) : null;
+  const newPrizeValue = numericPrize * 2;
+  const newPrize = money(newPrizeValue);
+  const newId = generateId();
+  const newEndTime = originalDuration ? Date.now() + originalDuration : null;
+  const endsBits = [];
+  if (newEndTime) endsBits.push(`${tsR(newEndTime)} (${ts(newEndTime)})`);
+  if (g.memberGoal) endsBits.push(`${g.memberGoal} members`);
+  if (g.entriesGoal) endsBits.push(`${g.entriesGoal} entries`);
+  const desc = [
+    `Ends: ${endsBits.length ? endsBits.join(' - ') : 'When goals are met'}`,
+    `Hosted by: <@${g.hostId}>`,
+    'Mode: **Double or Keep**',
+    g.claimTimeMs ? `Claim window: **${formatDuration(g.claimTimeMs)}** after end` : null,
+    `Entries: **0**`,
+    `Winners: **${g.winnersCount || 1}**`,
+  ].filter(Boolean).join('\n');
+  const msg = await ch.send({
+    embeds: [new EmbedBuilder().setTitle(newPrize).setDescription(desc).setColor(0x5865f2).setFooter({ text: `ID: ${newId}` })],
+    components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('giveaway_join').setStyle(ButtonStyle.Primary).setEmoji('🎉'))],
+  }).catch(() => null);
+  if (!msg) return interaction.reply({ content: 'Could not start the doubled giveaway.', flags: 64 }).catch(() => {});
+  await store.createGiveaway({
+    id: newId,
+    guildId: g.guildId,
+    channelId: ch.id,
+    messageId: msg.id,
+    prize: newPrize,
+    numericPrize: newPrizeValue,
+    winnersCount: g.winnersCount || 1,
+    hostId: g.hostId,
+    entries: [],
+    endTime: newEndTime,
+    entriesGoal: g.entriesGoal || null,
+    memberGoal: g.memberGoal || null,
+    mode: 'double_or_keep',
+    claimTimeMs: g.claimTimeMs || null,
+    createdAt: Date.now(),
+    ended: false,
+  }).catch(() => {});
+  return interaction.reply({ content: `Choice saved: **Double**. New giveaway started: ${msg.url}`, flags: 64 }).catch(() => {});
 }
 
 // --- GIVEAWAY: winner "Open Ticket" button on the congrats message ---
@@ -7262,6 +7814,7 @@ Only the ticket creator can continue.`);
           reason: `Application accepted by ${interaction.user.tag}`,
         }).catch(e => console.error('Application role grant error:', e?.message || e));
       }
+      await store.addMemberLog(interaction.guildId, sub.userId, status === "ACCEPTED" ? 'accepted' : 'application_denied', `${sub.typeId || 'Application'} ${status.toLowerCase()}.`, interaction.user.id).catch(() => {});
       const user = await interaction.client.users.fetch(sub.userId).catch(()=>null);
       if (user) {
         const dm = await user.createDM().catch(()=>null);
@@ -7376,6 +7929,7 @@ ${sourceLink}`;
         reason: `Application accepted by ${interaction.user.tag}`,
       }).catch(e => console.error('Application role grant error:', e?.message || e));
     }
+    await store.addMemberLog(interaction.guildId, sub.userId, status === "ACCEPTED" ? 'accepted' : 'application_denied', `${sub.typeId || 'Application'} ${status.toLowerCase()}: ${reason}`, interaction.user.id).catch(() => {});
     const user = await interaction.client.users.fetch(sub.userId).catch(()=>null);
     if (user) {
       const dm = await user.createDM().catch(()=>null);
@@ -7887,7 +8441,7 @@ Entries: **${entryCount}**`.trim();
       const nextPage = Math.max(0, Math.min(totalPages - 1, (sess.page || 0) + (dir === 'next' ? 1 : -1)));
       sess.page = nextPage;
       statsPanelSessions.set(sessionId, sess);
-      const embed = kind === 'builder' ? renderBuilderStatsEmbed(sess.rows || [], nextPage, totalPages) : renderStaffStatsEmbed(sess.rows || [], nextPage, totalPages);
+      const embed = kind === 'builder' ? renderMonthlyBuilderStatsEmbed(sess.rows || [], nextPage, totalPages) : renderMonthlyStaffStatsEmbed(sess.rows || [], nextPage, totalPages);
       return interaction.update({ embeds: [embed], components: statsNavRow(kind, sessionId, nextPage, totalPages) }).catch(() => {});
     }
 
@@ -8072,6 +8626,198 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
     return;
   }
 
+  if (interaction.isButton() && interaction.customId.startsWith('manage_view:')) {
+    if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
+    const [, view, userId] = interaction.customId.split(':');
+    const builders = {
+      level: buildManageLevelEmbed,
+      infractions: buildManageInfractionsEmbed,
+      details: buildManageDetailsEmbed,
+      log: buildManageLogEmbed,
+    };
+    const eb = builders[view] ? await builders[view](interaction.guild, userId).catch(() => null) : null;
+    if (!eb) return interaction.reply({ content: 'That member is no longer in this server.', flags: 64 }).catch(() => {});
+    return interaction.update({ embeds: [eb], components: manageRows(userId), allowedMentions: { parse: [] } }).catch(() => {});
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('manage_level_adjust:')) {
+    if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
+    const userId = interaction.customId.split(':')[1];
+    const modal = new ModalBuilder()
+      .setCustomId(`manage_level_modal:${userId}`)
+      .setTitle('Adjust Level')
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('delta').setLabel('Level change, e.g. +1 or -2').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(8),
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('reason').setLabel('Reason').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(300),
+        ),
+      );
+    return interaction.showModal(modal).catch(() => {});
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('manage_level_modal:')) {
+    if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
+    const userId = interaction.customId.split(':')[1];
+    const delta = Math.trunc(Number(interaction.fields.getTextInputValue('delta')) || 0);
+    const reason = interaction.fields.getTextInputValue('reason').trim();
+    if (!delta || !reason) return interaction.reply({ content: 'Use a non-zero level change and a reason.', flags: 64 }).catch(() => {});
+    const ud = await store.getUserXp(userId, interaction.guildId).catch(() => ({ xp: 0 }));
+    const oldLevel = getLevelFromXp(ud.xp || 0);
+    const newLevel = Math.max(0, oldLevel + delta);
+    const newXp = getXpForLevel(newLevel);
+    await store.setXp(userId, interaction.guildId, newXp).catch(() => {});
+    const member = await interaction.guild.members.fetch(userId).catch(() => null);
+    if (member) {
+      if (newLevel > oldLevel) await handleLevelUp(member, newLevel, oldLevel, newXp).catch(() => {});
+      else await syncLevelRoles(member, newLevel).catch(() => {});
+    }
+    await store.addMemberLog(interaction.guildId, userId, 'level', `Level ${oldLevel} -> ${newLevel}: ${reason}`, interaction.user.id).catch(() => {});
+    return interaction.reply({ content: `Set <@${userId}> to level **${newLevel}**.`, flags: 64, allowedMentions: { parse: [] } }).catch(() => {});
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('points_adjust:')) {
+    if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
+    const [, action, userId] = interaction.customId.split(':');
+    const modal = new ModalBuilder()
+      .setCustomId(`points_adjust_modal:${action}:${userId}`)
+      .setTitle(action === 'remove' ? 'Remove Points' : 'Add Points')
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('category').setLabel('Category: builder or staff').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20),
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('amount').setLabel('Amount').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(12),
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('reason').setLabel('Reason').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500),
+        ),
+      );
+    return interaction.showModal(modal).catch(() => {});
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('points_adjust_modal:')) {
+    if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
+    const [, action, userId] = interaction.customId.split(':');
+    const rawCategory = interaction.fields.getTextInputValue('category').trim().toLowerCase();
+    const kind = rawCategory.startsWith('staff') ? 'staff' : rawCategory.startsWith('builder') ? 'builder' : null;
+    const amount = Math.abs(Math.trunc(Number(interaction.fields.getTextInputValue('amount')) || 0));
+    const reason = interaction.fields.getTextInputValue('reason').trim();
+    if (!kind || amount <= 0 || !reason) return interaction.reply({ content: 'Use category `builder` or `staff`, a positive amount, and a reason.', flags: 64 }).catch(() => {});
+    const signed = action === 'remove' ? -amount : amount;
+    await store.addPoints(kind, userId, interaction.guildId, signed, reason, { actorId: interaction.user.id }).catch(() => {});
+    await store.addMemberLog(interaction.guildId, userId, 'points', `${signed >= 0 ? '+' : ''}${signed} ${kind} points: ${reason}`, interaction.user.id).catch(() => {});
+    return interaction.reply({ content: `${signed >= 0 ? 'Added' : 'Removed'} **${amount}** ${kind} point(s) for <@${userId}>.`, flags: 64, allowedMentions: { parse: [] } }).catch(() => {});
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('vouch_action:')) {
+    const [, action, userId] = interaction.customId.split(':');
+    if (action === 'view') {
+      const all = await store.getVouches(interaction.guildId).catch(() => []);
+      const rec = (all || []).find(v => String(v.userId) === String(userId));
+      const vouchers = (rec?.vouchers || []).slice(-10).reverse();
+      const desc = vouchers.length
+        ? vouchers.map(v => `${v.at ? tsR(v.at) : 'unknown time'} from ${String(v.voucherId || '').startsWith('manual:') ? '`manual`' : `<@${v.voucherId}>`}${v.reason ? `: ${String(v.reason).slice(0, 120)}` : ''}`).join('\n')
+        : 'No vouches recorded.';
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Vouch History').setDescription(desc)], flags: 64, allowedMentions: { parse: [] } }).catch(() => {});
+    }
+    if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
+    const modal = new ModalBuilder()
+      .setCustomId(`vouch_modal:${action}:${userId}`)
+      .setTitle(action === 'remove' ? 'Remove Vouches' : 'Add Vouches')
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('amount').setLabel('Amount').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(6),
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('reason').setLabel('Reason').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(300),
+        ),
+      );
+    return interaction.showModal(modal).catch(() => {});
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('vouch_modal:')) {
+    if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
+    const [, action, userId] = interaction.customId.split(':');
+    const amount = Math.abs(Math.trunc(Number(interaction.fields.getTextInputValue('amount')) || 0));
+    const reason = interaction.fields.getTextInputValue('reason').trim();
+    if (amount <= 0 || !reason) return interaction.reply({ content: 'Use a positive amount and a reason.', flags: 64 }).catch(() => {});
+    const total = action === 'remove'
+      ? await store.removeVouchesAmount(userId, interaction.guildId, amount)
+      : await store.addVouchesAmount(userId, interaction.guildId, amount);
+    const member = await interaction.guild.members.fetch(userId).catch(() => null);
+    if (member) await syncNickname(member).catch(() => {});
+    await updateVouchboard(interaction.guild).catch(() => {});
+    await store.addMemberLog(interaction.guildId, userId, 'vouch', `${action === 'remove' ? '-' : '+'}${amount} vouch(es): ${reason}`, interaction.user.id).catch(() => {});
+    return interaction.reply({ content: `${action === 'remove' ? 'Removed' : 'Added'} **${amount}** vouch(es). New total for <@${userId}>: **${total}**.`, flags: 64, allowedMentions: { parse: [] } }).catch(() => {});
+  }
+
+  if (interaction.isButton() && interaction.customId === 'loa_request_open') {
+    const modal = new ModalBuilder()
+      .setCustomId('loa_request_modal')
+      .setTitle('Request LOA')
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('duration').setLabel('Duration, e.g. 2d, 1w, 12h').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20),
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('reason').setLabel('Reason').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500),
+        ),
+      );
+    return interaction.showModal(modal).catch(() => {});
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId === 'loa_request_modal') {
+    const durationRaw = interaction.fields.getTextInputValue('duration').trim();
+    const durationMs = parseDuration(durationRaw);
+    const reason = interaction.fields.getTextInputValue('reason').trim();
+    if (!durationMs || durationMs <= 0 || !reason) return interaction.reply({ content: 'Use a valid duration like `12h`, `2d`, or `1w`, plus a reason.', flags: 64 }).catch(() => {});
+    const id = generateId();
+    const req = { id, guildId: interaction.guildId, userId: interaction.user.id, durationRaw, durationMs, reason, createdAt: Date.now(), expiresAt: Date.now() + durationMs };
+    pendingLoaRequests.set(id, req);
+    const pendingCh = await interaction.guild.channels.fetch(C.CHANNEL_PENDING_APPLICATION).catch(() => null);
+    const eb = new EmbedBuilder()
+      .setColor(0x2b2d31)
+      .setTitle('LOA Request')
+      .addFields(
+        { name: 'Member', value: `${interaction.user}`, inline: true },
+        { name: 'Duration', value: `${durationRaw} (until ${ts(req.expiresAt)})`, inline: true },
+        { name: 'Reason', value: reason.slice(0, 1024), inline: false },
+      )
+      .setFooter({ text: `LOA ${id}` })
+      .setTimestamp();
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`loa_decide:approve:${id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`loa_decide:deny:${id}`).setLabel('Deny').setStyle(ButtonStyle.Danger),
+    );
+    if (pendingCh?.isTextBased?.()) await pendingCh.send({ embeds: [eb], components: [row], allowedMentions: { parse: [] } }).catch(() => {});
+    return interaction.reply({ content: 'LOA request sent for manager review.', flags: 64 }).catch(() => {});
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('loa_decide:')) {
+    if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
+    const [, decision, id] = interaction.customId.split(':');
+    const req = pendingLoaRequests.get(id);
+    if (!req) return interaction.reply({ content: 'This LOA request is not in memory anymore. Ask them to resubmit.', flags: 64 }).catch(() => {});
+    const member = await interaction.guild.members.fetch(req.userId).catch(() => null);
+    if (decision === 'approve') {
+      if (member && LOA_ROLE_ID) await member.roles.add(LOA_ROLE_ID, `LOA approved by ${interaction.user.tag}`).catch(() => {});
+      if (LOA_ROLE_ID) {
+        await store.addTimedRole({ guildId: interaction.guildId, userId: req.userId, roleId: LOA_ROLE_ID, grantedBy: interaction.user.id, grantedAt: Date.now(), expiresAt: req.expiresAt, active: true }).catch(() => {});
+      }
+      await store.addLoa({ id, guildId: interaction.guildId, userId: req.userId, reason: req.reason, durationMs: req.durationMs, requestedAt: req.createdAt, approvedAt: Date.now(), approvedBy: interaction.user.id, expiresAt: req.expiresAt, active: true }).catch(() => {});
+      await store.addMemberLog(interaction.guildId, req.userId, 'loa', `LOA approved until ${new Date(req.expiresAt).toISOString()}: ${req.reason}`, interaction.user.id).catch(() => {});
+    } else {
+      await store.addMemberLog(interaction.guildId, req.userId, 'loa', `LOA denied: ${req.reason}`, interaction.user.id).catch(() => {});
+    }
+    pendingLoaRequests.delete(id);
+    const edited = EmbedBuilder.from(interaction.message.embeds[0] || new EmbedBuilder()).setColor(decision === 'approve' ? 0x57f287 : 0xed4245);
+    edited.addFields({ name: 'Decision', value: `${decision === 'approve' ? 'Approved' : 'Denied'} by ${interaction.user}`, inline: false });
+    await interaction.update({ embeds: [edited], components: [], allowedMentions: { parse: [] } }).catch(() => {});
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
   const { commandName, options } = interaction;
 
@@ -8088,6 +8834,7 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
 
     // --- HELP ---
     if (commandName === 'help') {
+      return interaction.reply({ content: 'Use `!help` now.', flags: 64 }).catch(() => {});
       const tier = getHelpTier(interaction.member);
       return interaction.reply({
         embeds: [buildHelpOverviewEmbed(tier)],
@@ -8098,6 +8845,12 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
 
     // --- LEVELING ---
     if (commandName === 'level') {
+      const levelTarget = options.getUser('user') || interaction.user;
+      await interaction.deferReply();
+      const levelMember = await interaction.guild.members.fetch(levelTarget.id).catch(() => null);
+      const file = await buildLevelCardFile(interaction.guild, levelMember || levelTarget);
+      return interaction.editReply({ files: [file] });
+
       const sub = options.getSubcommand();
       const target = options.getUser('user') || interaction.user;
 
@@ -8207,6 +8960,8 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
     if (commandName === 'points') {
       const target = options.getUser('user') || interaction.user;
       await interaction.deferReply();
+      const payload = await buildPointsPayload(interaction.guild, target, interaction.member);
+      return interaction.editReply(payload);
 
       const ud = await store.getUserXp(target.id, interaction.guildId);
       const curXp = ud.xp || 0;
@@ -8281,6 +9036,7 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
     }
 
     if (commandName === 'apply') {
+      return interaction.reply({ content: '`/apply` was removed. Use the application buttons instead.', flags: 64 }).catch(() => {});
       const typeId = options.getSubcommand();
       const type = await store.getAppType(typeId).catch(() => null);
       const gate = applicationGateForMember(interaction.member, typeId);
@@ -8502,15 +9258,8 @@ Only the ticket creator can continue.`);
     if (commandName === 'vouches') {
       const target = options.getUser('member', true);
       await interaction.deferReply();
-      const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-      const count = await getVouchCountForUser(interaction.guildId, target.id).catch(() => 0);
-      const eb = new EmbedBuilder()
-        .setColor(member?.displayHexColor && member.displayHexColor !== '#000000' ? member.displayHexColor : 0x2b2d31)
-        .setAuthor({ name: member?.displayName || target.username, iconURL: target.displayAvatarURL({ extension: 'png', size: 128 }) })
-        .setTitle('Vouches')
-        .setDescription(`${target} has **${count}** ${count === 1 ? 'vouch' : 'vouches'}.`)
-        .setTimestamp();
-      return interaction.editReply({ embeds: [eb] });
+      const payload = await buildVouchesPayload(interaction.guild, target, interaction.member);
+      return interaction.editReply(payload);
     }
 
     // --- MEMBER MANAGEMENT ---
@@ -8520,7 +9269,41 @@ Only the ticket creator can continue.`);
       await interaction.deferReply({ flags: 64 });
       const eb = await buildMemberManageEmbed(interaction.guild, target.id);
       if (!eb) return interaction.editReply('That member is not in this server.');
-      return interaction.editReply({ embeds: [eb] });
+      return interaction.editReply({ embeds: [eb], components: manageRows(target.id), allowedMentions: { parse: [] } });
+    }
+
+    if (commandName === 'activity') {
+      if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 });
+      await interaction.deferReply({ flags: 64 });
+      const ch = await interaction.guild.channels.fetch(ACTIVITY_CHECK_CHANNEL_ID).catch(() => null);
+      if (!ch?.isTextBased?.()) return interaction.editReply('Activity check channel is missing or not text-based.');
+      const requiredUserIds = await getActivityAudience(interaction.guild);
+      if (!requiredUserIds.length) return interaction.editReply('No staff or builders found for the activity check.');
+      const roles = activityRoleIds(interaction.guild);
+      const dueAt = Date.now() + ACTIVITY_CHECK_DURATION_MS;
+      const eb = new EmbedBuilder()
+        .setColor(0x2b2d31)
+        .setTitle('Activity Check')
+        .setDescription(`React with the check mark below before ${ts(dueAt)}.\nMissing this check gives a strike.`)
+        .addFields(
+          { name: 'Required', value: `Staff and builders: **${requiredUserIds.length}** people`, inline: true },
+          { name: 'Deadline', value: `${tsR(dueAt)}`, inline: true },
+        )
+        .setTimestamp();
+      const msg = await ch.send({
+        content: roles.map(id => `<@&${id}>`).join(' '),
+        embeds: [eb],
+        allowedMentions: { roles },
+      });
+      await msg.react('✅').catch(() => {});
+      await store.createActivityCheck(interaction.guildId, {
+        channelId: ch.id,
+        messageId: msg.id,
+        createdBy: interaction.user.id,
+        dueAt,
+        requiredUserIds,
+      }).catch(() => {});
+      return interaction.editReply(`Activity check posted in <#${ch.id}> for **${requiredUserIds.length}** people.`);
     }
     // --- BUILD START ---
     if (commandName === 'build') {
@@ -9210,6 +9993,10 @@ if (commandName === 'giveaway') {
         if (claimTimeRaw && !claimTimeMs) {
           return interaction.editReply('Invalid claimtime. Use values like `30m`, `2h`, or `1d`.');
         }
+        const numericPrize = mode === 'double_or_keep' ? parseNumber(prize) : null;
+        if (mode === 'double_or_keep' && (!numericPrize || numericPrize <= 0)) {
+          return interaction.editReply('Double or Keep requires a numerical prize, like `50m` or `100000000`.');
+        }
 
         const durMs = durationRaw ? parseDuration(durationRaw) : null;
         const hasGoal = (typeof entriesGoal === 'number' && entriesGoal > 0) || (typeof memberGoal === 'number' && memberGoal > 0);
@@ -9253,6 +10040,7 @@ if (commandName === 'giveaway') {
           channelId: interaction.channelId,
           messageId: msg.id,
           prize,
+          numericPrize,
           winnersCount,
           hostId: interaction.user.id,
           entries: [],
@@ -9428,6 +10216,7 @@ if (commandName === 'giveaway') {
 
     // --- AFK ---
     if (commandName === 'afk') {
+      return interaction.reply({ content: 'Use `!afk [reason]` now.', flags: 64 }).catch(() => {});
       const reason = (options.getString('reason') || '').trim();
       await interaction.deferReply({ flags: 64 }).catch(() => {});
 
@@ -9561,7 +10350,18 @@ if (commandName === 'giveaway') {
       }
 
       if (type === 'staff') {
-        const stats = await store.getTicketStats(interaction.guildId).catch(() => ({}));
+        const month = currentMonthKey();
+        const monthStart = Date.parse(`${month}-01T00:00:00.000Z`);
+        const stats = await store.getTicketStatsForMonth(interaction.guildId, month).catch(() => ({}));
+        const [warnings, strikes] = await Promise.all([
+          store.listWarnings(null, interaction.guildId).catch(() => []),
+          store.listStrikes(null, interaction.guildId).catch(() => []),
+        ]);
+        const validActionsById = new Map();
+        for (const row of [...warnings, ...strikes]) {
+          if (Number(row.timestamp || 0) < monthStart) continue;
+          validActionsById.set(String(row.moderatorId || ''), (validActionsById.get(String(row.moderatorId || '')) || 0) + 1);
+        }
         const rows = [];
         for (const [staffId, s] of Object.entries(stats || {})) {
           const member = await interaction.guild.members.fetch(staffId).catch(() => null);
@@ -9569,34 +10369,51 @@ if (commandName === 'giveaway') {
           if (!isStaffMember(member, cfg) && !member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) continue;
           const closed = Number(s.closed || 0);
           const renamed = Number(s.renameCount || 0);
-          const messages = Number(s.messageCount || 0);
-          const rc = Number(s.responseCount || 0);
-          const avgMs = rc > 0 ? Math.round(Number(s.responseTotalMs || 0) / rc) : null;
-          rows.push({ staffId, closed, renamed, messages, avgMs, rc });
+          const supportMessages = Number(s.messageCount || 0);
+          const manual = (await store.getPoints('staff', staffId, interaction.guildId).catch(() => ({ currentMonth: 0 }))).currentMonth || 0;
+          const validModActions = validActionsById.get(String(staffId)) || 0;
+          const pointResult = calculateStaffPoints({
+            resolvedTickets: closed,
+            renamedTickets: renamed,
+            supportTicketMessages: supportMessages,
+            ticketMessages: supportMessages,
+            validModActions,
+            manual,
+          });
+          rows.push({ staffId, closed, renamed, supportMessages, validModActions, manual, points: pointResult.total });
         }
-        rows.sort((a,b) => (b.closed - a.closed) || (b.renamed - a.renamed) || (b.messages - a.messages) || ((a.avgMs ?? 9e18) - (b.avgMs ?? 9e18)));
+        rows.sort((a,b) => (b.points - a.points) || (b.closed - a.closed) || (b.renamed - a.renamed) || (b.supportMessages - a.supportMessages));
         const sessionId = generateId();
         const totalPages = Math.max(1, Math.ceil(rows.length / 10));
         statsPanelSessions.set(sessionId, { kind: 'staff', userId: interaction.user.id, page: 0, rows, createdAt: Date.now() });
-        const eb = renderStaffStatsEmbed(rows, 0, totalPages);
+        const eb = renderMonthlyStaffStatsEmbed(rows, 0, totalPages);
         return safeIReply(interaction, { embeds: [eb], components: statsNavRow('staff', sessionId, 0, totalPages) });
       }
 
       if (type === 'builder') {
-        const countsById = await store.getBuilderFinishedCountsById(interaction.guildId).catch(() => ({}));
+        const month = currentMonthKey();
+        const monthStart = Date.parse(`${month}-01T00:00:00.000Z`);
+        const nextMonth = new Date(monthStart);
+        nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
+        const monthEnd = nextMonth.getTime();
         const records = await store.listBuildRecords(interaction.guildId).catch(() => []);
-        const totals = (await Promise.all(Object.entries(countsById).map(async ([discordId, finished]) => {
+        await interaction.guild.members.fetch().catch(() => null);
+        const builderIds = new Set(interaction.guild.members.cache.filter(m => isBuilderMember(m)).map(m => m.id));
+        for (const r of records) if (r.builderDiscordId) builderIds.add(String(r.builderDiscordId));
+        const totals = (await Promise.all([...builderIds].map(async (discordId) => {
           const member = await interaction.guild.members.fetch(discordId).catch(() => null);
           if (!member || !isBuilderMember(member)) return null;
-          const mineRecords = records.filter(r => String(r.builderDiscordId || '') === String(discordId));
+          const mineRecords = records.filter(r => String(r.builderDiscordId || '') === String(discordId) && Number(r.at || 0) >= monthStart && Number(r.at || 0) < monthEnd);
           const earned = mineRecords.reduce((a, r) => a + Number(r.price ?? r.amount ?? 0), 0);
-          const displayName = member.displayName || member.user?.username || await resolveGuildDisplayName(interaction.guild, discordId);
-          return { discordId, displayName, finished: Number(finished || 0), earned };
-        }))).filter(Boolean).sort((a, b) => (b.finished - a.finished) || (b.earned - a.earned));
+          const manual = (await store.getPoints('builder', discordId, interaction.guildId).catch(() => ({ currentMonth: 0 }))).currentMonth || 0;
+          const points = calculateBuilderPoints({ completedBuilds: mineRecords.length, amount: earned, manual }).total;
+          if (!points && !mineRecords.length && !manual) return null;
+          return { discordId, finished: mineRecords.length, earned, manual, points };
+        }))).filter(Boolean).sort((a, b) => (b.points - a.points) || (b.earned - a.earned) || (b.finished - a.finished));
         const sessionId = generateId();
         const totalPages = Math.max(1, Math.ceil(totals.length / 10));
         statsPanelSessions.set(sessionId, { kind: 'builder', userId: interaction.user.id, page: 0, rows: totals, createdAt: Date.now() });
-        const eb = renderBuilderStatsEmbed(totals, 0, totalPages);
+        const eb = renderMonthlyBuilderStatsEmbed(totals, 0, totalPages);
         return safeIReply(interaction, { embeds: [eb], components: statsNavRow('builder', sessionId, 0, totalPages) });
       }
 
@@ -9604,6 +10421,7 @@ if (commandName === 'giveaway') {
     }
 
     if (commandName === 'stats') {
+      return interaction.reply({ content: '`/stats` was removed. Use `/manage member`, `/points`, or `/leaderboard`.', flags: 64 }).catch(() => {});
       await interaction.deferReply().catch(() => {});
       const cfg = await store.getTicketConfig().catch(() => ({}));
       if (!isStaffMember(interaction.member, cfg) && !isBuilderMember(interaction.member) && !interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
@@ -10124,6 +10942,7 @@ ${E_TIME} Created ${created}`)
 // /create was a duplicate of /embed create — removed.
 
 if (commandName === 'role') {
+  return interaction.reply({ content: '`/role grant` and `/role remove` were removed. Use `/manage member`.', flags: 64 }).catch(() => {});
   const sub = interaction.options.getSubcommand();
   await interaction.deferReply({ flags: 64 });
   const targetUser = interaction.options.getUser('user', true);
@@ -10686,6 +11505,31 @@ async function ensureLoaReactionPanel() {
   } catch (e) { console.error('LOA panel error:', e?.message || e); }
 }
 
+async function ensureLoaRequestPanel() {
+  try {
+    for (const guild of client.guilds.cache.values()) {
+      const ch = await guild.channels.fetch(LOA_REQUEST_CHANNEL_ID).catch(() => null);
+      if (!ch?.isTextBased?.()) continue;
+      const storedId = await store.getConfigValue(guild.id, 'LOA_REQUEST_PANEL_MESSAGE_ID').catch(() => null);
+      let msg = storedId ? await ch.messages.fetch(storedId).catch(() => null) : null;
+      const eb = new EmbedBuilder()
+        .setColor(0x2b2d31)
+        .setTitle('LOA Requests')
+        .setDescription('Staff and builders can request leave here. Managers review requests in the pending applications channel.')
+        .setTimestamp();
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('loa_request_open').setLabel('Request LOA').setStyle(ButtonStyle.Primary),
+      );
+      if (!msg) {
+        msg = await ch.send({ embeds: [eb], components: [row] }).catch(() => null);
+        if (msg) await store.setConfigValue(guild.id, 'LOA_REQUEST_PANEL_MESSAGE_ID', msg.id).catch(() => {});
+      } else {
+        await msg.edit({ embeds: [eb], components: [row] }).catch(() => {});
+      }
+    }
+  } catch (e) { console.error('LOA request panel error:', e?.message || e); }
+}
+
 async function handleLoaReaction(reaction, user, shouldHaveRole) {
   try {
     if (!user || user.bot) return;
@@ -10709,7 +11553,21 @@ async function handleLoaReaction(reaction, user, shouldHaveRole) {
   } catch (e) { console.error('LOA reaction error:', e?.message || e); }
 }
 
-client.on(Events.MessageReactionAdd, (reaction, user) => { handleLoaReaction(reaction, user, true); });
+async function handleActivityReaction(reaction, user) {
+  try {
+    if (!user || user.bot) return;
+    if (reaction.partial) await reaction.fetch().catch(() => null);
+    if (reaction.emoji?.name !== '✅') return;
+    const messageId = reaction.message?.id;
+    if (!messageId) return;
+    await store.markActivityReaction(messageId, user.id).catch(() => {});
+  } catch (e) { console.error('activity reaction error:', e?.message || e); }
+}
+
+client.on(Events.MessageReactionAdd, (reaction, user) => {
+  handleLoaReaction(reaction, user, true);
+  handleActivityReaction(reaction, user);
+});
 client.on(Events.MessageReactionRemove, (reaction, user) => { handleLoaReaction(reaction, user, false); });
 
 // Use the explicit ClientReady event (discord.js v14+).
@@ -10720,6 +11578,9 @@ client.once(Events.ClientReady, async () => {
   automod.register(client, store);
   antiraid.register(client, store);
   await ensureLoaReactionPanel().catch(() => {});
+  await ensureLoaRequestPanel().catch(() => {});
+  await processDueActivityChecks().catch(() => {});
+  setInterval(() => processDueActivityChecks().catch(() => {}), 5 * 60 * 1000);
 
   cleanupTranscriptsOnBoot().catch(() => {});
 

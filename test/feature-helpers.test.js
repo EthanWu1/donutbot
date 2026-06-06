@@ -34,39 +34,41 @@ function memberWithRoles(roleIds = [], roleNames = []) {
   };
 }
 
-test('builder points reward completed value but cap huge orders', () => {
+test('builder points use 50m value buckets plus speed boost', () => {
   const points = calculateBuilderPoints({
     completedBuilds: 1,
     amount: 200_000_000,
-    onTime: true,
-    rating: 5,
+    completedInMs: 24 * 60 * 60 * 1000,
     avoidableRefund: false,
     manual: 3
   });
 
-  assert.equal(points.total, 113);
+  assert.equal(points.total, 8);
   assert.deepEqual(points.parts, {
-    completed: 20,
-    value: 60,
-    onTime: 10,
-    rating: 20,
+    value: 4,
+    speedBonus: 1,
     refundPenalty: 0,
     manual: 3
   });
 });
 
-test('staff points cap routine moderation credit per day', () => {
+test('staff points emphasize closed tickets and devalue raw messages', () => {
   const points = calculateStaffPoints({
     resolvedTickets: 2,
+    renamedTickets: 3,
     applicationReviews: 1,
-    validModActions: 20,
+    validModActions: 4,
+    ticketMessages: 120,
+    supportTicketMessages: 30,
     vouches: 3,
     overturnedActions: 1,
     strikes: 1
   });
 
-  assert.equal(points.parts.modActions, 30);
-  assert.equal(points.total, 18);
+  assert.equal(points.parts.messages, 1);
+  assert.equal(points.parts.supportMessages, 3);
+  assert.equal(points.parts.closedTickets, 12);
+  assert.equal(points.total, 16);
 });
 
 test('whitelist matches user, channel, or any member role', () => {

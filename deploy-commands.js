@@ -11,37 +11,15 @@ if (!APP_TOKEN || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
 }
 
 const commands = [
-  // --- HELP ---
-  new SlashCommandBuilder()
-    .setName('help')
-    .setDescription('Browse the bot’s commands by category'),
-
   // --- LEVELING ---
   new SlashCommandBuilder()
     .setName('level')
-    .setDescription('Check rank and level')
-    .addSubcommand(s => s
-      .setName('check')
-      .setDescription("Check a user's level")
-      .addUserOption(o => o.setName('user').setDescription('Target user')))
-    .addSubcommand(s => s
-      .setName('add')
-      .setDescription('Add levels to a user')
-      .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-      .addIntegerOption(o => o.setName('amount').setDescription('Levels to add').setRequired(true)))
-    .addSubcommand(s => s
-      .setName('set')
-      .setDescription('Set a user to an exact level')
-      .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-      .addIntegerOption(o => o.setName('level').setDescription('Exact level').setRequired(true)))
-    .addSubcommand(s => s
-      .setName('multiplier')
-      .setDescription('Set the global XP multiplier')
-      .addNumberOption(o => o.setName('value').setDescription('XP multiplier, e.g. 1, 1.5, 2').setRequired(true))),
+    .setDescription('Check a user level')
+    .addUserOption(o => o.setName('user').setDescription('Target user')),
 
   new SlashCommandBuilder()
     .setName('points')
-    .setDescription('Show XP plus builder/staff points')
+    .setDescription('Show builder/staff points')
     .addUserOption(o => o.setName('user').setDescription('Target user')),
 
   new SlashCommandBuilder()
@@ -57,13 +35,6 @@ const commands = [
           { name: 'Spawner Prices', value: 'spawner_prices' },
         )))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-  new SlashCommandBuilder()
-    .setName('apply')
-    .setDescription('Start an application')
-    .addSubcommand(s => s.setName('builder').setDescription('Apply for builder (Rare+)'))
-    .addSubcommand(s => s.setName('staff').setDescription('Apply for staff (Epic+)')),
-
 
   // --- MODERATION ---
   new SlashCommandBuilder()
@@ -85,12 +56,6 @@ const commands = [
   new SlashCommandBuilder()
     .setName('serverinfo')
     .setDescription('Server information'),
-
-  // --- AFK ---
-  new SlashCommandBuilder()
-    .setName('afk')
-    .setDescription('Set your AFK status')
-    .addStringOption(o => o.setName('reason').setDescription('Reason (optional)').setRequired(false)),
 
   // --- SUGGESTION ---
   new SlashCommandBuilder()
@@ -121,20 +86,6 @@ const commands = [
     .addSubcommand(s => s.setName('create').setDescription('Create an embed'))
     .addSubcommand(s => s.setName('edit').setDescription('Edit an existing embed in this channel (dropdown)'))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
-
-  // --- ROLE MANAGEMENT ---
-  new SlashCommandBuilder()
-    .setName('role')
-    .setDescription('Grant or remove roles')
-    .addSubcommand(s => s.setName('grant').setDescription('Grant a role to a member')
-      .addUserOption(o => o.setName('user').setDescription('Target member').setRequired(true))
-      .addRoleOption(o => o.setName('role').setDescription('Role to grant').setRequired(true))
-      .addStringOption(o => o.setName('duration').setDescription('Optional duration, e.g. 2h, 7d').setRequired(false)))
-    .addSubcommand(s => s.setName('remove').setDescription('Remove a role from a member')
-      .addUserOption(o => o.setName('user').setDescription('Target member').setRequired(true))
-      .addRoleOption(o => o.setName('role').setDescription('Role to remove').setRequired(true)))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
-
 
   // --- VOUCHES ---
   new SlashCommandBuilder()
@@ -209,9 +160,9 @@ const commands = [
       )),
 
   new SlashCommandBuilder()
-    .setName('stats')
-    .setDescription('Show staff and builder stats for a member')
-    .addUserOption(o => o.setName('staff').setDescription('Member to view').setRequired(false)),
+    .setName('activity')
+    .setDescription('Start a staff/builder activity check')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
     .setName('stafflist')

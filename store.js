@@ -49,6 +49,8 @@ const DEFAULT_DATA = {
   refunds: [],
   pointEvents: [],
   points: { builders: {}, staff: {} },
+  activityChecks: {},
+  memberLogs: [],
   // Weekly staff pay tracking: { weekStart: number, boardMessageId: string|null, members: { [userId]: { paid: bool, streak: number } } }
   staffPay: { weekStart: 0, boardMessageId: null, members: {} },
   staffList: { support: {}, builders: {}, supportMessageId: null, buildersMessageId: null },
@@ -212,6 +214,8 @@ function normalizeData(d) {
   out.points ||= { builders: {}, staff: {} };
   out.points.builders ||= {};
   out.points.staff ||= {};
+  out.activityChecks ||= {};
+  out.memberLogs ||= [];
   out.builderFinishedCountsById ||= {};
   out.autonick ||= {};
   out.loas ||= [];
@@ -587,6 +591,8 @@ async function removeWarning(userId, guildId, index) { await ensureDb(); const l
 async function addStrike(userId, guildId, reason, moderatorId) { await ensureDb(); dataStore().strikes.push({ id: Date.now().toString()+Math.random(), userId, guildId, reason, moderatorId, timestamp: Date.now() }); scheduleDbWrite(); return dataStore().strikes.filter(s => s.userId === userId && s.guildId === guildId).length; }
 async function removeStrike(userId, guildId, index) { await ensureDb(); const list = dataStore().strikes.filter(s => s.userId === userId && s.guildId === guildId); if (!list.length) return false; const target = index ? list[index-1] : list[list.length-1]; if(target) { dataStore().strikes = dataStore().strikes.filter(s => s.id !== target.id); scheduleDbWrite(); return true; } return false; }
 async function getStrikeCount(userId, guildId) { await ensureDb(); return dataStore().strikes.filter(s => s.userId === userId && s.guildId === guildId).length; }
+async function listWarnings(userId, guildId) { await ensureDb(); return dataStore().warnings.filter(w => (!userId || w.userId === userId) && (!guildId || w.guildId === guildId)).slice().sort((a,b)=>(b.timestamp||0)-(a.timestamp||0)); }
+async function listStrikes(userId, guildId) { await ensureDb(); return dataStore().strikes.filter(s => (!userId || s.userId === userId) && (!guildId || s.guildId === guildId)).slice().sort((a,b)=>(b.timestamp||0)-(a.timestamp||0)); }
 function normalizeVouchEntry(x) {
   // Back-compat: old format stored voucherId as a string.
   if (!x) return null;
@@ -789,16 +795,36 @@ function ensureTicketStatsRow(guildId, staffId) {
     messageCount: Number(existing.messageCount || 0),
     responseTotalMs: Number(existing.responseTotalMs || 0),
     responseCount: Number(existing.responseCount || 0),
+    monthly: existing.monthly && typeof existing.monthly === 'object' ? existing.monthly : {},
   };
   dataStore().ticketStats[guildId][staffId] = row;
   return row;
 }
 
+function ensureTicketStatsMonth(row, ts = Date.now()) {
+  const month = monthKey(ts);
+  row.monthly ||= {};
+  row.monthly[month] ||= {
+    closed: 0,
+    claimed: 0,
+    openCount: 0,
+    renameCount: 0,
+    messageCount: 0,
+    responseTotalMs: 0,
+    responseCount: 0,
+  };
+  return row.monthly[month];
+}
+
 async function recordTicketResponse(guildId, staffId, ms) {
   await ensureDb();
   const row = ensureTicketStatsRow(guildId, staffId);
-  row.responseTotalMs = (row.responseTotalMs || 0) + Math.max(0, Number(ms) || 0);
+  const value = Math.max(0, Number(ms) || 0);
+  row.responseTotalMs = (row.responseTotalMs || 0) + value;
   row.responseCount = (row.responseCount || 0) + 1;
+  const monthly = ensureTicketStatsMonth(row);
+  monthly.responseTotalMs = (monthly.responseTotalMs || 0) + value;
+  monthly.responseCount = (monthly.responseCount || 0) + 1;
   scheduleDbWrite();
   return row;
 }
@@ -807,6 +833,7 @@ async function recordTicketClosed(guildId, staffId) {
   await ensureDb();
   const row = ensureTicketStatsRow(guildId, staffId);
   row.closed = (row.closed || 0) + 1;
+  ensureTicketStatsMonth(row).closed += 1;
   scheduleDbWrite();
   return row;
 }
@@ -815,6 +842,7 @@ async function recordTicketClaimed(guildId, staffId) {
   await ensureDb();
   const row = ensureTicketStatsRow(guildId, staffId);
   row.claimed = (row.claimed || 0) + 1;
+  ensureTicketStatsMonth(row).claimed += 1;
   scheduleDbWrite();
   return row;
 }
@@ -823,6 +851,7 @@ async function recordTicketOpened(guildId, staffId) {
   await ensureDb();
   const row = ensureTicketStatsRow(guildId, staffId);
   row.openCount = (row.openCount || 0) + 1;
+  ensureTicketStatsMonth(row).openCount += 1;
   scheduleDbWrite();
   return row;
 }
@@ -831,6 +860,7 @@ async function recordTicketRenamed(guildId, staffId) {
   await ensureDb();
   const row = ensureTicketStatsRow(guildId, staffId);
   row.renameCount = (row.renameCount || 0) + 1;
+  ensureTicketStatsMonth(row).renameCount += 1;
   scheduleDbWrite();
   return row;
 }
@@ -839,6 +869,7 @@ async function recordTicketMessage(guildId, staffId) {
   await ensureDb();
   const row = ensureTicketStatsRow(guildId, staffId);
   row.messageCount = (row.messageCount || 0) + 1;
+  ensureTicketStatsMonth(row).messageCount += 1;
   scheduleDbWrite();
   return row;
 }
@@ -848,23 +879,38 @@ async function getTicketStats(guildId) {
   return dataStore().ticketStats?.[guildId] || {};
 }
 
+async function getTicketStatsForMonth(guildId, month = monthKey()) {
+  await ensureDb();
+  const stats = dataStore().ticketStats?.[guildId] || {};
+  const out = {};
+  for (const [staffId, row] of Object.entries(stats)) {
+    out[staffId] = row?.monthly?.[month] || {};
+  }
+  return out;
+}
+
 async function getStaffPointMetrics(guildId, userId) {
   await ensureDb();
   const uid = String(userId || '');
   const gid = String(guildId || '');
-  const stats = dataStore().ticketStats?.[gid]?.[uid] || {};
+  const month = monthKey();
+  const monthStart = Date.parse(`${month}-01T00:00:00.000Z`);
+  const stats = dataStore().ticketStats?.[gid]?.[uid]?.monthly?.[month] || {};
   const appSubs = Object.values(dataStore().ticketSystem?.applications?.submissions || {});
   const applicationReviews = appSubs.filter(s =>
     String(s?.decidedById || '') === uid &&
-    (!gid || !s?.guildId || String(s.guildId) === gid)
+    (!gid || !s?.guildId || String(s.guildId) === gid) &&
+    Number(s?.decidedAt || s?.updatedAt || 0) >= monthStart
   ).length;
   const warnings = (dataStore().warnings || []).filter(w =>
     String(w?.moderatorId || '') === uid &&
-    (!gid || !w?.guildId || String(w.guildId) === gid)
+    (!gid || !w?.guildId || String(w.guildId) === gid) &&
+    Number(w?.timestamp || 0) >= monthStart
   ).length;
   const strikes = (dataStore().strikes || []).filter(s =>
     String(s?.moderatorId || '') === uid &&
-    (!gid || !s?.guildId || String(s.guildId) === gid)
+    (!gid || !s?.guildId || String(s.guildId) === gid) &&
+    Number(s?.timestamp || 0) >= monthStart
   ).length;
   const vouchRow = (dataStore().vouches || []).find(v =>
     String(v?.userId || '') === uid &&
@@ -873,7 +919,9 @@ async function getStaffPointMetrics(guildId, userId) {
   return {
     resolvedTickets: Number(stats.closed || 0),
     claimedTickets: Number(stats.claimed || 0),
+    renamedTickets: Number(stats.renameCount || 0),
     ticketMessages: Number(stats.messageCount || 0),
+    supportTicketMessages: Number(stats.messageCount || 0),
     applicationReviews,
     validModActions: warnings + strikes,
     vouches: Array.isArray(vouchRow?.vouchers) ? vouchRow.vouchers.length : 0
@@ -1028,7 +1076,16 @@ async function listBuildRecords(guildId, opts) {
 async function getBuilderPointMetrics(guildId, userId) {
   await ensureDb();
   const records = await listBuildRecordsByDiscord(guildId, userId);
-  const finished = records.filter(r => String(r.status || 'FINISHED').toUpperCase() === 'FINISHED');
+  const month = monthKey();
+  const monthStart = Date.parse(`${month}-01T00:00:00.000Z`);
+  const nextMonth = new Date(monthStart);
+  nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
+  const monthEnd = nextMonth.getTime();
+  const finished = records.filter(r =>
+    String(r.status || 'FINISHED').toUpperCase() === 'FINISHED' &&
+    Number(r.at || 0) >= monthStart &&
+    Number(r.at || 0) < monthEnd
+  );
   const amount = finished.reduce((sum, r) => sum + Number(r.price ?? r.amount ?? 0), 0);
   const refunds = (dataStore().refunds || []).filter(r => {
     const job = dataStore().buildJobs?.[r.buildId];
@@ -1134,6 +1191,66 @@ async function getPoints(kind, userId, guildId) {
   const profile = dataStore().points?.[bucketName]?.[key] || { userId, guildId, lifetime: 0, monthly: {}, events: 0 };
   const month = monthKey();
   return { ...profile, currentMonth: profile.monthly?.[month] || 0 };
+}
+
+async function listPointEvents(guildId, userId, limit = 20) {
+  await ensureDb();
+  return (dataStore().pointEvents || [])
+    .filter(e => (!guildId || String(e.guildId || '') === String(guildId)) && (!userId || String(e.userId || '') === String(userId)))
+    .slice()
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    .slice(0, Math.max(1, Math.min(100, Number(limit) || 20)));
+}
+
+async function addMemberLog(guildId, userId, type, message, actorId = null, meta = {}) {
+  await ensureDb();
+  dataStore().memberLogs ||= [];
+  const row = { id: randomUUID(), guildId, userId: String(userId), type: String(type || 'log'), message: String(message || '').slice(0, 500), actorId: actorId ? String(actorId) : null, timestamp: Date.now(), meta };
+  dataStore().memberLogs.push(row);
+  scheduleDbWrite();
+  return row;
+}
+
+async function listMemberLogs(guildId, userId, limit = 20) {
+  await ensureDb();
+  return (dataStore().memberLogs || [])
+    .filter(e => (!guildId || String(e.guildId || '') === String(guildId)) && (!userId || String(e.userId || '') === String(userId)))
+    .slice()
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    .slice(0, Math.max(1, Math.min(100, Number(limit) || 20)));
+}
+
+async function createActivityCheck(guildId, check) {
+  await ensureDb();
+  dataStore().activityChecks ||= {};
+  const id = check?.id || randomUUID();
+  const row = { id, guildId, channelId: check.channelId, messageId: check.messageId || null, createdBy: check.createdBy || null, createdAt: check.createdAt || Date.now(), dueAt: check.dueAt || (Date.now() + 12 * 60 * 60 * 1000), requiredUserIds: (check.requiredUserIds || []).map(String), reactedUserIds: [], processed: false };
+  dataStore().activityChecks[id] = row;
+  scheduleDbWrite();
+  return row;
+}
+
+async function markActivityReaction(messageId, userId) {
+  await ensureDb();
+  const row = Object.values(dataStore().activityChecks || {}).find(c => String(c.messageId || '') === String(messageId || '') && !c.processed);
+  if (!row) return null;
+  row.reactedUserIds ||= [];
+  if (!row.reactedUserIds.map(String).includes(String(userId))) row.reactedUserIds.push(String(userId));
+  scheduleDbWrite();
+  return row;
+}
+
+async function listDueActivityChecks(now = Date.now()) {
+  await ensureDb();
+  return Object.values(dataStore().activityChecks || {}).filter(c => !c.processed && Number(c.dueAt || 0) <= now);
+}
+
+async function updateActivityCheck(id, patch) {
+  await ensureDb();
+  if (!dataStore().activityChecks?.[id]) return null;
+  Object.assign(dataStore().activityChecks[id], patch || {});
+  scheduleDbWrite();
+  return dataStore().activityChecks[id];
 }
 
 async function deleteBuildJob(id) {
@@ -1577,7 +1694,7 @@ module.exports = {
   getTicketSystem, getTicketConfig, setTicketConfig,
   listTicketPanels, getTicketPanel, setTicketPanel, deleteTicketPanel,
   nextTicketId, createTicketRecord, getTicketRecord, updateTicketRecord, deleteTicketRecord, findOpenTicketByUserButton, listOpenSpawnerTickets,
-  recordTicketResponse, recordTicketClosed, recordTicketClaimed, recordTicketOpened, recordTicketRenamed, recordTicketMessage, getTicketStats, getStaffPointMetrics,
+  recordTicketResponse, recordTicketClosed, recordTicketClaimed, recordTicketOpened, recordTicketRenamed, recordTicketMessage, getTicketStats, getTicketStatsForMonth, getStaffPointMetrics,
   listAppTypes, getAppType, setAppType, deleteAppType, createAppSubmission, getAppSubmission, updateAppSubmission,
 getAutoNickConfig, setAutoNickPrefix, seedAutoNickDefaults,
 addLoa, getLoas, revokeLoa, getActiveLoa,
@@ -1597,4 +1714,6 @@ getSchematicSubmission, setSchematicSubmission, updateSchematicSubmission, findS
 listSchematicSubmissions, findSchematicSubmissionByForumThread,
 getSchematicGuidelinesRef, setSchematicGuidelinesRef,
 addTimedRole, getActiveTimedRole, revokeTimedRole, listTimedRoles, listExpiredTimedRoles,
+listWarnings, listStrikes, listPointEvents, addMemberLog, listMemberLogs,
+createActivityCheck, markActivityReaction, listDueActivityChecks, updateActivityCheck,
 };
