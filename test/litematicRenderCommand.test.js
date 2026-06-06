@@ -29,8 +29,8 @@ test('builds render embed with volume, size, and attached transparent image', ()
     { name: 'Volume', value: '`24,899/35,090`', inline: true },
     { name: 'Size', value: '`55 x 22 x 29`', inline: true },
   ]);
-  assert.equal(embed.image.url, `attachment://${message.files[0].name}`);
-  assert.match(message.files[0].name, /^EtZ_Kelp_T2_3_NEW-render\.png$/);
+  assert.equal(embed.image.url, `attachment://${encodeURIComponent(message.files[0].name)}`);
+  assert.equal(message.files[0].name, 'EtZ Kelp T2.3 NEW-render.png');
 });
 
 test('render command renders litematic attachment with transparent background option', async () => {

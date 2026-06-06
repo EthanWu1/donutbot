@@ -38,6 +38,7 @@ const { getUserBalance } = require('./donutsApi');
 const { parseNumber, parseDuration, getLevelFromXp, getXpForLevel, sanitizeDisplayName } = require('./utils');
 const { generateRankCard } = require('./rankCard');
 const { schematicVolume } = require('./lib/litematicRenderCommand');
+const attachmentDownload = require('./lib/attachmentDownload');
 const {
   APPLICATION_COOLDOWN_MS,
   buildBuilderLeaderboardLine,
@@ -1310,26 +1311,30 @@ async function postOrUpdateSchematicDraftPreview(channel, sub) {
 }
 
 // Find the most-recent .litematic attachment in a ticket channel (within the
-// last 50 messages). Returns { url, name, message } or null.
+// last 50 messages). Returns { url, proxyUrl, name, message } or null.
 async function findLatestLitematicAttachment(channel) {
   const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
   if (!recent) return null;
   for (const msg of recent.values()) {
     for (const a of msg.attachments.values()) {
       if (/\.litematic$/i.test(a.name || a.url || '')) {
-        return { url: a.url, name: a.name || 'schematic.litematic', message: msg };
+        return {
+          url: a.url,
+          proxyUrl: a.proxyURL || a.proxyUrl || a.proxy_url || null,
+          name: a.name || 'schematic.litematic',
+          message: msg,
+          attachment: a,
+        };
       }
     }
   }
   return null;
 }
 
-// Download a URL into a Buffer (used for re-attaching the .litematic to the
-// forum post and for piping into the renderer).
-async function downloadToBuffer(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`download ${url}: ${res.status}`);
-  return Buffer.from(await res.arrayBuffer());
+// Download an attachment/URL into a Buffer. Discord CDN links can expire; when
+// a live Attachment object is available this retries its proxy URL.
+async function downloadToBuffer(source) {
+  return attachmentDownload.downloadToBuffer(source);
 }
 
 // Forum-post renders use a 16:10 landscape frame. Discord's forum Gallery
@@ -1378,18 +1383,21 @@ async function regenerateSchematicRender(channel, sub) {
   const found = await findLatestLitematicAttachment(channel);
   if (!found) return { ok: false, reason: 'No .litematic file found in this ticket. Upload one first.' };
   try {
-    const litematicBuf = await downloadToBuffer(found.url);
+    const litematicBuf = await downloadToBuffer(found);
     const rendered = await renderLitematicToPng(litematicBuf, Number(sub.rotation) || 0);
     const renderBuf = rendered.png;
     // Upload render as a fresh message attachment so we get a stable Discord CDN URL.
     const renderMsg = await channel.send({
       files: [new AttachmentBuilder(renderBuf, { name: 'render.png' })],
     }).catch(() => null);
-    const renderUrl = renderMsg?.attachments?.first()?.url || null;
+    const renderAtt = renderMsg?.attachments?.first?.() || null;
+    const renderUrl = renderAtt?.url || null;
     const updated = await store.updateSchematicSubmission(sub.id, {
       renderUrl,
+      renderProxyUrl: renderAtt?.proxyURL || renderAtt?.proxyUrl || renderAtt?.proxy_url || null,
       renderMessageId: renderMsg?.id || null,
       litematicUrl: found.url,
+      litematicProxyUrl: found.proxyUrl || null,
       litematicName: found.name,
       size: rendered.size || sub.size || null,
       blockCount: Number(rendered.blockCount) || sub.blockCount || null,
@@ -1421,7 +1429,7 @@ async function startForumRenderConfirm(uploadMessage, sub) {
 
   let png, size, blockCount;
   try {
-    const buf = await downloadToBuffer(found.url);
+    const buf = await downloadToBuffer(found);
     const rendered = await renderLitematicToPng(buf, 0);
     png = rendered.png;
     size = rendered.size;
@@ -1453,6 +1461,7 @@ async function startForumRenderConfirm(uploadMessage, sub) {
   await store.updateSchematicSubmission(sub.id, {
     pendingRender: {
       litematicUrl: found.url,
+      litematicProxyUrl: found.proxyURL || found.proxyUrl || found.proxy_url || null,
       litematicName: found.name || 'schematic.litematic',
       rotation: 0,
       size: size || null,
@@ -1519,7 +1528,7 @@ async function postOrUpdateSchematicGallery(channel, sub) {
   const kept = [];
   for (const img of images) {
     try {
-      files.push(new AttachmentBuilder(await downloadToBuffer(img.url), { name: img.name || 'image.png' }));
+      files.push(new AttachmentBuilder(await downloadToBuffer(img), { name: img.name || 'image.png' }));
       kept.push(img);
     } catch (e) { console.error('[schematic gallery] image fetch failed:', e?.message); }
   }
@@ -1547,7 +1556,11 @@ async function postOrUpdateSchematicGallery(channel, sub) {
     await store.updateSchematicSubmission(sub.id, {
       galleryMessageId: msg.id,
       galleryChannelId: channel.id,
-      ...(atts.length ? { images: atts.map(a => ({ url: a.url, name: a.name || 'image.png' })) } : {}),
+      ...(atts.length ? { images: atts.map(a => ({
+        url: a.url,
+        proxyUrl: a.proxyURL || a.proxyUrl || a.proxy_url || null,
+        name: a.name || 'image.png',
+      })) } : {}),
     }).catch(() => {});
   }
   return msg || null;
@@ -1606,10 +1619,29 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     return { ok: false, reason: 'Missing render or .litematic — upload a .litematic and run /publish render.' };
   }
 
+  let thread = null;
+  if (sub.forumThreadId) {
+    thread = await forum.threads.fetch(sub.forumThreadId).catch(() => null);
+  }
+
+  const publishedSources = {};
+  if (thread) {
+    const starter = await thread.fetchStarterMessage().catch(() => null);
+    const atts = starter ? [...starter.attachments.values()] : [];
+    publishedSources.render = atts.find(a => /\.png$/i.test(a.name || '')) || null;
+    publishedSources.litematic = atts.find(a => /\.litematic$/i.test(a.name || '')) || null;
+  }
+
   let renderBuf, litematicBuf;
   try {
-    renderBuf    = await downloadToBuffer(sub.renderUrl);
-    litematicBuf = await downloadToBuffer(sub.litematicUrl);
+    renderBuf = await downloadToBuffer([
+      { url: sub.renderUrl, proxyUrl: sub.renderProxyUrl },
+      publishedSources.render,
+    ]);
+    litematicBuf = await downloadToBuffer([
+      { url: sub.litematicUrl, proxyUrl: sub.litematicProxyUrl },
+      publishedSources.litematic,
+    ]);
   } catch (e) {
     return { ok: false, reason: `Could not fetch source files: ${e?.message || e}` };
   }
@@ -1640,11 +1672,6 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
   // If the submission already references a forum thread, try to edit that
   // thread's starter message in place. Falls through to creating a new thread
   // if the original was deleted manually.
-  let thread = null;
-  if (sub.forumThreadId) {
-    thread = await forum.threads.fetch(sub.forumThreadId).catch(() => null);
-  }
-
   if (thread) {
     // If the thread is archived, un-archive before editing so designers don't
     // hit a "thread is archived" error on subsequent edits.
@@ -1678,7 +1705,9 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
           publishedAt: sub.publishedAt || Date.now(),
           updatedAt: Date.now(),
           renderUrl: renderAtt?.url || sub.renderUrl,
+          renderProxyUrl: renderAtt?.proxyURL || renderAtt?.proxyUrl || renderAtt?.proxy_url || sub.renderProxyUrl || null,
           litematicUrl: litematicAtt?.url || sub.litematicUrl,
+          litematicProxyUrl: litematicAtt?.proxyURL || litematicAtt?.proxyUrl || litematicAtt?.proxy_url || sub.litematicProxyUrl || null,
           size: sub.size || null,
           blockCount: sub.blockCount || null,
         }).catch(() => {});
@@ -1721,7 +1750,9 @@ async function publishOrUpdateSchematicForumPost(guild, sub) {
     publishedAt: Date.now(),
     updatedAt: Date.now(),
     renderUrl: renderNew?.url || sub.renderUrl,
+    renderProxyUrl: renderNew?.proxyURL || renderNew?.proxyUrl || renderNew?.proxy_url || sub.renderProxyUrl || null,
     litematicUrl: litematicNew?.url || sub.litematicUrl,
+    litematicProxyUrl: litematicNew?.proxyURL || litematicNew?.proxyUrl || litematicNew?.proxy_url || sub.litematicProxyUrl || null,
     size: sub.size || null,
     blockCount: sub.blockCount || null,
   }).catch(() => {});
@@ -1785,7 +1816,7 @@ async function backfillSchematicPosts(client) {
       const hasFooter = (starter.content || '').includes(SCHEMATIC_FOOTER_MARKER);
       if (isLandscape && hasFooter) continue;
 
-      const litematicBuf = await downloadToBuffer(litematicAtt.url).catch(() => null);
+      const litematicBuf = await downloadToBuffer(litematicAtt).catch(() => null);
       if (!litematicBuf) { failed += 1; continue; }
 
       // Re-render only when the render isn't already landscape; otherwise just
@@ -1917,8 +1948,10 @@ async function importSchematicFromThread(guild, threadIdOrUrl, currentSub) {
     build:       source.build,
     howto:       source.howto,
     litematicUrl:  source.litematicUrl,
+    litematicProxyUrl: source.litematicProxyUrl || null,
     litematicName: source.litematicName,
     renderUrl:     source.renderUrl,
+    renderProxyUrl: source.renderProxyUrl || null,
     forumThreadId: threadId,
     forumStarterMessageId: source.forumStarterMessageId || null,
     status: 'DRAFT',
@@ -6156,7 +6189,11 @@ client.on('messageCreate', async (message) => {
             if (room <= 0) {
               await message.channel.send({ content: `Image limit reached (${SCHEMATIC_IMAGE_MAX}). Remove some from the Images panel before adding more.`, allowedMentions: { parse: [] } }).catch(() => {});
             } else {
-              const added = imgs.slice(0, room).map(a => ({ url: a.url, name: a.name || 'image.png' }));
+              const added = imgs.slice(0, room).map(a => ({
+                url: a.url,
+                proxyUrl: a.proxyURL || a.proxyUrl || a.proxy_url || null,
+                name: a.name || 'image.png',
+              }));
               const updated = await store.updateSchematicSubmission(sub.id, { images: [...current, ...added], updatedAt: Date.now() }).catch(() => sub) || sub;
               if (imgs.length > room) {
                 await message.channel.send({ content: `Only ${room} of ${imgs.length} image(s) added — the ${SCHEMATIC_IMAGE_MAX}-image limit was reached.`, allowedMentions: { parse: [] } }).catch(() => {});
@@ -7057,7 +7094,7 @@ if (interaction.isButton() && interaction.customId.startsWith('schempend:')) {
     await interaction.deferUpdate().catch(() => {});
     const newRotation = (((Number(pr.rotation) || 0) + (action === 'l' ? -90 : 90)) % 360 + 360) % 360;
     try {
-      const buf = await downloadToBuffer(pr.litematicUrl);
+      const buf = await downloadToBuffer({ url: pr.litematicUrl, proxyUrl: pr.litematicProxyUrl });
       const rendered = await renderLitematicToPng(buf, newRotation);
       const baseEmbed = interaction.message.embeds?.[0]
         ? EmbedBuilder.from(interaction.message.embeds[0])
@@ -7099,6 +7136,7 @@ if (interaction.isButton() && interaction.customId.startsWith('schempend:')) {
     if (!renderUrl) return safeIReply(interaction, { content: 'Could not find the preview render — upload the `.litematic` again.', flags: 64 });
     await store.updateSchematicSubmission(subId, {
       litematicUrl: pr.litematicUrl,
+      litematicProxyUrl: pr.litematicProxyUrl || null,
       litematicName: pr.litematicName,
       renderUrl,
       rotation: Number(pr.rotation) || 0,
