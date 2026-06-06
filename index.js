@@ -11468,46 +11468,27 @@ function stopPaywatchPolling(watchId) { const t = paywatchTimers.get(watchId); i
 // ════════════════════════════════════════════════════════════════════════════
 // ════════════════════════════════════════════════════════════════════════════
 
-async function ensureLoaReactionPanel() {
+async function removeLegacyLoaReactionPanel() {
   try {
-    const guild = client.guilds.cache.get('1483225250698105063');
-    if (!guild) return;
-
     const cfg = await store.getLoaConfig().catch(() => ({ channelId: '', messageId: '', roleId: '' }));
-    const roleId = String(cfg?.roleId || LOA_ROLE_ID || '');
-    let channelId = String(cfg?.channelId || '');
-    let messageId = String(cfg?.messageId || '');
-
-    if (!messageId) {
-      const storedId = await store.getConfigValue(guild.id, 'LOA_PANEL_MESSAGE_ID').catch(() => null);
-      if (storedId) messageId = String(storedId);
+    for (const guild of client.guilds.cache.values()) {
+      let channelId = String(cfg?.channelId || C.CHANNEL_WELCOME || '');
+      let messageId = String(cfg?.messageId || '');
+      if (!messageId) {
+        const storedId = await store.getConfigValue(guild.id, 'LOA_PANEL_MESSAGE_ID').catch(() => null);
+        if (storedId) messageId = String(storedId);
+      }
+      if (channelId && messageId) {
+        const ch = await guild.channels.fetch(channelId).catch(() => null);
+        if (ch?.isTextBased?.()) {
+          const msg = await ch.messages.fetch(messageId).catch(() => null);
+          if (msg) await msg.delete().catch(() => {});
+        }
+      }
+      await store.setConfigValue(guild.id, 'LOA_PANEL_MESSAGE_ID', '').catch(() => {});
     }
-    if (!channelId) channelId = String(C.CHANNEL_WELCOME || '');
-    if (!roleId || !channelId) return;
-
-    const ch = await guild.channels.fetch(channelId).catch(() => null);
-    if (!ch?.isTextBased?.()) return;
-
-    let msg = messageId ? await ch.messages.fetch(messageId).catch(() => null) : null;
-    const embed = new EmbedBuilder()
-      .setColor(0x2b2d31)
-      .setTitle('LOA Role')
-      .setDescription(`React with 📵 to toggle the **LOA** role.\n\nRemove your reaction to remove the role. This embed is safe to edit later.`)
-      .setTimestamp();
-
-    if (!msg) {
-      msg = await ch.send({ embeds: [embed] }).catch(() => null);
-      if (!msg) return;
-    } else {
-      await msg.edit({ embeds: [embed] }).catch(() => {});
-    }
-
-    await store.setLoaConfig({ channelId: ch.id, messageId: msg.id, roleId }).catch(() => {});
-    await store.setConfigValue(guild.id, 'LOA_PANEL_MESSAGE_ID', msg.id).catch(() => {});
-
-    const has = msg.reactions?.cache?.find?.(r => r.emoji?.name === '📵');
-    if (!has) await msg.react('📵').catch(() => {});
-  } catch (e) { console.error('LOA panel error:', e?.message || e); }
+    await store.setLoaConfig({ channelId: '', messageId: '', roleId: String(cfg?.roleId || LOA_ROLE_ID || '') }).catch(() => {});
+  } catch (e) { console.error('legacy LOA panel cleanup error:', e?.message || e); }
 }
 
 async function ensureLoaRequestPanel() {
@@ -11535,29 +11516,6 @@ async function ensureLoaRequestPanel() {
   } catch (e) { console.error('LOA request panel error:', e?.message || e); }
 }
 
-async function handleLoaReaction(reaction, user, shouldHaveRole) {
-  try {
-    if (!user || user.bot) return;
-    if (reaction.partial) await reaction.fetch().catch(() => null);
-    const message = reaction.message;
-    if (!message?.guildId || reaction.emoji?.name !== '📵') return;
-
-    const cfg = await store.getLoaConfig().catch(() => ({ channelId: '', messageId: '', roleId: '' }));
-    const roleId = String(cfg?.roleId || LOA_ROLE_ID || '');
-    const panelId = String(cfg?.messageId || (await store.getConfigValue(message.guildId, 'LOA_PANEL_MESSAGE_ID').catch(() => null)) || '');
-    if (!panelId || String(message.id) !== panelId || !roleId) return;
-
-    const guild = message.guild || await client.guilds.fetch(message.guildId).catch(() => null);
-    const member = guild ? await guild.members.fetch(user.id).catch(() => null) : null;
-    if (!member) return;
-    if (shouldHaveRole) {
-      if (!member.roles.cache.has(roleId)) await member.roles.add(roleId, 'LOA reaction role').catch(() => {});
-    } else {
-      if (member.roles.cache.has(roleId)) await member.roles.remove(roleId, 'LOA reaction role').catch(() => {});
-    }
-  } catch (e) { console.error('LOA reaction error:', e?.message || e); }
-}
-
 async function handleActivityReaction(reaction, user) {
   try {
     if (!user || user.bot) return;
@@ -11570,10 +11528,8 @@ async function handleActivityReaction(reaction, user) {
 }
 
 client.on(Events.MessageReactionAdd, (reaction, user) => {
-  handleLoaReaction(reaction, user, true);
   handleActivityReaction(reaction, user);
 });
-client.on(Events.MessageReactionRemove, (reaction, user) => { handleLoaReaction(reaction, user, false); });
 
 // Use the explicit ClientReady event (discord.js v14+).
 client.once(Events.ClientReady, async () => {
@@ -11582,7 +11538,7 @@ client.once(Events.ClientReady, async () => {
   // Register automod / anti-raid listeners
   automod.register(client, store);
   antiraid.register(client, store);
-  await ensureLoaReactionPanel().catch(() => {});
+  await removeLegacyLoaReactionPanel().catch(() => {});
   await ensureLoaRequestPanel().catch(() => {});
   await processDueActivityChecks().catch(() => {});
   setInterval(() => processDueActivityChecks().catch(() => {}), 5 * 60 * 1000);

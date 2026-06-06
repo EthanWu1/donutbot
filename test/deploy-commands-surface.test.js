@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const deploySource = fs.readFileSync(path.join(__dirname, '..', 'deploy-commands.js'), 'utf8');
+const indexSource = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 
 function commandBlock(name) {
   const start = deploySource.search(new RegExp(`new SlashCommandBuilder\\(\\)\\s*\\.setName\\('${name}'\\)`));
@@ -38,4 +39,10 @@ test('slash command surface keeps admin utilities off panel send', () => {
   assert.doesNotMatch(commandBlock('level'), /addSubcommand/);
   assert.doesNotMatch(commandBlock('automod'), /addSubcommand/);
   assert.doesNotMatch(commandBlock('antiraid'), /addSubcommand/);
+});
+
+test('loa startup replaces the legacy reaction embed with the request form', () => {
+  assert.match(indexSource, /ensureLoaRequestPanel/);
+  assert.match(indexSource, /removeLegacyLoaReactionPanel/);
+  assert.doesNotMatch(indexSource, /await ensureLoaReactionPanel\(\)/);
 });
