@@ -10,17 +10,6 @@ if (!APP_TOKEN || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
   process.exit(1);
 }
 
-const configActions = [
-  { name: 'Add', value: 'add' },
-  { name: 'Remove', value: 'remove' },
-  { name: 'List', value: 'list' },
-];
-const whitelistKinds = [
-  { name: 'User', value: 'user' },
-  { name: 'Role', value: 'role' },
-  { name: 'Channel', value: 'channel' },
-];
-
 const commands = [
   // --- HELP ---
   new SlashCommandBuilder()
@@ -66,10 +55,6 @@ const commands = [
           { name: 'Building Services', value: 'building_services' },
           { name: 'Applications', value: 'applications' },
           { name: 'Spawner Prices', value: 'spawner_prices' },
-          { name: 'Automod', value: 'automod' },
-          { name: 'Anti-Raid', value: 'antiraid' },
-          { name: 'Vouches', value: 'vouches' },
-          { name: 'People', value: 'people' },
         )))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
@@ -151,20 +136,18 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 
 
-  // --- VOUCH ---
+  // --- VOUCHES ---
   new SlashCommandBuilder()
-    .setName('vouch')
-    .setDescription('Vouch management (vouches auto-detected in vouch channel)')
-    .addSubcommand(s => s.setName('add').setDescription('Manually add vouches to a user')
-      .addUserOption(o => o.setName('user').setDescription('Target member').setRequired(true))
-      .addIntegerOption(o => o.setName('amount').setDescription('How many vouches to add').setRequired(true))
-      .addStringOption(o => o.setName('reason').setDescription('Reason (optional)').setRequired(false)))
-    .addSubcommand(s => s.setName('remove').setDescription('Manually remove vouches from a user')
-      .addUserOption(o => o.setName('user').setDescription('Target member').setRequired(true))
-      .addIntegerOption(o => o.setName('amount').setDescription('How many vouches to remove').setRequired(true))
-      .addStringOption(o => o.setName('reason').setDescription('Reason (optional)').setRequired(false)))
-    .addSubcommand(s => s.setName('check').setDescription('Check vouch count for a user')
-      .addUserOption(o => o.setName('user').setDescription('Target member').setRequired(true))),
+    .setName('vouches')
+    .setDescription('Check a member vouch count')
+    .addUserOption(o => o.setName('member').setDescription('Member to check').setRequired(true)),
+
+  // --- MEMBER MANAGEMENT ---
+  new SlashCommandBuilder()
+    .setName('manage')
+    .setDescription('Inspect and manage a member')
+    .addUserOption(o => o.setName('member').setDescription('Member to inspect').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   // --- GIVEAWAY ---
   new SlashCommandBuilder()
@@ -192,47 +175,12 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('automod')
-    .setDescription('Configure automod')
-    .addSubcommand(s => s.setName('settings').setDescription('View automod settings'))
-    .addSubcommand(s => s.setName('rule').setDescription('Configure an automod rule')
-      .addStringOption(o => o.setName('rule').setDescription('Rule to configure').setRequired(true)
-        .addChoices(
-          { name: 'Global enabled', value: 'global' },
-          { name: 'Spam', value: 'spam' },
-          { name: 'Repeated text', value: 'repeated_text' },
-          { name: 'Invites/links', value: 'links' },
-          { name: 'Caps', value: 'caps' },
-          { name: 'Attachments', value: 'attachments' },
-          { name: 'Blacklisted words', value: 'blacklist' },
-        ))
-      .addBooleanOption(o => o.setName('enabled').setDescription('Enable/disable when supported').setRequired(false))
-      .addIntegerOption(o => o.setName('limit').setDescription('Threshold/count when supported').setRequired(false))
-      .addStringOption(o => o.setName('window').setDescription('Time window, e.g. 4s, 10s').setRequired(false)))
-    .addSubcommand(s => s.setName('whitelist').setDescription('Add/remove/list automod whitelist entries')
-      .addStringOption(o => o.setName('action').setDescription('Action').setRequired(true).addChoices(...configActions))
-      .addStringOption(o => o.setName('kind').setDescription('Whitelist kind').setRequired(true).addChoices(...whitelistKinds))
-      .addStringOption(o => o.setName('id').setDescription('User/role/channel ID or mention').setRequired(false)))
-    .addSubcommand(s => s.setName('blacklist').setDescription('Add/remove/list blacklisted words and phrases')
-      .addStringOption(o => o.setName('action').setDescription('Action').setRequired(true).addChoices(...configActions))
-      .addStringOption(o => o.setName('phrase').setDescription('Word or phrase').setRequired(false)))
+    .setDescription('Open the automod panel')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
     .setName('antiraid')
-    .setDescription('Configure anti-raid')
-    .addSubcommand(s => s.setName('settings').setDescription('View anti-raid settings'))
-    .addSubcommand(s => s.setName('mode').setDescription('Set anti-raid mode')
-      .addStringOption(o => o.setName('mode').setDescription('Mode').setRequired(true)
-        .addChoices(
-          { name: 'Off', value: 'off' },
-          { name: 'Watch', value: 'watch' },
-          { name: 'Lockdown', value: 'lockdown' },
-          { name: 'Quarantine', value: 'quarantine' },
-        )))
-    .addSubcommand(s => s.setName('whitelist').setDescription('Add/remove/list anti-raid whitelist entries')
-      .addStringOption(o => o.setName('action').setDescription('Action').setRequired(true).addChoices(...configActions))
-      .addStringOption(o => o.setName('kind').setDescription('Whitelist kind').setRequired(true).addChoices(...whitelistKinds))
-      .addStringOption(o => o.setName('id').setDescription('User/role/channel ID or mention').setRequired(false)))
+    .setDescription('Open the anti-raid panel')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder()
     .setName('ticket')

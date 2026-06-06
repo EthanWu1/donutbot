@@ -892,9 +892,10 @@ const HELP_CATALOG = [
       ['/unlock', 'Unlock the current channel.'],
       ['/role grant <user> <role> [duration]', 'Grant a role.'],
       ['/role remove <user> <role>', 'Remove a role.'],
-      ['/vouch add | remove | check', 'Manage member vouches.'],
-      ['/automod settings | rule | whitelist | blacklist', 'Configure automod.'],
-      ['/antiraid settings | mode | whitelist', 'Configure anti-raid.'],
+      ['/vouches <member>', 'Check a member vouch count.'],
+      ['/manage <member>', 'Open a compact member management view.'],
+      ['/automod', 'Open the automod control panel.'],
+      ['/antiraid', 'Open the anti-raid control panel.'],
     ],
   },
   {
@@ -3767,10 +3768,69 @@ function buildRemoveConfirmRow(sessionId, buildId) {
   )];
 }
 
-const BUILTIN_PANEL_IDS = ['automod', 'antiraid', 'vouches', 'people'];
-
 function adminPanelAllowed(member) {
   return isManagerPlus(member);
+}
+
+function parsePanelTargetId(value) {
+  return String(value || '').replace(/[<#@!&>]/g, '').trim();
+}
+
+function normalizePanelWhitelistKind(value) {
+  const kind = String(value || '').trim().toLowerCase();
+  if (['user', 'users'].includes(kind)) return 'user';
+  if (['role', 'roles'].includes(kind)) return 'role';
+  if (['channel', 'channels'].includes(kind)) return 'channel';
+  return null;
+}
+
+function formatIdList(values = []) {
+  const list = values.map(String).filter(Boolean);
+  return list.length ? list.map(id => `\`${id}\``).join('\n').slice(0, 900) : 'None';
+}
+
+function automodWhitelistText(cfg = {}) {
+  return [
+    `Users:\n${formatIdList(cfg.exempt_user_ids || [])}`,
+    `Roles:\n${formatIdList(cfg.exempt_role_ids || [])}`,
+    `Channels:\n${formatIdList(cfg.exempt_channel_ids || [])}`,
+  ].join('\n\n');
+}
+
+function antiraidWhitelistText(cfg = {}) {
+  const whitelist = cfg.whitelist || {};
+  return [
+    `Users:\n${formatIdList(whitelist.users || [])}`,
+    `Roles:\n${formatIdList(whitelist.roles || [])}`,
+    `Channels:\n${formatIdList(whitelist.channels || [])}`,
+  ].join('\n\n');
+}
+
+async function buildMemberManageEmbed(guild, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return null;
+  const [builderSaved, staffSaved, vouchCount] = await Promise.all([
+    store.getPoints('builder', userId, guild.id).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+    store.getPoints('staff', userId, guild.id).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+    getVouchCountForUser(guild.id, userId).catch(() => 0),
+  ]);
+  const roles = member.roles.cache
+    .filter(role => role.id !== guild.roles.everyone.id)
+    .sort((a, b) => b.position - a.position)
+    .map(role => role.toString())
+    .slice(0, 12)
+    .join(' ') || 'No roles.';
+  return new EmbedBuilder()
+    .setColor(member.displayHexColor && member.displayHexColor !== '#000000' ? member.displayHexColor : 0x2b2d31)
+    .setAuthor({ name: member.displayName, iconURL: member.user.displayAvatarURL({ extension: 'png', size: 128 }) })
+    .addFields(
+      { name: 'User', value: `${member.user.tag}\n${member.id}`, inline: true },
+      { name: 'Joined', value: member.joinedTimestamp ? ts(member.joinedTimestamp) : 'Unknown', inline: true },
+      { name: 'Points', value: `Builder ${builderSaved.currentMonth || 0} mo / ${builderSaved.lifetime || 0} life\nStaff ${staffSaved.currentMonth || 0} mo / ${staffSaved.lifetime || 0} life\nVouches ${vouchCount}`, inline: false },
+      { name: 'Roles', value: roles.slice(0, 1024), inline: false },
+    )
+    .setFooter({ text: 'Use /role, moderation commands, and ticket tools for exact actions.' })
+    .setTimestamp();
 }
 
 function automodSettingsEmbed(cfg = {}) {
@@ -3785,7 +3845,7 @@ function automodSettingsEmbed(cfg = {}) {
       { name: 'Whitelist', value: `Users ${(cfg.exempt_user_ids || []).length}; Roles ${(cfg.exempt_role_ids || []).length}; Channels ${(cfg.exempt_channel_ids || []).length}`, inline: false },
       { name: 'Blacklisted Words', value: `${(cfg.blocked_words || []).length} configured`, inline: true },
     )
-    .setFooter({ text: 'Use /automod rule, whitelist, and blacklist for exact edits.' })
+    .setFooter({ text: 'Use the buttons below for exact automod edits.' })
     .setTimestamp();
 }
 
@@ -3795,7 +3855,13 @@ function automodPanelRows(cfg = {}) {
       new ButtonBuilder().setCustomId('admin_panel:automod:settings').setLabel('Settings').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('admin_panel:automod:toggle').setLabel(cfg.enabled === false ? 'Enable' : 'Disable').setStyle(cfg.enabled === false ? ButtonStyle.Success : ButtonStyle.Danger),
       new ButtonBuilder().setCustomId('admin_panel:automod:add_word').setLabel('Add Word').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('admin_panel:automod:remove_word').setLabel('Remove Word').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('admin_panel:automod:list_words').setLabel('Words').setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('admin_panel:automod:whitelist_add').setLabel('Whitelist Add').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('admin_panel:automod:whitelist_remove').setLabel('Whitelist Remove').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('admin_panel:automod:whitelist_list').setLabel('Whitelist').setStyle(ButtonStyle.Secondary),
     )
   ];
 }
@@ -3822,7 +3888,7 @@ function antiraidSettingsEmbed(cfg = {}) {
       { name: 'Whitelist', value: `Users ${(cfg.whitelist?.users || []).length}; Roles ${(cfg.whitelist?.roles || []).length}; Channels ${(cfg.whitelist?.channels || []).length}`, inline: false },
       { name: 'Thresholds', value: Object.keys(cfg.thresholds || {}).length ? Object.entries(cfg.thresholds).map(([k, v]) => `${k}: ${v}`).slice(0, 6).join('\n') : 'Using defaults.', inline: false },
     )
-    .setFooter({ text: 'Use /antiraid whitelist for exact exemptions.' })
+    .setFooter({ text: 'Use the controls below for mode and whitelist edits.' })
     .setTimestamp();
 }
 
@@ -3841,38 +3907,9 @@ function antiraidPanelRows() {
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('admin_panel:antiraid:settings').setLabel('Settings').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('admin_panel:antiraid:whitelist').setLabel('Whitelist Help').setStyle(ButtonStyle.Secondary),
-    )
-  ];
-}
-
-function vouchesPanelRows() {
-  return [
-    new ActionRowBuilder().addComponents(
-      new UserSelectMenuBuilder()
-        .setCustomId('admin_panel_user:vouches:check')
-        .setPlaceholder('Check a member')
-        .setMinValues(1)
-        .setMaxValues(1)
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('admin_panel:vouches:top').setLabel('Top Vouches').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('admin_panel:vouches:help').setLabel('Add/Remove Help').setStyle(ButtonStyle.Secondary),
-    )
-  ];
-}
-
-function peoplePanelRows() {
-  return [
-    new ActionRowBuilder().addComponents(
-      new UserSelectMenuBuilder()
-        .setCustomId('admin_panel_user:people:view')
-        .setPlaceholder('Inspect a member')
-        .setMinValues(1)
-        .setMaxValues(1)
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('admin_panel:people:help').setLabel('Manage Help').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('admin_panel:antiraid:whitelist_add').setLabel('Whitelist Add').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('admin_panel:antiraid:whitelist_remove').setLabel('Whitelist Remove').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('admin_panel:antiraid:whitelist_list').setLabel('Whitelist').setStyle(ButtonStyle.Secondary),
     )
   ];
 }
@@ -3886,21 +3923,33 @@ async function buildBuiltinPanelPayload(guild, panelId) {
     const cfg = await readAntiRaidConfig(guild.id);
     return { embeds: [antiraidSettingsEmbed(cfg)], components: antiraidPanelRows() };
   }
-  if (panelId === 'vouches') {
-    const list = await store.getVouches(guild.id).catch(() => []);
-    const top = list.slice(0, 5).map((v, i) => `${i + 1}. <@${v.userId}> - **${v.vouchers?.length || 0}**`).join('\n') || 'No vouches yet.';
-    return {
-      embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Vouches Panel').setDescription(top).setFooter({ text: 'Use the selector to inspect one member.' }).setTimestamp()],
-      components: vouchesPanelRows()
-    };
-  }
-  if (panelId === 'people') {
-    return {
-      embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('People Panel').setDescription('Inspect members, roles, points, and vouches. Use /role for exact grants/removals.').setTimestamp()],
-      components: peoplePanelRows()
-    };
-  }
   return null;
+}
+
+function buildWhitelistModal(panelId, action) {
+  const isRemove = action.endsWith('remove');
+  const modal = new ModalBuilder()
+    .setCustomId(`admin_panel_modal:${panelId}:${action}`)
+    .setTitle(`${isRemove ? 'Remove' : 'Add'} Whitelist Entry`);
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('kind')
+        .setLabel('Kind: user, role, or channel')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(16)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('id')
+        .setLabel('ID or mention')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(64)
+    )
+  );
+  return modal;
 }
 
 async function handleAdminPanelButton(interaction) {
@@ -3935,12 +3984,32 @@ async function handleAdminPanelButton(interaction) {
       ));
       return interaction.showModal(modal);
     }
+    if (action === 'remove_word') {
+      const modal = new ModalBuilder()
+        .setCustomId('admin_panel_modal:automod:remove_word')
+        .setTitle('Remove Blacklisted Word');
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('phrase')
+          .setLabel('Word or phrase')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(120)
+      ));
+      return interaction.showModal(modal);
+    }
     if (action === 'list_words') {
       const words = (cfg.blocked_words || []).map(String).filter(Boolean);
       return safeComponentReply(interaction, {
         content: words.length ? `Blacklisted words:\n${words.map(w => `\`${w}\``).join('\n').slice(0, 1800)}` : 'No blacklisted words configured.',
         flags: 64
       });
+    }
+    if (action === 'whitelist_add' || action === 'whitelist_remove') {
+      return interaction.showModal(buildWhitelistModal('automod', action));
+    }
+    if (action === 'whitelist_list') {
+      return safeComponentReply(interaction, { content: automodWhitelistText(cfg), flags: 64 });
     }
   }
 
@@ -3949,11 +4018,11 @@ async function handleAdminPanelButton(interaction) {
     if (action === 'settings') {
       return safeComponentReply(interaction, { embeds: [antiraidSettingsEmbed(cfg)], flags: 64 });
     }
-    if (action === 'whitelist') {
-      return safeComponentReply(interaction, {
-        content: 'Use `/antiraid whitelist action:<add/remove/list> kind:<user/role/channel> id:<id>` for exact exemptions.',
-        flags: 64
-      });
+    if (action === 'whitelist_add' || action === 'whitelist_remove') {
+      return interaction.showModal(buildWhitelistModal('antiraid', action));
+    }
+    if (action === 'whitelist_list' || action === 'whitelist') {
+      return safeComponentReply(interaction, { content: antiraidWhitelistText(cfg), flags: 64 });
     }
   }
 
@@ -3964,12 +4033,12 @@ async function handleAdminPanelButton(interaction) {
       return safeComponentReply(interaction, { embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Top Vouches').setDescription(desc)], flags: 64 });
     }
     if (action === 'help') {
-      return safeComponentReply(interaction, { content: 'Use `/vouch add`, `/vouch remove`, or select a user on this panel to check their count.', flags: 64 });
+      return safeComponentReply(interaction, { content: 'Use `/vouches member:<member>` to check one member. New manual vouch edits are handled by the vouch channel flow.', flags: 64 });
     }
   }
 
   if (panelId === 'people' && action === 'help') {
-    return safeComponentReply(interaction, { content: 'Use the selector to inspect a member. Use `/role grant`, `/role remove`, `/warn`, `/strike`, and ticket commands for exact actions.', flags: 64 });
+    return safeComponentReply(interaction, { content: 'Use `/manage member:<member>` to inspect one member. Use `/role`, moderation commands, and ticket tools for exact actions.', flags: 64 });
   }
 
   return safeComponentReply(interaction, { content: 'Unknown panel action.', flags: 64 });
@@ -4006,30 +4075,8 @@ async function handleAdminPanelUserSelect(interaction) {
   }
 
   if (panelId === 'people' && action === 'view') {
-    const member = await interaction.guild.members.fetch(userId).catch(() => null);
-    if (!member) return safeComponentReply(interaction, { content: 'That member is not in this server.', flags: 64 });
-    const [builderSaved, staffSaved, vouches] = await Promise.all([
-      store.getPoints('builder', userId, interaction.guildId).catch(() => ({ currentMonth: 0, lifetime: 0 })),
-      store.getPoints('staff', userId, interaction.guildId).catch(() => ({ currentMonth: 0, lifetime: 0 })),
-      store.getVouches(interaction.guildId).catch(() => []),
-    ]);
-    const vouchCount = vouches.find(v => String(v.userId) === String(userId))?.vouchers?.length || 0;
-    const roles = member.roles.cache
-      .filter(role => role.id !== interaction.guild.roles.everyone.id)
-      .sort((a, b) => b.position - a.position)
-      .map(role => role.toString())
-      .slice(0, 12)
-      .join(' ') || 'No roles.';
-    const eb = new EmbedBuilder()
-      .setColor(member.displayHexColor && member.displayHexColor !== '#000000' ? member.displayHexColor : 0x2b2d31)
-      .setAuthor({ name: member.displayName, iconURL: member.user.displayAvatarURL({ extension: 'png', size: 128 }) })
-      .addFields(
-        { name: 'User', value: `${member.user.tag}\n${member.id}`, inline: true },
-        { name: 'Joined', value: member.joinedTimestamp ? ts(member.joinedTimestamp) : 'Unknown', inline: true },
-        { name: 'Points', value: `Builder ${builderSaved.currentMonth || 0} mo / ${builderSaved.lifetime || 0} life\nStaff ${staffSaved.currentMonth || 0} mo / ${staffSaved.lifetime || 0} life\nVouches ${vouchCount}`, inline: false },
-        { name: 'Roles', value: roles.slice(0, 1024), inline: false },
-      )
-      .setTimestamp();
+    const eb = await buildMemberManageEmbed(interaction.guild, userId);
+    if (!eb) return safeComponentReply(interaction, { content: 'That member is not in this server.', flags: 64 });
     return safeComponentReply(interaction, { embeds: [eb], flags: 64 });
   }
 }
@@ -4047,6 +4094,43 @@ async function handleAdminPanelModal(interaction) {
     words.add(phrase);
     await store.setAutomodConfig(interaction.guildId, { ...cfg, blocked_words: [...words] });
     return interaction.reply({ content: `Added blacklisted phrase: \`${phrase}\`.`, flags: 64 });
+  }
+  if (panelId === 'automod' && action === 'remove_word') {
+    const phrase = (interaction.fields.getTextInputValue('phrase') || '').trim().slice(0, 120);
+    if (!phrase) return interaction.reply({ content: 'Phrase cannot be blank.', flags: 64 });
+    const cfg = await store.getAutomodConfig(interaction.guildId).catch(() => ({})) || {};
+    const words = new Set((cfg.blocked_words || []).map(x => String(x).trim()).filter(Boolean));
+    words.delete(phrase);
+    await store.setAutomodConfig(interaction.guildId, { ...cfg, blocked_words: [...words] });
+    return interaction.reply({ content: `Removed blacklisted phrase if it existed: \`${phrase}\`.`, flags: 64 });
+  }
+  if (panelId === 'automod' && (action === 'whitelist_add' || action === 'whitelist_remove')) {
+    const kind = normalizePanelWhitelistKind(interaction.fields.getTextInputValue('kind'));
+    const clean = parsePanelTargetId(interaction.fields.getTextInputValue('id'));
+    if (!kind) return interaction.reply({ content: 'Kind must be `user`, `role`, or `channel`.', flags: 64 });
+    if (!clean) return interaction.reply({ content: 'ID cannot be blank.', flags: 64 });
+    const cfg = await store.getAutomodConfig(interaction.guildId).catch(() => ({})) || {};
+    const key = kind === 'user' ? 'exempt_user_ids' : kind === 'role' ? 'exempt_role_ids' : 'exempt_channel_ids';
+    const current = new Set((cfg[key] || []).map(String));
+    if (action === 'whitelist_add') current.add(clean);
+    else current.delete(clean);
+    await store.setAutomodConfig(interaction.guildId, { ...cfg, [key]: [...current] });
+    return interaction.reply({ content: `Automod ${kind} whitelist ${action === 'whitelist_add' ? 'added' : 'removed'}: \`${clean}\`.`, flags: 64 });
+  }
+  if (panelId === 'antiraid' && (action === 'whitelist_add' || action === 'whitelist_remove')) {
+    const kind = normalizePanelWhitelistKind(interaction.fields.getTextInputValue('kind'));
+    const clean = parsePanelTargetId(interaction.fields.getTextInputValue('id'));
+    if (!kind) return interaction.reply({ content: 'Kind must be `user`, `role`, or `channel`.', flags: 64 });
+    if (!clean) return interaction.reply({ content: 'ID cannot be blank.', flags: 64 });
+    const cfg = await readAntiRaidConfig(interaction.guildId);
+    const key = kind === 'user' ? 'users' : kind === 'role' ? 'roles' : 'channels';
+    cfg.whitelist ||= { users: [], roles: [], channels: [] };
+    const current = new Set((cfg.whitelist[key] || []).map(String));
+    if (action === 'whitelist_add') current.add(clean);
+    else current.delete(clean);
+    cfg.whitelist[key] = [...current];
+    await store.setConfigValue(interaction.guildId, 'ANTIRAID_CONFIG', JSON.stringify(cfg));
+    return interaction.reply({ content: `Anti-raid ${kind} whitelist ${action === 'whitelist_add' ? 'added' : 'removed'}: \`${clean}\`.`, flags: 64 });
   }
 }
 
@@ -8401,39 +8485,29 @@ Only the ticket creator can continue.`);
 
     // --- DROPDOWN (modal-based, multiline) ---
 
-    // --- VOUCH ADD ---
-    if (commandName === 'vouch') {
-      const sub = options.getSubcommand();
-      await interaction.deferReply({ flags: 64 });
-      const can = interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild) ||
-        interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
-      if (!can) return interaction.editReply('Missing Manage Server permission.');
+    // --- VOUCHES ---
+    if (commandName === 'vouches') {
+      const target = options.getUser('member', true);
+      await interaction.deferReply();
+      const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+      const count = await getVouchCountForUser(interaction.guildId, target.id).catch(() => 0);
+      const eb = new EmbedBuilder()
+        .setColor(member?.displayHexColor && member.displayHexColor !== '#000000' ? member.displayHexColor : 0x2b2d31)
+        .setAuthor({ name: member?.displayName || target.username, iconURL: target.displayAvatarURL({ extension: 'png', size: 128 }) })
+        .setTitle('Vouches')
+        .setDescription(`${target} has **${count}** ${count === 1 ? 'vouch' : 'vouches'}.`)
+        .setTimestamp();
+      return interaction.editReply({ embeds: [eb] });
+    }
 
-      if (sub === 'add') {
-        const target = options.getUser('user', true);
-        const amount = options.getInteger('amount', true);
-        const reason = options.getString('reason') || null;
-        const count = await store.addVouchesAmount(target.id, interaction.guildId, amount);
-        const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-        if (member) await syncNickname(member).catch(() => {});
-        return interaction.editReply(`✅ Added **${amount}** vouch(es) to ${target}. They now have **${count}**.`);
-      }
-      if (sub === 'remove') {
-        const target = options.getUser('user', true);
-        const amount = options.getInteger('amount', true);
-        const reason = options.getString('reason') || null;
-        const count = await store.removeVouchesAmount(target.id, interaction.guildId, amount);
-        const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-        if (member) await syncNickname(member).catch(() => {});
-        return interaction.editReply(`✅ Removed **${amount}** vouch(es) from ${target}. They now have **${count}**.`);
-      }
-      if (sub === 'check') {
-        const target = options.getUser('user', true);
-        const count = await store.getVouches(interaction.guildId);
-        const rec = count.find(v => v.userId === target.id);
-        const total = rec?.vouchers?.length || 0;
-        return interaction.editReply(`${target} has **${total}** vouch(es).`);
-      }
+    // --- MEMBER MANAGEMENT ---
+    if (commandName === 'manage') {
+      if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 });
+      const target = options.getUser('member', true);
+      await interaction.deferReply({ flags: 64 });
+      const eb = await buildMemberManageEmbed(interaction.guild, target.id);
+      if (!eb) return interaction.editReply('That member is not in this server.');
+      return interaction.editReply({ embeds: [eb] });
     }
     // --- BUILD START ---
     if (commandName === 'build') {
@@ -9287,134 +9361,17 @@ if (commandName === 'giveaway') {
     if (commandName === 'automod') {
       if (!isManagerPlus(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 });
       await interaction.deferReply({ flags: 64 });
-      const sub = options.getSubcommand();
-      const cfg = await store.getAutomodConfig(interaction.guildId).catch(() => ({})) || {};
-
-      if (sub === 'settings') {
-        const eb = new EmbedBuilder()
-          .setColor(0x2b2d31)
-          .setTitle('Automod Settings')
-          .addFields(
-            { name: 'Enabled', value: String(cfg.enabled !== false), inline: true },
-            { name: 'Spam', value: `${cfg.spam_limit || 5} msgs / ${formatDuration(cfg.spam_window_ms || 4000)}`, inline: true },
-            { name: 'Repeat', value: `${cfg.repeat_limit || 2} repeats / ${formatDuration(cfg.repeat_window_ms || 7000)}`, inline: true },
-            { name: 'Whitelist', value: `Users ${(cfg.exempt_user_ids || []).length}; Roles ${(cfg.exempt_role_ids || []).length}; Channels ${(cfg.exempt_channel_ids || []).length}`, inline: false },
-            { name: 'Blacklisted words', value: String((cfg.blocked_words || []).length), inline: true },
-          );
-        return interaction.editReply({ embeds: [eb] });
-      }
-
-      if (sub === 'rule') {
-        const rule = options.getString('rule', true);
-        const enabled = options.getBoolean('enabled');
-        const limit = options.getInteger('limit');
-        const windowRaw = options.getString('window');
-        const patch = { ...cfg };
-        if (rule === 'global' && enabled !== null) patch.enabled = !!enabled;
-        if (rule === 'spam') {
-          if (limit !== null) patch.spam_limit = Math.max(2, Math.min(20, limit));
-          if (windowRaw) patch.spam_window_ms = parseDuration(windowRaw) || patch.spam_window_ms || 4000;
-        }
-        if (rule === 'repeated_text') {
-          if (limit !== null) patch.repeat_limit = Math.max(2, Math.min(10, limit));
-          if (windowRaw) patch.repeat_window_ms = parseDuration(windowRaw) || patch.repeat_window_ms || 7000;
-        }
-        if (rule === 'links' && enabled !== null) {
-          patch.invite_filter_enabled = !!enabled;
-          patch.suspicious_link_filter_enabled = !!enabled;
-        }
-        if (rule === 'caps') {
-          if (enabled !== null) patch.caps_enabled = !!enabled;
-          if (limit !== null) patch.caps_min_chars = Math.max(10, Math.min(200, limit));
-        }
-        if (rule === 'attachments') {
-          if (limit !== null) patch.attachment_limit = Math.max(2, Math.min(10, limit));
-        }
-        await store.setAutomodConfig(interaction.guildId, patch);
-        return interaction.editReply(`Automod rule \`${rule}\` updated.`);
-      }
-
-      if (sub === 'whitelist') {
-        const action = options.getString('action', true);
-        const kind = options.getString('kind', true);
-        const value = options.getString('id');
-        const key = kind === 'user' ? 'exempt_user_ids' : kind === 'role' ? 'exempt_role_ids' : 'exempt_channel_ids';
-        const current = new Set((cfg[key] || []).map(String));
-        if (action === 'list') {
-          const list = [...current];
-          return interaction.editReply(list.length ? `${kind} whitelist:\n${list.map(x => `\`${x}\``).join('\n')}` : `No ${kind} whitelist entries.`);
-        }
-        if (!value) return interaction.editReply('Provide an `id` for add/remove.');
-        const clean = String(value).replace(/[<#@!&>]/g, '').trim();
-        if (action === 'add') current.add(clean);
-        if (action === 'remove') current.delete(clean);
-        await store.setAutomodConfig(interaction.guildId, { ...cfg, [key]: [...current] });
-        return interaction.editReply(`Automod ${kind} whitelist ${action === 'add' ? 'added' : 'removed'}: \`${clean}\`.`);
-      }
-
-      if (sub === 'blacklist') {
-        const action = options.getString('action', true);
-        const phrase = options.getString('phrase');
-        const words = new Set((cfg.blocked_words || []).map(x => String(x).trim()).filter(Boolean));
-        if (action === 'list') {
-          const list = [...words];
-          return interaction.editReply(list.length ? `Blacklisted words/phrases:\n${list.map(x => `\`${x}\``).join('\n')}` : 'No blacklisted words configured.');
-        }
-        if (!phrase) return interaction.editReply('Provide a `phrase` for add/remove.');
-        const clean = phrase.trim().slice(0, 120);
-        if (action === 'add') words.add(clean);
-        if (action === 'remove') words.delete(clean);
-        await store.setAutomodConfig(interaction.guildId, { ...cfg, blocked_words: [...words] });
-        return interaction.editReply(`Automod blacklist ${action === 'add' ? 'added' : 'removed'}: \`${clean}\`.`);
-      }
+      const payload = await buildBuiltinPanelPayload(interaction.guild, 'automod');
+      await interaction.channel.send(payload);
+      return interaction.editReply('Automod panel sent.');
     }
 
     if (commandName === 'antiraid') {
       if (!isManagerPlus(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 });
       await interaction.deferReply({ flags: 64 });
-      const sub = options.getSubcommand();
-      const raw = await store.getConfigValue(interaction.guildId, 'ANTIRAID_CONFIG').catch(() => null);
-      let cfg = {};
-      if (raw) { try { cfg = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { cfg = {}; } }
-      cfg.mode ||= 'watch';
-      cfg.whitelist ||= { users: [], roles: [], channels: [] };
-      cfg.thresholds ||= {};
-
-      if (sub === 'settings') {
-        const eb = new EmbedBuilder()
-          .setColor(0x2b2d31)
-          .setTitle('Anti-Raid Settings')
-          .addFields(
-            { name: 'Mode', value: cfg.mode, inline: true },
-            { name: 'Whitelist', value: `Users ${(cfg.whitelist.users || []).length}; Roles ${(cfg.whitelist.roles || []).length}; Channels ${(cfg.whitelist.channels || []).length}`, inline: false },
-          );
-        return interaction.editReply({ embeds: [eb] });
-      }
-
-      if (sub === 'mode') {
-        cfg.mode = options.getString('mode', true);
-        await store.setConfigValue(interaction.guildId, 'ANTIRAID_CONFIG', JSON.stringify(cfg));
-        return interaction.editReply(`Anti-raid mode set to \`${cfg.mode}\`.`);
-      }
-
-      if (sub === 'whitelist') {
-        const action = options.getString('action', true);
-        const kind = options.getString('kind', true);
-        const value = options.getString('id');
-        const key = kind === 'user' ? 'users' : kind === 'role' ? 'roles' : 'channels';
-        const current = new Set((cfg.whitelist[key] || []).map(String));
-        if (action === 'list') {
-          const list = [...current];
-          return interaction.editReply(list.length ? `${kind} anti-raid whitelist:\n${list.map(x => `\`${x}\``).join('\n')}` : `No ${kind} anti-raid whitelist entries.`);
-        }
-        if (!value) return interaction.editReply('Provide an `id` for add/remove.');
-        const clean = String(value).replace(/[<#@!&>]/g, '').trim();
-        if (action === 'add') current.add(clean);
-        if (action === 'remove') current.delete(clean);
-        cfg.whitelist[key] = [...current];
-        await store.setConfigValue(interaction.guildId, 'ANTIRAID_CONFIG', JSON.stringify(cfg));
-        return interaction.editReply(`Anti-raid ${kind} whitelist ${action === 'add' ? 'added' : 'removed'}: \`${clean}\`.`);
-      }
+      const payload = await buildBuiltinPanelPayload(interaction.guild, 'antiraid');
+      await interaction.channel.send(payload);
+      return interaction.editReply('Anti-raid panel sent.');
     }
 
     if (commandName === 'refund') {
@@ -9840,7 +9797,7 @@ ${E_TIME} Created ${created}`)
       if (sub === "list") {
         await interaction.deferReply({ flags: 64 });
         const panels = await store.listTicketPanels();
-        const ids = [...new Set([...Object.keys(panels || {}), 'spawner_prices', ...BUILTIN_PANEL_IDS])];
+        const ids = [...new Set([...Object.keys(panels || {}), 'spawner_prices'])];
         return interaction.editReply(ids.length ? `Panels: ${ids.map(x=>`\`${x}\``).join(", ")}` : "No panels configured.");
       }
       if (sub === "send") {
@@ -9853,14 +9810,6 @@ ${E_TIME} Created ${created}`)
           const res = await refreshSpawnerPricesPanel(interaction.guild);
           if (!res) return interaction.editReply(`❌ Could not publish panel in <#${SPAWNER_PRICES_CHANNEL_ID}>.`);
           return interaction.editReply(`✅ Spawner prices panel refreshed in <#${res.channel.id}>.`);
-        }
-
-        if (BUILTIN_PANEL_IDS.includes(panelId)) {
-          if (!adminPanelAllowed(interaction.member)) return interaction.editReply('Manager+ only.');
-          const payload = await buildBuiltinPanelPayload(interaction.guild, panelId);
-          if (!payload) return interaction.editReply('Panel not found.');
-          await interaction.channel.send(payload);
-          return interaction.editReply('Panel sent.');
         }
 
         const panel = await store.getTicketPanel(panelId);
