@@ -226,7 +226,8 @@ test('ai personality prompt is server-aware and owner-safe while allowing light 
     ownerName: 'Ethan',
     ownerRoleMembers: [{ id: '42', name: 'Ethan' }],
     currentUserName: 'Some Builder',
-    isOwner: false
+    isOwner: false,
+    extraServerContext: 'Public farm stats: Mega Kelp does 1.2m kelp/hr. Published schematic: Blaze Tower profit 4.5m/hr.'
   });
 
   assert.match(prompt, /EtZ Empire/);
@@ -235,12 +236,19 @@ test('ai personality prompt is server-aware and owner-safe while allowing light 
   assert.match(prompt, /42/);
   assert.match(prompt, /Owner role holders: Ethan \(42\)/);
   assert.match(prompt, /Never roast the owner/i);
+  assert.match(prompt, /glaze/i);
+  assert.match(prompt, /Public farm stats/i);
+  assert.match(prompt, /Published schematic/i);
   assert.match(prompt, /build tickets/i);
   assert.match(prompt, /giveaways/i);
   assert.match(prompt, /applications/i);
   assert.match(prompt, /light roasts/i);
+  assert.match(prompt, /No emojis/i);
   assert.match(prompt, /Never use slurs/i);
   assert.match(prompt, /embarrass/i);
+  assert.doesNotMatch(prompt, /chaos/i);
+  assert.doesNotMatch(prompt, /builder queue chaos/i);
+  assert.match(prompt, /daddy|mommy/i);
 });
 
 test('ai conversation prompt includes reply chain and only the last three bot replies', () => {

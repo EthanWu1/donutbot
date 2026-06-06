@@ -51,9 +51,27 @@ const commands = [
       .addNumberOption(o => o.setName('value').setDescription('XP multiplier, e.g. 1, 1.5, 2').setRequired(true))),
 
   new SlashCommandBuilder()
-    .setName('rank')
-    .setDescription('Show rank, XP, builder points, and staff points')
+    .setName('points')
+    .setDescription('Show XP plus builder/staff points')
     .addUserOption(o => o.setName('user').setDescription('Target user')),
+
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Publish bot panels')
+    .addSubcommand(s => s.setName('list').setDescription('List available panels'))
+    .addSubcommand(s => s.setName('send').setDescription('Send a panel in this channel')
+      .addStringOption(o => o.setName('type').setDescription('Panel to send').setRequired(true)
+        .addChoices(
+          { name: 'Ticket Center', value: 'ticket_center' },
+          { name: 'Building Services', value: 'building_services' },
+          { name: 'Applications', value: 'applications' },
+          { name: 'Spawner Prices', value: 'spawner_prices' },
+          { name: 'Automod', value: 'automod' },
+          { name: 'Anti-Raid', value: 'antiraid' },
+          { name: 'Vouches', value: 'vouches' },
+          { name: 'People', value: 'people' },
+        )))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
     .setName('apply')

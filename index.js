@@ -436,7 +436,9 @@ const AI_ENABLED = process.env.AI_ENABLED === undefined
   : ['1', 'true', 'yes', 'on'].includes(String(process.env.AI_ENABLED).toLowerCase());
 const AI_MODEL = resolveAiModel(process.env);
 const AI_COOLDOWN_MS = Math.max(10_000, Number(process.env.AI_COOLDOWN_MS || 60_000));
+const AI_TIMEOUT_MS = Math.max(3_000, Number(process.env.AI_TIMEOUT_MS || 12_000));
 const aiCooldowns = new Map();
+const aiServerContextCache = new Map();
 // Category where the Members/Channels/Roles stat voice channels live.
 const STAT_CHANNELS_CATEGORY_ID = '1484047106737176708';
 
@@ -823,7 +825,7 @@ const HELP_CATALOG = [
       ['/afk [reason]', 'Mark yourself as AFK.'],
       ['/suggestion <text>', 'Submit a suggestion to staff.'],
       ['/level check [user]', 'Check a level and XP progress.'],
-      ['/rank [user]', 'Show XP, rank, and points.'],
+      ['/points [user]', 'Show XP plus builder/staff points.'],
       ['/apply builder | staff', 'Start an application if eligible.'],
     ],
   },
@@ -3765,6 +3767,289 @@ function buildRemoveConfirmRow(sessionId, buildId) {
   )];
 }
 
+const BUILTIN_PANEL_IDS = ['automod', 'antiraid', 'vouches', 'people'];
+
+function adminPanelAllowed(member) {
+  return isManagerPlus(member);
+}
+
+function automodSettingsEmbed(cfg = {}) {
+  return new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setTitle('Automod Panel')
+    .setDescription('Manage filters, whitelist entries, and blacklisted words from one place.')
+    .addFields(
+      { name: 'Status', value: cfg.enabled === false ? 'Disabled' : 'Enabled', inline: true },
+      { name: 'Spam', value: `${cfg.spam_limit || 5} msgs / ${formatDuration(cfg.spam_window_ms || 4000)}`, inline: true },
+      { name: 'Repeat', value: `${cfg.repeat_limit || 2} repeats / ${formatDuration(cfg.repeat_window_ms || 7000)}`, inline: true },
+      { name: 'Whitelist', value: `Users ${(cfg.exempt_user_ids || []).length}; Roles ${(cfg.exempt_role_ids || []).length}; Channels ${(cfg.exempt_channel_ids || []).length}`, inline: false },
+      { name: 'Blacklisted Words', value: `${(cfg.blocked_words || []).length} configured`, inline: true },
+    )
+    .setFooter({ text: 'Use /automod rule, whitelist, and blacklist for exact edits.' })
+    .setTimestamp();
+}
+
+function automodPanelRows(cfg = {}) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('admin_panel:automod:settings').setLabel('Settings').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('admin_panel:automod:toggle').setLabel(cfg.enabled === false ? 'Enable' : 'Disable').setStyle(cfg.enabled === false ? ButtonStyle.Success : ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('admin_panel:automod:add_word').setLabel('Add Word').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('admin_panel:automod:list_words').setLabel('Words').setStyle(ButtonStyle.Secondary),
+    )
+  ];
+}
+
+async function readAntiRaidConfig(guildId) {
+  const raw = await store.getConfigValue(guildId, 'ANTIRAID_CONFIG').catch(() => null);
+  let cfg = {};
+  if (raw) {
+    try { cfg = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { cfg = {}; }
+  }
+  cfg.mode ||= 'watch';
+  cfg.whitelist ||= { users: [], roles: [], channels: [] };
+  cfg.thresholds ||= {};
+  return cfg;
+}
+
+function antiraidSettingsEmbed(cfg = {}) {
+  return new EmbedBuilder()
+    .setColor(0x2b2d31)
+    .setTitle('Anti-Raid Panel')
+    .setDescription('Watch join bursts, new-account pressure, and destructive admin actions.')
+    .addFields(
+      { name: 'Mode', value: String(cfg.mode || 'watch'), inline: true },
+      { name: 'Whitelist', value: `Users ${(cfg.whitelist?.users || []).length}; Roles ${(cfg.whitelist?.roles || []).length}; Channels ${(cfg.whitelist?.channels || []).length}`, inline: false },
+      { name: 'Thresholds', value: Object.keys(cfg.thresholds || {}).length ? Object.entries(cfg.thresholds).map(([k, v]) => `${k}: ${v}`).slice(0, 6).join('\n') : 'Using defaults.', inline: false },
+    )
+    .setFooter({ text: 'Use /antiraid whitelist for exact exemptions.' })
+    .setTimestamp();
+}
+
+function antiraidPanelRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('admin_panel_select:antiraid:mode')
+        .setPlaceholder('Set anti-raid mode')
+        .addOptions(
+          { label: 'Off', value: 'off' },
+          { label: 'Watch', value: 'watch' },
+          { label: 'Lockdown', value: 'lockdown' },
+          { label: 'Quarantine', value: 'quarantine' },
+        )
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('admin_panel:antiraid:settings').setLabel('Settings').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('admin_panel:antiraid:whitelist').setLabel('Whitelist Help').setStyle(ButtonStyle.Secondary),
+    )
+  ];
+}
+
+function vouchesPanelRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId('admin_panel_user:vouches:check')
+        .setPlaceholder('Check a member')
+        .setMinValues(1)
+        .setMaxValues(1)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('admin_panel:vouches:top').setLabel('Top Vouches').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('admin_panel:vouches:help').setLabel('Add/Remove Help').setStyle(ButtonStyle.Secondary),
+    )
+  ];
+}
+
+function peoplePanelRows() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId('admin_panel_user:people:view')
+        .setPlaceholder('Inspect a member')
+        .setMinValues(1)
+        .setMaxValues(1)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('admin_panel:people:help').setLabel('Manage Help').setStyle(ButtonStyle.Secondary),
+    )
+  ];
+}
+
+async function buildBuiltinPanelPayload(guild, panelId) {
+  if (panelId === 'automod') {
+    const cfg = await store.getAutomodConfig(guild.id).catch(() => ({})) || {};
+    return { embeds: [automodSettingsEmbed(cfg)], components: automodPanelRows(cfg) };
+  }
+  if (panelId === 'antiraid') {
+    const cfg = await readAntiRaidConfig(guild.id);
+    return { embeds: [antiraidSettingsEmbed(cfg)], components: antiraidPanelRows() };
+  }
+  if (panelId === 'vouches') {
+    const list = await store.getVouches(guild.id).catch(() => []);
+    const top = list.slice(0, 5).map((v, i) => `${i + 1}. <@${v.userId}> - **${v.vouchers?.length || 0}**`).join('\n') || 'No vouches yet.';
+    return {
+      embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Vouches Panel').setDescription(top).setFooter({ text: 'Use the selector to inspect one member.' }).setTimestamp()],
+      components: vouchesPanelRows()
+    };
+  }
+  if (panelId === 'people') {
+    return {
+      embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('People Panel').setDescription('Inspect members, roles, points, and vouches. Use /role for exact grants/removals.').setTimestamp()],
+      components: peoplePanelRows()
+    };
+  }
+  return null;
+}
+
+async function handleAdminPanelButton(interaction) {
+  if (!adminPanelAllowed(interaction.member)) {
+    return safeComponentReply(interaction, { content: 'Manager+ only.', flags: 64 });
+  }
+  const [, panelId, action] = interaction.customId.split(':');
+
+  if (panelId === 'automod') {
+    const cfg = await store.getAutomodConfig(interaction.guildId).catch(() => ({})) || {};
+    if (action === 'settings') {
+      return safeComponentReply(interaction, { embeds: [automodSettingsEmbed(cfg)], flags: 64 });
+    }
+    if (action === 'toggle') {
+      const next = { ...cfg, enabled: cfg.enabled === false };
+      await store.setAutomodConfig(interaction.guildId, next);
+      const payload = await buildBuiltinPanelPayload(interaction.guild, 'automod');
+      await interaction.message?.edit(payload).catch(() => {});
+      return safeComponentReply(interaction, { content: `Automod ${next.enabled === false ? 'disabled' : 'enabled'}.`, flags: 64 });
+    }
+    if (action === 'add_word') {
+      const modal = new ModalBuilder()
+        .setCustomId('admin_panel_modal:automod:add_word')
+        .setTitle('Add Blacklisted Word');
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('phrase')
+          .setLabel('Word or phrase')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(120)
+      ));
+      return interaction.showModal(modal);
+    }
+    if (action === 'list_words') {
+      const words = (cfg.blocked_words || []).map(String).filter(Boolean);
+      return safeComponentReply(interaction, {
+        content: words.length ? `Blacklisted words:\n${words.map(w => `\`${w}\``).join('\n').slice(0, 1800)}` : 'No blacklisted words configured.',
+        flags: 64
+      });
+    }
+  }
+
+  if (panelId === 'antiraid') {
+    const cfg = await readAntiRaidConfig(interaction.guildId);
+    if (action === 'settings') {
+      return safeComponentReply(interaction, { embeds: [antiraidSettingsEmbed(cfg)], flags: 64 });
+    }
+    if (action === 'whitelist') {
+      return safeComponentReply(interaction, {
+        content: 'Use `/antiraid whitelist action:<add/remove/list> kind:<user/role/channel> id:<id>` for exact exemptions.',
+        flags: 64
+      });
+    }
+  }
+
+  if (panelId === 'vouches') {
+    if (action === 'top') {
+      const list = await store.getVouches(interaction.guildId).catch(() => []);
+      const desc = list.slice(0, 10).map((v, i) => `${i + 1}. <@${v.userId}> - **${v.vouchers?.length || 0}**`).join('\n') || 'No vouches yet.';
+      return safeComponentReply(interaction, { embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Top Vouches').setDescription(desc)], flags: 64 });
+    }
+    if (action === 'help') {
+      return safeComponentReply(interaction, { content: 'Use `/vouch add`, `/vouch remove`, or select a user on this panel to check their count.', flags: 64 });
+    }
+  }
+
+  if (panelId === 'people' && action === 'help') {
+    return safeComponentReply(interaction, { content: 'Use the selector to inspect a member. Use `/role grant`, `/role remove`, `/warn`, `/strike`, and ticket commands for exact actions.', flags: 64 });
+  }
+
+  return safeComponentReply(interaction, { content: 'Unknown panel action.', flags: 64 });
+}
+
+async function handleAdminPanelSelect(interaction) {
+  if (!adminPanelAllowed(interaction.member)) {
+    return safeComponentReply(interaction, { content: 'Manager+ only.', flags: 64 });
+  }
+  const [, panelId, action] = interaction.customId.split(':');
+  if (panelId === 'antiraid' && action === 'mode') {
+    const cfg = await readAntiRaidConfig(interaction.guildId);
+    cfg.mode = interaction.values?.[0] || 'watch';
+    await store.setConfigValue(interaction.guildId, 'ANTIRAID_CONFIG', JSON.stringify(cfg));
+    const payload = await buildBuiltinPanelPayload(interaction.guild, 'antiraid');
+    return interaction.update(payload).catch(() => {});
+  }
+  return safeComponentReply(interaction, { content: 'Unknown panel selection.', flags: 64 });
+}
+
+async function handleAdminPanelUserSelect(interaction) {
+  if (!adminPanelAllowed(interaction.member)) {
+    return safeComponentReply(interaction, { content: 'Manager+ only.', flags: 64 });
+  }
+  const [, panelId, action] = interaction.customId.split(':');
+  const userId = interaction.values?.[0];
+  if (!userId) return safeComponentReply(interaction, { content: 'No user selected.', flags: 64 });
+
+  if (panelId === 'vouches' && action === 'check') {
+    const list = await store.getVouches(interaction.guildId).catch(() => []);
+    const rec = list.find(v => String(v.userId) === String(userId));
+    const count = rec?.vouchers?.length || 0;
+    return safeComponentReply(interaction, { content: `<@${userId}> has **${count}** vouch(es).`, flags: 64 });
+  }
+
+  if (panelId === 'people' && action === 'view') {
+    const member = await interaction.guild.members.fetch(userId).catch(() => null);
+    if (!member) return safeComponentReply(interaction, { content: 'That member is not in this server.', flags: 64 });
+    const [builderSaved, staffSaved, vouches] = await Promise.all([
+      store.getPoints('builder', userId, interaction.guildId).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+      store.getPoints('staff', userId, interaction.guildId).catch(() => ({ currentMonth: 0, lifetime: 0 })),
+      store.getVouches(interaction.guildId).catch(() => []),
+    ]);
+    const vouchCount = vouches.find(v => String(v.userId) === String(userId))?.vouchers?.length || 0;
+    const roles = member.roles.cache
+      .filter(role => role.id !== interaction.guild.roles.everyone.id)
+      .sort((a, b) => b.position - a.position)
+      .map(role => role.toString())
+      .slice(0, 12)
+      .join(' ') || 'No roles.';
+    const eb = new EmbedBuilder()
+      .setColor(member.displayHexColor && member.displayHexColor !== '#000000' ? member.displayHexColor : 0x2b2d31)
+      .setAuthor({ name: member.displayName, iconURL: member.user.displayAvatarURL({ extension: 'png', size: 128 }) })
+      .addFields(
+        { name: 'User', value: `${member.user.tag}\n${member.id}`, inline: true },
+        { name: 'Joined', value: member.joinedTimestamp ? ts(member.joinedTimestamp) : 'Unknown', inline: true },
+        { name: 'Points', value: `Builder ${builderSaved.currentMonth || 0} mo / ${builderSaved.lifetime || 0} life\nStaff ${staffSaved.currentMonth || 0} mo / ${staffSaved.lifetime || 0} life\nVouches ${vouchCount}`, inline: false },
+        { name: 'Roles', value: roles.slice(0, 1024), inline: false },
+      )
+      .setTimestamp();
+    return safeComponentReply(interaction, { embeds: [eb], flags: 64 });
+  }
+}
+
+async function handleAdminPanelModal(interaction) {
+  if (!adminPanelAllowed(interaction.member)) {
+    return interaction.reply({ content: 'Manager+ only.', flags: 64 });
+  }
+  const [, panelId, action] = interaction.customId.split(':');
+  if (panelId === 'automod' && action === 'add_word') {
+    const phrase = (interaction.fields.getTextInputValue('phrase') || '').trim().slice(0, 120);
+    if (!phrase) return interaction.reply({ content: 'Phrase cannot be blank.', flags: 64 });
+    const cfg = await store.getAutomodConfig(interaction.guildId).catch(() => ({})) || {};
+    const words = new Set((cfg.blocked_words || []).map(x => String(x).trim()).filter(Boolean));
+    words.add(phrase);
+    await store.setAutomodConfig(interaction.guildId, { ...cfg, blocked_words: [...words] });
+    return interaction.reply({ content: `Added blacklisted phrase: \`${phrase}\`.`, flags: 64 });
+  }
+}
+
 // --- Interaction response helpers (avoid double-acknowledgement) ---
 async function safeReply(interaction, payload) {
   if (interaction.deferred || interaction.replied) return interaction.editReply(payload);
@@ -4627,13 +4912,75 @@ async function fetchRecentAiBotReplies(message, { limit = 3, scan = 50, excludeI
     .filter(Boolean);
 }
 
+function aiContextLine(text, max = 180) {
+  const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+  return cleaned.length > max ? `${cleaned.slice(0, max - 3).trim()}...` : cleaned;
+}
+
+async function buildAiServerContext(guild) {
+  if (!guild) return '';
+  const cached = aiServerContextCache.get(guild.id);
+  if (cached && Date.now() - cached.at < 45_000) return cached.value;
+
+  const lines = [];
+  try {
+    const categories = guild.channels.cache
+      .filter(ch => ch.type === ChannelType.GuildCategory)
+      .map(ch => ch.name)
+      .filter(Boolean)
+      .slice(0, 8);
+    const textChannels = guild.channels.cache.filter(ch => ch.isTextBased?.()).size;
+    const voiceChannels = guild.channels.cache.filter(ch => ch.isVoiceBased?.()).size;
+    lines.push(`Server structure: ${guild.memberCount || 0} members, ${textChannels} text channels, ${voiceChannels} voice channels${categories.length ? `, categories: ${categories.join(', ')}` : ''}.`);
+  } catch {}
+
+  try {
+    const [farms, prices] = await Promise.all([
+      store.listCatalogFarms('kelp').catch(() => []),
+      store.getCatalogPrices(guild.id).catch(() => ({}))
+    ]);
+    const topFarms = (farms || [])
+      .map(farm => {
+        const stats = calcKelpFarmStats(farm, prices, 1);
+        return { farm, stats };
+      })
+      .sort((a, b) => Number(b.farm.kelp_per_hour || 0) - Number(a.farm.kelp_per_hour || 0))
+      .slice(0, 5);
+    if (topFarms.length) {
+      lines.push(`Public farm stats: ${topFarms.map(({ farm, stats }) =>
+        aiContextLine(`${farm.name}: ${fmtNum(farm.kelp_per_hour || 0)} kelp/hr, ${farm.smokers || 0} smokers, ${farm.size || 'unknown size'}, ${farm.bone_input || 'unknown input'}, profit ${fmtNum(stats.profit || 0)}/hr`)
+      ).join(' | ')}.`);
+    }
+  } catch {}
+
+  try {
+    const submissions = Object.values(await store.listSchematicSubmissions().catch(() => ({})))
+      .filter(sub => String(sub.status || '').toUpperCase() === 'PUBLISHED')
+      .slice(0, 5);
+    if (submissions.length) {
+      lines.push(`Published schematic summaries: ${submissions.map(sub =>
+        aiContextLine(`${sub.name || sub.id}: designers ${[...(sub.designers || []), ...(sub.credits || [])].slice(0, 3).join(', ') || 'unknown'}, rates ${sub.rates || 'n/a'}, consumes ${sub.consumes || 'n/a'}, stats ${sub.stats || 'n/a'}, size ${sub.size ? `${sub.size.x || 0}x${sub.size.y || 0}x${sub.size.z || 0}` : 'n/a'}`)
+      ).join(' | ')}.`);
+    }
+  } catch {}
+
+  const value = lines.join(' ').slice(0, 1500);
+  aiServerContextCache.set(guild.id, { at: Date.now(), value });
+  return value;
+}
+
 async function maybeRespondWithAi(message) {
   try {
     const mentioned = message.mentions?.users?.has?.(client.user.id) || String(message.content || '').includes(`<@${client.user.id}>`);
-    const referencedMessage = await fetchReferencedDiscordMessage(message);
+    const hasReplyReference = Boolean(message.reference?.messageId);
+    if (!AI_ENABLED || message.author?.bot) return;
+    if (!mentioned && !hasReplyReference) return;
+    if (!process.env.ANTHROPIC_API_KEY) return;
+
+    const referencedMessage = hasReplyReference ? await fetchReferencedDiscordMessage(message) : null;
     const repliedToBot = referencedMessage?.author?.id === client.user?.id;
     const state = shouldAiRespond({
-      enabled: AI_ENABLED,
+      enabled: true,
       mentioned,
       repliedToBot,
       isBot: message.author?.bot,
@@ -4642,8 +4989,7 @@ async function maybeRespondWithAi(message) {
       cooldownMs: AI_COOLDOWN_MS
     });
     if (!state.allowed) return;
-    if (!process.env.ANTHROPIC_API_KEY) return;
-    aiCooldowns.set(message.author.id, Date.now());
+    await message.channel?.sendTyping?.().catch(() => {});
 
     const clean = String(message.content || '')
       .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
@@ -4686,7 +5032,7 @@ async function maybeRespondWithAi(message) {
       ownerRoleMembers,
       currentUserName: authorMember?.displayName || message.author.username,
       isOwner,
-      extraServerContext: process.env.AI_SERVER_CONTEXT || ''
+      extraServerContext: [process.env.AI_SERVER_CONTEXT || '', await buildAiServerContext(message.guild)].filter(Boolean).join(' ')
     });
     const replyChain = repliedToBot ? await fetchAiReplyChain(message) : [];
     const chainIds = new Set(replyChain.map(entry => entry.id).filter(Boolean));
@@ -4697,8 +5043,12 @@ async function maybeRespondWithAi(message) {
       replyChain,
       recentBotReplies
     });
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'content-type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -4707,11 +5057,11 @@ async function maybeRespondWithAi(message) {
       body: JSON.stringify({
         model: AI_MODEL,
         max_tokens: 110,
-        temperature: 0.8,
+        temperature: 0.85,
         system: systemPrompt,
         messages: [{ role: 'user', content: prompt }]
       })
-    });
+    }).finally(() => clearTimeout(timeout));
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       console.error(`[ai] Anthropic rejected model ${AI_MODEL}: ${res.status} ${body.slice(0, 300)}`);
@@ -4720,8 +5070,16 @@ async function maybeRespondWithAi(message) {
     const data = await res.json().catch(() => null);
     const text = (data?.content || []).map(part => part?.text || '').join(' ').trim().slice(0, 600);
     if (!text) return;
-    await message.reply({ content: text, allowedMentions: { repliedUser: false } }).catch(() => {});
+    const sent = await message.reply({ content: text, allowedMentions: { repliedUser: false } }).catch(() => null);
+    if (sent) {
+      aiCooldowns.set(message.author.id, Date.now());
+      console.log(`[ai] replied in ${Date.now() - startedAt}ms via ${AI_MODEL}`);
+    }
   } catch (e) {
+    if (e?.name === 'AbortError') {
+      console.error(`[ai] Anthropic request timed out after ${AI_TIMEOUT_MS}ms`);
+      return;
+    }
     console.error('[ai] mention responder error:', e?.message || e);
   }
 }
@@ -5262,6 +5620,26 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.showModal(modal);
       stickyEditSessions.delete(sessionId);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('admin_panel:')) {
+      await handleAdminPanelButton(interaction);
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('admin_panel_select:')) {
+      await handleAdminPanelSelect(interaction);
+      return;
+    }
+
+    if (interaction.isUserSelectMenu?.() && interaction.customId.startsWith('admin_panel_user:')) {
+      await handleAdminPanelUserSelect(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('admin_panel_modal:')) {
+      await handleAdminPanelModal(interaction);
       return;
     }
 
@@ -7729,7 +8107,7 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
       }
     }
 
-    if (commandName === 'rank') {
+    if (commandName === 'points') {
       const target = options.getUser('user') || interaction.user;
       await interaction.deferReply();
 
@@ -7781,32 +8159,28 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
         lifetime: (staffSaved.lifetime || 0) + staffPoints.total
       });
 
-      const cardBuf = await renderLevelCard({
-        username: member?.displayName || target.displayName || target.username,
-        avatarUrl: target.displayAvatarURL({ extension: 'png', size: 256 }),
-        level,
-        xpIntoLevel,
-        xpNeeded,
-        totalXp: curXp,
-        rank,
-        accent: tierAccent,
-        theme: 'default',
-        tierLabel,
-        tierValue: level,
-      });
-      const file = new AttachmentBuilder(cardBuf, { name: 'rank.png' });
+      const progressBlocks = 12;
+      const filled = Math.max(0, Math.min(progressBlocks, Math.round((xpIntoLevel / xpNeeded) * progressBlocks)));
+      const progressBar = `[${'#'.repeat(filled)}${'-'.repeat(progressBlocks - filled)}]`;
+      const displayName = member?.displayName || target.displayName || target.username;
       const eb = new EmbedBuilder()
-        .setColor(0x2b2d31)
-        .setTitle(`${member?.displayName || target.username} Rank`)
-        .setDescription(`Builder Points: **${builderPoints.total}**\nStaff Points: **${staffPoints.total}**`)
+        .setColor(tierAccent || 0x2b2d31)
+        .setAuthor({ name: `${displayName} Points`, iconURL: target.displayAvatarURL({ extension: 'png', size: 128 }) })
+        .setDescription([
+          `Level **${level}** • ${tierLabel} • Server rank **#${rank || 'N/A'}**`,
+          `XP **${curXp.toLocaleString('en-US')}** total`,
+          `\`${progressBar}\` ${xpIntoLevel.toLocaleString('en-US')}/${xpNeeded.toLocaleString('en-US')} XP`
+        ].join('\n'))
         .addFields(
-          { name: 'Builder point math', value: `Completed builds ${builderPoints.parts.completed}; build value ${builderPoints.parts.value}; on-time ${builderPoints.parts.onTime}; rating ${builderPoints.parts.rating}; refund penalty ${builderPoints.parts.refundPenalty}; manual ${builderPoints.parts.manual}.`, inline: false },
-          { name: 'Staff point math', value: `Resolved tickets ${staffPoints.parts.resolvedTickets}; application reviews ${staffPoints.parts.applicationReviews}; mod actions ${staffPoints.parts.modActions}; vouches ${staffPoints.parts.vouches}; ticket messages ${staffPoints.parts.messages}; penalties ${staffPoints.parts.overturned + staffPoints.parts.strikes}; manual ${staffPoints.parts.manual}.`, inline: false },
-          { name: 'Builder incentives', value: builderIncentives.length ? builderIncentives.join('\n') : 'Keep completing builds to unlock incentives.', inline: true },
-          { name: 'Staff incentives', value: staffIncentives.length ? staffIncentives.join('\n') : 'Help tickets and review apps to unlock incentives.', inline: true },
+          { name: 'Builder Points', value: `Current: **${builderPoints.total}**\nLifetime est: **${((builderSaved.lifetime || 0) + builderPoints.total).toLocaleString('en-US')}**`, inline: true },
+          { name: 'Staff Points', value: `Current: **${staffPoints.total}**\nLifetime est: **${((staffSaved.lifetime || 0) + staffPoints.total).toLocaleString('en-US')}**`, inline: true },
+          { name: 'Builder Calculation', value: `Completed ${builderPoints.parts.completed} + value ${builderPoints.parts.value} + on-time ${builderPoints.parts.onTime} + rating ${builderPoints.parts.rating} + manual ${builderPoints.parts.manual} ${builderPoints.parts.refundPenalty ? `+ refunds ${builderPoints.parts.refundPenalty}` : ''}`.slice(0, 1024), inline: false },
+          { name: 'Staff Calculation', value: `Tickets ${staffPoints.parts.resolvedTickets} + apps ${staffPoints.parts.applicationReviews} + moderation ${staffPoints.parts.modActions} + vouches ${staffPoints.parts.vouches} + messages ${staffPoints.parts.messages} + manual ${staffPoints.parts.manual} - penalties ${Math.abs(staffPoints.parts.overturned + staffPoints.parts.strikes)}`.slice(0, 1024), inline: false },
+          { name: 'Builder Incentives', value: builderIncentives.length ? builderIncentives.join('\n') : 'Complete builds, keep ratings high, and avoid refunds to unlock builder perks.', inline: true },
+          { name: 'Staff Incentives', value: staffIncentives.length ? staffIncentives.join('\n') : 'Resolve tickets, review apps, and keep clean moderation history to unlock staff perks.', inline: true },
         )
         .setTimestamp();
-      return interaction.editReply({ embeds: [eb], files: [file] });
+      return interaction.editReply({ embeds: [eb] });
     }
 
     if (commandName === 'apply') {
@@ -9466,7 +9840,7 @@ ${E_TIME} Created ${created}`)
       if (sub === "list") {
         await interaction.deferReply({ flags: 64 });
         const panels = await store.listTicketPanels();
-        const ids = [...Object.keys(panels || {}), 'spawner_prices'];
+        const ids = [...new Set([...Object.keys(panels || {}), 'spawner_prices', ...BUILTIN_PANEL_IDS])];
         return interaction.editReply(ids.length ? `Panels: ${ids.map(x=>`\`${x}\``).join(", ")}` : "No panels configured.");
       }
       if (sub === "send") {
@@ -9479,6 +9853,14 @@ ${E_TIME} Created ${created}`)
           const res = await refreshSpawnerPricesPanel(interaction.guild);
           if (!res) return interaction.editReply(`❌ Could not publish panel in <#${SPAWNER_PRICES_CHANNEL_ID}>.`);
           return interaction.editReply(`✅ Spawner prices panel refreshed in <#${res.channel.id}>.`);
+        }
+
+        if (BUILTIN_PANEL_IDS.includes(panelId)) {
+          if (!adminPanelAllowed(interaction.member)) return interaction.editReply('Manager+ only.');
+          const payload = await buildBuiltinPanelPayload(interaction.guild, panelId);
+          if (!payload) return interaction.editReply('Panel not found.');
+          await interaction.channel.send(payload);
+          return interaction.editReply('Panel sent.');
         }
 
         const panel = await store.getTicketPanel(panelId);
