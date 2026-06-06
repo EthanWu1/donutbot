@@ -71,6 +71,7 @@ const {
   resolveAiModel,
   buildAiPersonalityPrompt,
   buildAiConversationPrompt,
+  sanitizeAiReply,
 } = require('./botFeatures');
 
 // All litematic rendering now goes through the shared render service
@@ -5152,7 +5153,7 @@ async function maybeRespondWithAi(message) {
       return;
     }
     const data = await res.json().catch(() => null);
-    const text = (data?.content || []).map(part => part?.text || '').join(' ').trim().slice(0, 600);
+    const text = sanitizeAiReply((data?.content || []).map(part => part?.text || '').join(' '));
     if (!text) return;
     const sent = await message.reply({ content: text, allowedMentions: { repliedUser: false } }).catch(() => null);
     if (sent) {

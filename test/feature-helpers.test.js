@@ -18,7 +18,8 @@ const {
   shouldAiRespond,
   resolveAiModel,
   buildAiPersonalityPrompt,
-  buildAiConversationPrompt
+  buildAiConversationPrompt,
+  sanitizeAiReply
 } = require('../botFeatures');
 
 function memberWithRoles(roleIds = [], roleNames = []) {
@@ -242,13 +243,22 @@ test('ai personality prompt is server-aware and owner-safe while allowing light 
   assert.match(prompt, /build tickets/i);
   assert.match(prompt, /giveaways/i);
   assert.match(prompt, /applications/i);
-  assert.match(prompt, /light roasts/i);
+  assert.match(prompt, /willing to roast people/i);
+  assert.match(prompt, /human/i);
+  assert.match(prompt, /not customer support/i);
+  assert.match(prompt, /Do not use em dashes/i);
   assert.match(prompt, /No emojis/i);
   assert.match(prompt, /Never use slurs/i);
   assert.match(prompt, /embarrass/i);
   assert.doesNotMatch(prompt, /chaos/i);
   assert.doesNotMatch(prompt, /builder queue chaos/i);
   assert.match(prompt, /daddy|mommy/i);
+});
+
+test('ai reply sanitizer removes em dashes before Discord send', () => {
+  const reply = sanitizeAiReply(`bro\u2014that take is cooked\u2013try again`);
+  assert.equal(reply, 'bro - that take is cooked - try again');
+  assert.doesNotMatch(reply, /[\u2013\u2014]/);
 });
 
 test('ai conversation prompt includes reply chain and only the last three bot replies', () => {
