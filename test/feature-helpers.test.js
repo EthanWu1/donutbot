@@ -9,9 +9,12 @@ const {
   getPointProgress,
   isWhitelisted,
   findBlacklistedPhrase,
+  censorBlacklistedWord,
   canApplyForRole,
   normalizeGiveawayClaim,
   splitNumericalGiveawayPrize,
+  formatDiscordUserLabel,
+  getRoleAwarePointProgress,
   markBuildRemoved,
   applyRefundToBuild,
   computeNamePrefix,
@@ -64,16 +67,18 @@ test('staff points emphasize closed tickets and devalue raw messages', () => {
     ticketMessages: 120,
     supportTicketMessages: 30,
     standardMessages: 900,
+    giveawayPrizeValue: 250_000_000,
     vouches: 3,
-    overturnedActions: 1,
-    strikes: 1
+    overturnedActions: 0,
+    strikes: 0
   });
 
-  assert.equal(points.parts.messages, 1);
-  assert.equal(points.parts.supportMessages, 3);
-  assert.equal(points.parts.standardMessages, 3);
-  assert.equal(points.parts.closedTickets, 12);
-  assert.equal(points.total, 19);
+  assert.equal(points.parts.messages, 0);
+  assert.equal(points.parts.supportMessages, 1);
+  assert.equal(points.parts.standardMessages, 0);
+  assert.equal(points.parts.closedTickets, 8);
+  assert.equal(points.parts.giveaways, 2);
+  assert.equal(points.total, 22);
 });
 
 test('point progress uses builder and expanded staff rank thresholds', () => {
@@ -81,7 +86,7 @@ test('point progress uses builder and expanded staff rank thresholds', () => {
     { points: 25, label: 'Tier 2 Builder' },
     { points: 75, label: 'Tier 3 Builder' }
   ]);
-  assert.equal(POINT_ROLE_THRESHOLDS.staff.at(0).label, 'Trial Helper');
+  assert.deepEqual(POINT_ROLE_THRESHOLDS.staff.at(0), { points: 0, label: 'Trial Helper' });
   assert.equal(POINT_ROLE_THRESHOLDS.staff.at(-1).label, 'Co-owner');
 
   assert.deepEqual(getPointProgress('builder', 40), {
@@ -92,6 +97,17 @@ test('point progress uses builder and expanded staff rank thresholds', () => {
     progressPoints: 15,
     neededPoints: 50,
     ratio: 0.3,
+    complete: false
+  });
+
+  assert.deepEqual(getRoleAwarePointProgress('staff', 12, 'Helper'), {
+    currentLabel: 'Helper',
+    nextLabel: 'Sr Helper',
+    currentFloor: 40,
+    nextPoints: 85,
+    progressPoints: 0,
+    neededPoints: 45,
+    ratio: 0,
     complete: false
   });
 });
@@ -112,6 +128,14 @@ test('whitelist matches user, channel, or any member role', () => {
 test('blacklisted phrase matching is case-insensitive and ignores blank entries', () => {
   assert.equal(findBlacklistedPhrase('Selling BAD Stuff here', ['bad stuff', '']), 'bad stuff');
   assert.equal(findBlacklistedPhrase('ordinary message', ['bad stuff']), null);
+  assert.equal(censorBlacklistedWord('bad stuff'), 'b*******f');
+  assert.doesNotMatch(censorBlacklistedWord('secret phrase'), /secret phrase/);
+});
+
+test('discord labels include names so history and leaderboards are not naked ids', () => {
+  assert.equal(formatDiscordUserLabel('123456789012345678', { displayName: 'Ethan', user: { tag: 'ethan#0001' } }), '<@123456789012345678> (Ethan)');
+  assert.equal(formatDiscordUserLabel('manual:abc'), 'Manual adjustment');
+  assert.equal(formatDiscordUserLabel('not-a-real-id'), 'Unknown source `not-a-real-id`');
 });
 
 test('application gates require rare for builder and epic for staff', () => {

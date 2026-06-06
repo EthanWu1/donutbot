@@ -900,6 +900,22 @@ async function getTicketStatsForMonth(guildId, month = monthKey()) {
   return out;
 }
 
+function parseStoredPrizeNumber(value) {
+  if (value == null) return 0;
+  const clean = String(value).trim().toLowerCase().replace(/,/g, '');
+  const match = clean.match(/^(\d+(?:\.\d+)?)([kmb])?$/);
+  if (!match) return 0;
+  const raw = Number(match[1]);
+  const mult = match[2] === 'b' ? 1_000_000_000 : match[2] === 'm' ? 1_000_000 : match[2] === 'k' ? 1_000 : 1;
+  return Number.isFinite(raw) ? raw * mult : 0;
+}
+
+function giveawayPrizeValue(giveaway) {
+  const numeric = Number(giveaway?.numericPrize || 0);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  return parseStoredPrizeNumber(giveaway?.prize);
+}
+
 async function getStaffPointMetrics(guildId, userId) {
   await ensureDb();
   const uid = String(userId || '');
@@ -927,6 +943,13 @@ async function getStaffPointMetrics(guildId, userId) {
     String(v?.userId || '') === uid &&
     (!gid || !v?.guildId || String(v.guildId) === gid)
   );
+  const hostedGiveawayPrizeValue = (dataStore().giveaways || [])
+    .filter(g =>
+      String(g?.hostId || '') === uid &&
+      (!gid || !g?.guildId || String(g.guildId) === gid) &&
+      Number(g?.createdAt || g?.endedAt || 0) >= monthStart
+    )
+    .reduce((sum, g) => sum + giveawayPrizeValue(g), 0);
   return {
     resolvedTickets: Number(stats.closed || 0),
     claimedTickets: Number(stats.claimed || 0),
@@ -936,6 +959,7 @@ async function getStaffPointMetrics(guildId, userId) {
     standardMessages: Number(stats.standardMessageCount || 0),
     applicationReviews,
     validModActions: warnings + strikes,
+    giveawayPrizeValue: hostedGiveawayPrizeValue,
     vouches: Array.isArray(vouchRow?.vouchers) ? vouchRow.vouchers.length : 0
   };
 }

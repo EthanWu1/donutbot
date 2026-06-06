@@ -202,13 +202,6 @@ const commands = [
           { name: 'iEtZ',     value: 'iEtZ' },
           { name: 'Vi2910NC', value: 'Vi2910NC' },
         )))
-    .addSubcommand(s => s.setName('edit').setDescription('Edit an active build job (price, builder, IGNs, build name)')
-      .addStringOption(o => o.setName('build_id').setDescription('Build ID to edit (shown in embed footer)').setRequired(true))
-      .addStringOption(o => o.setName('price').setDescription('New total price — creates additional paywatch for the difference').setRequired(false))
-      .addUserOption(o => o.setName('builder').setDescription('New builder Discord user').setRequired(false))
-      .addStringOption(o => o.setName('builder_ign').setDescription('New builder IGN').setRequired(false))
-      .addStringOption(o => o.setName('customer_ign').setDescription('New customer IGN').setRequired(false))
-      .addStringOption(o => o.setName('build_name').setDescription('New build/farm name').setRequired(false)))
     .addSubcommand(s => s.setName('remove').setDescription('Remove a build from the queue/tracking')
       .addStringOption(o => o.setName('id').setDescription('Build/request ID').setRequired(true)))
     .addSubcommand(s => s.setName('history').setDescription('Show completed build history for a builder')

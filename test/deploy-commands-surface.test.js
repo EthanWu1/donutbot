@@ -76,3 +76,35 @@ test('admin and points panels expose editable settings and image progress', () =
   assert.match(indexSource, /attachment:\/\/points-progress\.png/);
   assert.doesNotMatch(indexSource, /Manual adjustments:/);
 });
+
+test('build editing is tracking-button only and cannot edit status', () => {
+  const block = commandBlock('build');
+  assert.doesNotMatch(block, /setName\('edit'\)/);
+  assert.match(block, /setName\('start'\)/);
+  assert.match(block, /setName\('remove'\)/);
+  assert.match(indexSource, /build_job_edit_modal/);
+  assert.doesNotMatch(indexSource, /setCustomId\('status'\)/);
+  assert.doesNotMatch(indexSource, /getTextInputValue\('status'\)/);
+  assert.match(indexSource, /setCustomId\('builder_discord'\)/);
+  assert.match(indexSource, /setCustomId\('customer_discord'\)/);
+});
+
+test('automod words live in settings instead of word action buttons', () => {
+  assert.match(indexSource, /setCustomId\('blocked_words'\)/);
+  assert.match(indexSource, /censorBlacklistedWord/);
+  assert.doesNotMatch(indexSource, /admin_panel:automod:add_word/);
+  assert.doesNotMatch(indexSource, /admin_panel:automod:remove_word/);
+  assert.doesNotMatch(indexSource, /admin_panel:automod:list_words/);
+});
+
+test('manage level adjustment only appears on the level view', () => {
+  assert.match(indexSource, /function manageLevelRows/);
+  const manageRowsStart = indexSource.indexOf('function manageRows');
+  const manageRowsEnd = indexSource.indexOf('function manageBackRow', manageRowsStart);
+  const manageRowsBlock = indexSource.slice(manageRowsStart, manageRowsEnd);
+  assert.doesNotMatch(manageRowsBlock, /manage_level_adjust/);
+  const levelRowsStart = indexSource.indexOf('function manageLevelRows');
+  const levelRowsEnd = indexSource.indexOf('function formatLogRows', levelRowsStart);
+  const levelRowsBlock = indexSource.slice(levelRowsStart, levelRowsEnd);
+  assert.match(levelRowsBlock, /manage_level_adjust/);
+});

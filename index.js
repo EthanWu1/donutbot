@@ -61,9 +61,13 @@ const {
 } = require('./botLogic');
 const {
   DEFAULT_ROLE_IDS,
+  POINT_ROLE_THRESHOLDS,
   calculateBuilderPoints,
   calculateStaffPoints,
   getPointProgress,
+  getRoleAwarePointProgress,
+  censorBlacklistedWord,
+  formatDiscordUserLabel,
   canApplyForRole,
   normalizeGiveawayClaim,
   splitNumericalGiveawayPrize,
@@ -504,6 +508,42 @@ function buildQuestionsModal(customId, title, questions, existing={}) {
   return modal;
 }
 
+const STAFF_POINT_ROLE_IDS = {
+  'Trial Helper': '1505542215336722573',
+  'Helper': C.ROLE_SUPPORT || '1483584515942252695',
+  'Sr Helper': '1505542283347361833',
+  'Trial Mod': '1506375349066272828',
+  'Mod': C.ROLE_MOD,
+  'Sr Mod': '1505542310530781246',
+  'Supervisor': C.ROLE_CHIEF_MOD,
+  'Manager': C.ROLE_MANAGER,
+  'Admin': C.ROLE_ADMIN,
+  'Head Admin': null,
+  'Co-owner': C.ROLE_CO_OWNER,
+};
+
+function pointRoleLabelForMember(member, kind) {
+  if (!member?.roles?.cache) return null;
+  const roleIds = member.roles.cache;
+  if (kind === 'builder') {
+    if (C.ROLE_BUILDER_TIER_3 && roleIds.has(C.ROLE_BUILDER_TIER_3)) return 'Tier 3 Builder';
+    if (C.ROLE_BUILDER_TIER_2 && roleIds.has(C.ROLE_BUILDER_TIER_2)) return 'Tier 2 Builder';
+    return null;
+  }
+  if (kind === 'staff') {
+    const ordered = Object.entries(STAFF_POINT_ROLE_IDS).reverse();
+    for (const [label, id] of ordered) {
+      if (id && roleIds.has(id)) return label;
+    }
+    const roleNames = [...member.roles.cache.values()].map(role => String(role.name || '').trim().toLowerCase());
+    for (const threshold of (POINT_ROLE_THRESHOLDS.staff || []).slice().reverse()) {
+      const label = String(threshold.label || '').trim();
+      if (label && roleNames.some(name => name === label.toLowerCase())) return label;
+    }
+  }
+  return null;
+}
+
 // Ticket runtime helpers
 function isStaffMember(member, cfg) {
   if (!member) return false;
@@ -517,6 +557,7 @@ function isStaffMember(member, cfg) {
     C.ROLE_CHIEF_MOD,
     C.ROLE_MOD,
     C.ROLE_TRIAL_MOD,
+    ...Object.values(STAFF_POINT_ROLE_IDS),
   ].filter(Boolean).map(String);
   const staffIds = [...new Set([...configured, ...builtIn])];
   if (member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) return true;
@@ -3564,6 +3605,7 @@ function buildTrackingEmbed(job, status, opts = {}) {
   const fields = [
     { name: `${E_FARM} Build`, value: job.buildType ? job.buildType.replace(/\b\w/g, c => c.toUpperCase()) : '—', inline: true },
     { name: `${E_MEMBER} Customer Discord`, value: job.customerDiscordId ? `<@${job.customerDiscordId}>` : '—', inline: true },
+    { name: `${E_MEMBER} Builder Discord`, value: job.builderDiscordId ? `<@${job.builderDiscordId}>` : '—', inline: true },
     { name: `${E_SENDER} Customer IGN`, value: job.customerIgn ? `\`${job.customerIgn}\`` : '—', inline: true },
     { name: `${E_RECEIVER} Builder IGN`, value: job.builderIgn ? `\`${job.builderIgn}\`` : '—', inline: true },
     { name: `${E_PRICE} Price`, value: money(job.price), inline: true },
@@ -3826,7 +3868,7 @@ function renderMonthlyStaffStatsEmbed(rows, page, totalPages) {
   const pageRows = chunkItems(rows, 10)[page] || [];
   const desc = pageRows.length ? pageRows.map((r, i) => {
     const n = page * 10 + i + 1;
-    return `**${n}.** <@${r.staffId}> - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Closed \`${r.closed}\` | Renamed \`${r.renamed}\` | Messages \`${r.messages}\``;
+    return `**${n}.** ${r.label || formatDiscordUserLabel(r.staffId)} - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Closed \`${r.closed}\` | Renamed \`${r.renamed}\` | Messages \`${r.messages}\``;
   }).join('\n\n') : 'No staff points yet this month.';
   return new EmbedBuilder()
     .setColor(0x00A8FF)
@@ -3840,7 +3882,7 @@ function renderMonthlyBuilderStatsEmbed(rows, page, totalPages) {
   const pageRows = chunkItems(rows, 10)[page] || [];
   const desc = pageRows.length ? pageRows.map((r, i) => {
     const n = page * 10 + i + 1;
-    return `**${n}.** <@${r.discordId}> - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Value \`${money(r.earned || 0)}\` | Completed \`${r.finished}\``;
+    return `**${n}.** ${r.label || formatDiscordUserLabel(r.discordId)} - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Value \`${money(r.earned || 0)}\` | Completed \`${r.finished}\``;
   }).join('\n\n') : 'No builder points yet this month.';
   return new EmbedBuilder()
     .setColor(0xFFB300)
@@ -3907,18 +3949,10 @@ function pointProgressBar(ratio, size = 10) {
 }
 
 function pointsCategoryText(kind, monthlyPoints, lifetimePoints, statsText) {
-  const progress = getPointProgress(kind, lifetimePoints);
   const lines = [
     `This month: **${Number(monthlyPoints || 0).toLocaleString('en-US')}**`,
     `Lifetime: **${Number(lifetimePoints || 0).toLocaleString('en-US')}**`,
   ];
-  if (progress.complete) {
-    lines.push(`Current: **${progress.currentLabel || 'Top rank'}**`);
-  } else {
-    const currentText = progress.currentLabel ? `Current: **${progress.currentLabel}**` : 'Current: **Not ranked yet**';
-    lines.push(`${currentText} -> **${progress.nextLabel}**`);
-    lines.push(`To next: **${Math.max(0, Number(progress.nextPoints || 0) - Number(lifetimePoints || 0)).toLocaleString('en-US')}**`);
-  }
   if (statsText) lines.push(statsText);
   return lines.join('\n');
 }
@@ -3947,7 +3981,7 @@ function buildPointProgressImage({ displayName, avatarUrl, categories = [] } = {
   ctx.fillText(safeName, 42, 54);
   ctx.font = '600 15px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
   ctx.fillStyle = 'rgba(220,236,242,0.68)';
-  ctx.fillText('Lifetime point progress', 44, 80);
+  ctx.fillText('Role progress', 44, 80);
 
   rows.forEach((row, idx) => {
     const y = 116 + idx * 104;
@@ -3990,8 +4024,8 @@ function buildPointProgressImage({ displayName, avatarUrl, categories = [] } = {
     ctx.fillStyle = 'rgba(230,244,248,0.78)';
     ctx.font = '700 13px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
     const pointsText = row.progress.complete
-      ? `${Number(row.lifetimePoints || 0).toLocaleString('en-US')} pts`
-      : `${Number(row.progress.progressPoints || 0).toLocaleString('en-US')}/${Number(row.progress.neededPoints || 0).toLocaleString('en-US')} pts`;
+      ? (row.progress.currentLabel || 'Top role')
+      : row.progress.nextLabel;
     const tw = ctx.measureText(pointsText).width;
     ctx.fillText(pointsText, barX + barW - tw, y + 42);
   });
@@ -4030,12 +4064,13 @@ async function buildPointsPayload(guild, targetUser, viewerMember) {
     .setTimestamp();
   const progressRows = [];
   if (hasStaffOrBuilderCategory(member, 'builder', builderSaved, builderPoints.total)) {
+    const currentRoleLabel = pointRoleLabelForMember(member, 'builder');
     progressRows.push({
       kind: 'builder',
       label: 'Builder',
       color: '#ffb300',
       lifetimePoints: builderLifetime,
-      progress: getPointProgress('builder', builderLifetime)
+      progress: getRoleAwarePointProgress('builder', builderLifetime, currentRoleLabel)
     });
     embed.addFields({
       name: 'Builder',
@@ -4044,12 +4079,13 @@ async function buildPointsPayload(guild, targetUser, viewerMember) {
     });
   }
   if (hasStaffOrBuilderCategory(member, 'staff', staffSaved, staffPoints.total)) {
+    const currentRoleLabel = pointRoleLabelForMember(member, 'staff');
     progressRows.push({
       kind: 'staff',
       label: 'Staff',
       color: '#00a8ff',
       lifetimePoints: staffLifetime,
-      progress: getPointProgress('staff', staffLifetime)
+      progress: getRoleAwarePointProgress('staff', staffLifetime, currentRoleLabel)
     });
     embed.addFields({
       name: 'Staff',
@@ -4116,13 +4152,19 @@ function manageRows(userId) {
     new ButtonBuilder().setCustomId(`manage_view:infractions:${userId}`).setLabel('Infractions').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`manage_view:details:${userId}`).setLabel('Details').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`manage_view:log:${userId}`).setLabel('Log').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`manage_level_adjust:${userId}`).setLabel('Adjust Level').setStyle(ButtonStyle.Primary),
   )];
 }
 
 function manageBackRow(userId) {
   return [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`manage_view:back:${userId}`).setStyle(ButtonStyle.Secondary).setEmoji('⬅️'),
+  )];
+}
+
+function manageLevelRows(userId) {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`manage_view:back:${userId}`).setStyle(ButtonStyle.Secondary).setEmoji('⬅️'),
+    new ButtonBuilder().setCustomId(`manage_level_adjust:${userId}`).setLabel('Adjust Level').setStyle(ButtonStyle.Primary),
   )];
 }
 
@@ -4240,11 +4282,28 @@ async function buildVouchesPayload(guild, targetUser, viewerMember) {
 }
 
 function formatVouchActor(entry = {}) {
-  const id = String(entry.voucherId || entry.userId || '').trim();
-  if (!id) return 'Unknown';
-  if (id.startsWith('manual:')) return 'Manual adjustment';
-  if (/^\d{16,20}$/.test(id)) return `<@${id}>`;
-  return `Unknown source \`${id.slice(0, 24)}\``;
+  return formatDiscordUserLabel(entry.voucherId || entry.userId || '');
+}
+
+async function resolveDiscordUserLabel(guild, id) {
+  const clean = String(id || '').trim();
+  if (!/^\d{16,20}$/.test(clean)) return formatDiscordUserLabel(clean);
+  const member = guild?.members?.cache?.get(clean)
+    || await guild?.members?.fetch(clean).catch(() => null);
+  if (member) return formatDiscordUserLabel(clean, member);
+  const user = client.users.cache.get(clean)
+    || await client.users.fetch(clean).catch(() => null);
+  return formatDiscordUserLabel(clean, user);
+}
+
+async function hydrateLeaderboardLabels(guild, rows, idKey, limit = 100) {
+  const pageRows = (rows || []).slice(0, limit);
+  await Promise.all(pageRows.map(async row => {
+    const id = row?.[idKey];
+    if (!id) return;
+    row.label = await resolveDiscordUserLabel(guild, id);
+  }));
+  return rows;
 }
 
 function activityRoleIds(guild) {
@@ -4314,7 +4373,7 @@ function automodSettingsEmbed(cfg = {}) {
       { name: 'Spam', value: `${cfg.spam_limit || 5} msgs / ${formatDuration(cfg.spam_window_ms || 4000)}`, inline: true },
       { name: 'Repeat', value: `${cfg.repeat_limit || 2} repeats / ${formatDuration(cfg.repeat_window_ms || 7000)}`, inline: true },
       { name: 'Whitelist', value: `Users ${(cfg.exempt_user_ids || []).length}; Roles ${(cfg.exempt_role_ids || []).length}; Channels ${(cfg.exempt_channel_ids || []).length}`, inline: false },
-      { name: 'Blacklisted Words', value: words.length ? words.slice(0, 8).map(w => `\`${w}\``).join(', ').slice(0, 1024) : 'None configured', inline: false },
+      { name: 'Blacklisted Words', value: words.length ? words.slice(0, 8).map(w => `\`${censorBlacklistedWord(w)}\``).join(', ').slice(0, 1024) : 'None configured', inline: false },
     )
     .setFooter({ text: 'Use the buttons below for exact automod edits.' })
     .setTimestamp();
@@ -4325,9 +4384,6 @@ function automodPanelRows(cfg = {}) {
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('admin_panel:automod:settings').setLabel('Settings').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('admin_panel:automod:toggle').setLabel(cfg.enabled === false ? 'Enable' : 'Disable').setStyle(cfg.enabled === false ? ButtonStyle.Success : ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('admin_panel:automod:add_word').setLabel('Add Word').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('admin_panel:automod:remove_word').setLabel('Remove Word').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('admin_panel:automod:list_words').setLabel('Words').setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('admin_panel:automod:whitelist_add').setLabel('Whitelist Add').setStyle(ButtonStyle.Primary),
@@ -6351,7 +6407,7 @@ client.on('messageCreate', async (message) => {
   try {
     if (message.channelId === MEDIA_LOCK_CHANNEL_ID) {
       const member = message.member || (message.guild ? await message.guild.members.fetch(message.author.id).catch(() => null) : null);
-      const isStaff = member?.permissions?.has(PermissionsBitField.Flags.ManageMessages) || member?.permissions?.has(PermissionsBitField.Flags.Administrator) || hasStaffRole(member);
+      const isStaff = member?.permissions?.has(PermissionsBitField.Flags.ManageMessages) || member?.permissions?.has(PermissionsBitField.Flags.Administrator) || isStaffMember(member, await store.getTicketConfig().catch(() => ({})));
       const isRarePlus = !!member && MEDIA_ALLOWED_ROLE_IDS.some(rid => member.roles.cache.has(rid));
 
       // Block attachments (images, files)
@@ -8335,17 +8391,21 @@ ${sourceLink}`;
     if (!isAdmin && !isAssignedBuilder && !isManagerPlus(interaction.member) && !isHeadBuilder(interaction.member)) {
       return interaction.editReply('Only the assigned builder, Head Builder, or managers can edit this build.');
     }
-    const statusRaw = interaction.fields.getTextInputValue('status')?.trim();
+    const builderDiscordRaw = interaction.fields.getTextInputValue('builder_discord')?.trim();
+    const customerDiscordRaw = interaction.fields.getTextInputValue('customer_discord')?.trim();
     const builderIgnRaw = interaction.fields.getTextInputValue('builder_ign')?.trim();
     const customerIgnRaw = interaction.fields.getTextInputValue('customer_ign')?.trim();
     const priceRaw = interaction.fields.getTextInputValue('price')?.trim();
-    const notesRaw = interaction.fields.getTextInputValue('notes')?.trim();
     const patch = { updatedAt: Date.now(), updatedBy: interaction.user.id };
-    if (statusRaw) {
-      const status = statusRaw.toUpperCase().replace(/\s+/g, '_');
-      const allowedStatuses = new Set(['WAITING_PAYMENT', 'PENDING', 'AWAITING_CONFIRM', 'AWAITING_PAYOUT', 'COMPLETE', 'CANCELLED', 'REFUNDED', 'REMOVED']);
-      if (!allowedStatuses.has(status)) return interaction.editReply('Invalid status. Use WAITING_PAYMENT, PENDING, AWAITING_CONFIRM, AWAITING_PAYOUT, COMPLETE, CANCELLED, REFUNDED, or REMOVED.');
-      patch.status = status;
+    if (builderDiscordRaw) {
+      const id = parsePanelTargetId(builderDiscordRaw);
+      if (!/^\d{16,20}$/.test(id)) return interaction.editReply('Builder Discord must be a user mention or ID.');
+      patch.builderDiscordId = id;
+    }
+    if (customerDiscordRaw) {
+      const id = parsePanelTargetId(customerDiscordRaw);
+      if (!/^\d{16,20}$/.test(id)) return interaction.editReply('Customer Discord must be a user mention or ID.');
+      patch.customerDiscordId = id;
     }
     if (builderIgnRaw) patch.builderIgn = sanitizeDisplayName(builderIgnRaw, { maxLen: 16 });
     if (customerIgnRaw) patch.customerIgn = sanitizeDisplayName(customerIgnRaw, { maxLen: 16 });
@@ -8354,7 +8414,6 @@ ${sourceLink}`;
       if (!parsed || parsed <= 0) return interaction.editReply('Invalid price. Use formats like `5m`, `500k`, or `500000`.');
       patch.price = parsed;
     }
-    patch.notes = notesRaw || null;
     const updated = await store.updateBuildJob(buildId, patch).catch(() => null);
     if (!updated) return interaction.editReply('Could not update that build.');
 
@@ -8515,11 +8574,11 @@ Entries: **${entryCount}**`.trim();
         .setCustomId(`build_job_edit_modal:${buildId}`)
         .setTitle('Edit Build Tracking')
         .addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('status').setLabel('Status').setStyle(TextInputStyle.Short).setRequired(false).setValue(String(job.status || '').slice(0, 40))),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('builder_discord').setLabel('Builder Discord ID or mention').setStyle(TextInputStyle.Short).setRequired(false).setValue(String(job.builderDiscordId || '').slice(0, 40))),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('customer_discord').setLabel('Customer Discord ID or mention').setStyle(TextInputStyle.Short).setRequired(false).setValue(String(job.customerDiscordId || '').slice(0, 40))),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('builder_ign').setLabel('Builder IGN').setStyle(TextInputStyle.Short).setRequired(false).setValue(String(job.builderIgn || '').slice(0, 40))),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('customer_ign').setLabel('Customer IGN').setStyle(TextInputStyle.Short).setRequired(false).setValue(String(job.customerIgn || '').slice(0, 40))),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price').setLabel('Price or quote').setStyle(TextInputStyle.Short).setRequired(false).setValue(job.price ? String(job.price) : '')),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('notes').setLabel('Notes').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1000).setValue(String(job.notes || '').slice(0, 1000))),
         );
       await interaction.showModal(modal);
       return;
@@ -8974,7 +9033,7 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
     };
     const eb = builders[view] ? await builders[view](interaction.guild, userId).catch(() => null) : null;
     if (!eb) return interaction.reply({ content: 'That member is no longer in this server.', flags: 64 }).catch(() => {});
-    return interaction.update({ embeds: [eb], components: manageBackRow(userId), allowedMentions: { parse: [] } }).catch(() => {});
+    return interaction.update({ embeds: [eb], components: view === 'level' ? manageLevelRows(userId) : manageBackRow(userId), allowedMentions: { parse: [] } }).catch(() => {});
   }
 
   if (interaction.isButton() && interaction.customId.startsWith('manage_level_adjust:')) {
@@ -9054,8 +9113,12 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
       const all = await store.getVouches(interaction.guildId).catch(() => []);
       const rec = (all || []).find(v => String(v.userId) === String(userId));
       const vouchers = (rec?.vouchers || []).slice(-10).reverse();
+      const voucherLines = await Promise.all(vouchers.map(async v => {
+        const actor = await resolveDiscordUserLabel(interaction.guild, v.voucherId || v.userId);
+        return `${v.at ? tsR(v.at) : 'unknown time'} - ${actor}${v.reason ? `: ${String(v.reason).slice(0, 120)}` : ''}`;
+      }));
       const desc = vouchers.length
-        ? vouchers.map(v => `${v.at ? tsR(v.at) : 'unknown time'} - ${formatVouchActor(v)}${v.reason ? `: ${String(v.reason).slice(0, 120)}` : ''}`).join('\n')
+        ? voucherLines.join('\n')
         : 'No vouches recorded.';
       return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Vouch History').setDescription(desc)], flags: 64, allowedMentions: { parse: [] } }).catch(() => {});
     }
@@ -9732,161 +9795,10 @@ Only the ticket creator can continue.`);
         return interaction.editReply(`✅ Payment watch started in this ticket. Build tracking will begin automatically once **${customerIgn}** pays **${money(price)}** to **${receiverIgn}**.`);
       }
 
-      // --- /build edit ---
-      if (sub === 'edit') {
-        const allowedRoles = [C.ROLE_BUILDER_3, C.ROLE_BUILDER_2, C.ROLE_BUILDER_1].filter(Boolean);
-        const canUse = interaction.member?.roles?.cache?.some(r => allowedRoles.includes(r.id))
-          || interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
-        if (!canUse) return interaction.reply({ content: 'Builders only.', flags: 64 });
-
-        await interaction.deferReply({ flags: 64 });
-
-        const buildId = options.getString('build_id', true).trim();
-        const job = await store.getBuildJob(buildId).catch(() => null);
-        if (!job) return interaction.editReply(`❌ No build found with ID \`${buildId}\`.`);
-
-        const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
-        const isBuilder = job.builderDiscordId === interaction.user.id;
-        if (!isBuilder && !isAdmin) return interaction.editReply('❌ Only the assigned builder or an admin can edit this build.');
-
-        const completedStatuses = ['COMPLETE', 'CANCELLED'];
-        if (completedStatuses.includes(job.status)) {
-          return interaction.editReply(`❌ Cannot edit a build that is already **${job.status}**.`);
-        }
-
-        const newPriceRaw   = options.getString('price');
-        const newBuilder    = options.getUser('builder');
-        const newBuilderIgn = options.getString('builder_ign');
-        const newCustomerIgn = options.getString('customer_ign');
-        const newBuildName  = options.getString('build_name');
-
-        if (!newPriceRaw && !newBuilder && !newBuilderIgn && !newCustomerIgn && !newBuildName) {
-          return interaction.editReply('❌ Provide at least one field to change.');
-        }
-
-        const patch = {};
-        const changes = [];
-
-        if (newBuilderIgn) { patch.builderIgn = newBuilderIgn.trim(); changes.push(`Builder IGN: \`${newBuilderIgn.trim()}\``); }
-        if (newCustomerIgn) { patch.customerIgn = newCustomerIgn.trim(); changes.push(`Customer IGN: \`${newCustomerIgn.trim()}\``); }
-        if (newBuildName) {
-          patch.buildType = newBuildName.trim().replace(/\b\w/g, c => c.toUpperCase());
-          changes.push(`Build: \`${patch.buildType}\``);
-        }
-        if (newBuilder) {
-          patch.builderDiscordId = newBuilder.id;
-          changes.push(`Builder Discord: <@${newBuilder.id}>`);
-        }
-
-        // Handle price change: create additional paywatch for the difference
-        let priceWatchId = null;
-        if (newPriceRaw) {
-          const newPrice = parseNumber(newPriceRaw);
-          if (!newPrice || newPrice <= 0) return interaction.editReply('❌ Invalid price format.');
-          if (newPrice <= job.price) return interaction.editReply(`❌ New price (${money(newPrice)}) must be higher than current price (${money(job.price)}). To reduce the price just edit it directly — contact an admin.`);
-
-          const priceDiff = newPrice - job.price;
-          changes.push(`Price: ${money(job.price)} → ${money(newPrice)} (+${money(priceDiff)})`);
-
-          // Determine builder's tax rate
-          const builderMemberId = patch.builderDiscordId || job.builderDiscordId;
-          const taxRate = await getBuilderTaxRate(interaction.guild, builderMemberId);
-          const watchAmount = Math.floor(priceDiff * taxRate); // taxed portion of the extra
-
-          if (DONUTSMP_API_KEY) {
-            let payerStart = null, receiverStart = null;
-            try {
-              payerStart = await getUserBalance({ baseUrl: DONUTSMP_BASE_URL, pathTemplate: DONUTSMP_STATS_PATH, apiKey: DONUTSMP_API_KEY, user: job.customerIgn, balancePath: DONUTSMP_BALANCE_PATH });
-              receiverStart = await getUserBalance({ baseUrl: DONUTSMP_BASE_URL, pathTemplate: DONUTSMP_STATS_PATH, apiKey: DONUTSMP_API_KEY, user: job.receiverIgn, balancePath: DONUTSMP_BALANCE_PATH });
-            } catch {}
-
-            priceWatchId = generateId();
-            const now = Date.now();
-            const expires = now + PAYWATCH_MAX_MINUTES * 60 * 1000;
-            const priceWatch = await store.addWatch({
-              id: priceWatchId, status: 'WATCHING',
-              guild_id: interaction.guildId,
-              channel_id: interaction.channelId,
-              creator_id: interaction.user.id,
-              payer_discord_id: job.customerDiscordId || interaction.user.id,
-              payer_ign: job.customerIgn,
-              receiver_ign: job.receiverIgn,
-              amount: priceDiff,
-              schematic: null,
-              schematic_id: null, file_path: null, note: null,
-              payer_start_balance: payerStart, receiver_start_balance: receiverStart,
-              payer_end_balance: payerStart, receiver_end_balance: receiverStart,
-              created_at: now, expires_at: expires, last_check_at: null, message_id: null,
-              buildEditJobId: buildId,
-              buildEditNewPrice: newPrice,
-            });
-
-            const editWatchMsg = await interaction.channel.send({
-              embeds: [new EmbedBuilder()
-                .setColor(0x5865f2)
-                .setTitle('Build Price Adjustment — Additional Payment')
-                .setDescription(`Waiting for **${job.customerIgn}** to pay the additional **${money(priceDiff)}** to **${job.receiverIgn}**.`)
-                .addFields(
-                  { name: 'Current Price', value: money(job.price), inline: true },
-                  { name: 'New Price', value: money(newPrice), inline: true },
-                  { name: 'Additional Amount', value: money(priceDiff), inline: true },
-                )
-                .setFooter({ text: `Build ID: ${buildId} • Watch ID: ${priceWatchId}` })],
-              components: cancelRow(priceWatchId, true),
-            }).catch(() => null);
-
-            if (editWatchMsg?.id) await store.updateWatch(priceWatchId, { message_id: editWatchMsg.id });
-            startPaywatchPolling(priceWatchId);
-          }
-
-          // Update the price immediately so the embed reflects it now
-          patch.price = newPrice;
-          patch.taxRate = taxRate;
-        }
-
-        // Apply patch to job
-        await store.updateBuildJob(buildId, patch);
-        const updatedJob = await store.getBuildJob(buildId);
-
-        // Update the tracking embed if we can find it
-        if (updatedJob.buildMessageId && updatedJob.buildChannelId) {
-          try {
-            const buildCh = await client.channels.fetch(updatedJob.buildChannelId).catch(() => null);
-            if (buildCh) {
-              const buildMsg = await buildCh.messages.fetch(updatedJob.buildMessageId).catch(() => null);
-              if (buildMsg) {
-                // Rebuild embed in whatever state the job is currently in
-                let components = buildMsg.components; // keep existing buttons
-                const updatedEmbed = buildTrackingEmbed(updatedJob, updatedJob.status);
-                // If AWAITING_PAYOUT, make sure Pay button is there
-                if (updatedJob.status === 'AWAITING_PAYOUT') {
-                  components = payBuilderRow(buildId);
-                }
-                await buildMsg.edit({ embeds: [updatedEmbed], components }).catch(() => {});
-              }
-            }
-          } catch {}
-        }
-
-        // Update ticket channel name if build name changed
-        if (newBuildName && updatedJob.ticketChannelId) {
-          const ticketCh = await client.channels.fetch(updatedJob.ticketChannelId).catch(() => null);
-          const ticketRec = ticketCh ? await store.getTicketRecord(updatedJob.ticketChannelId).catch(() => null) : null;
-          if (ticketCh && ticketRec) {
-            await store.updateTicketRecord(updatedJob.ticketChannelId, { buildFarmName: patch.buildType }).catch(() => {});
-            const updatedRec = await store.getTicketRecord(updatedJob.ticketChannelId).catch(() => ({ ...ticketRec, buildFarmName: patch.buildType }));
-            await syncTicketChannelName(ticketCh, updatedRec, { notifyChannel: ticketCh, commandLabel: '/build edit' }).catch(() => {});
-          }
-        }
-
-        return interaction.editReply(`✅ Build \`${buildId}\` updated:\n${changes.map(c => `• ${c}`).join('\n')}${priceWatchId ? `\n\n💰 Additional payment watch started for **${money(patch.price - job.price)}**.` : ''}`);
-      }
-
-
       if (sub === 'remove') {
         await interaction.deferReply({ flags: 64 });
         const canManage = interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)
-          || hasStaffRole(interaction.member)
+          || isStaffMember(interaction.member, await store.getTicketConfig().catch(() => ({})))
           || isBuilderMember(interaction.member);
         if (!canManage) return interaction.editReply('Staff or builders only.');
 
@@ -10632,10 +10544,11 @@ if (commandName === 'giveaway') {
         const month = currentMonthKey();
         const monthStart = Date.parse(`${month}-01T00:00:00.000Z`);
         const stats = await store.getTicketStatsForMonth(interaction.guildId, month).catch(() => ({}));
-        const [warnings, strikes, pointProfiles] = await Promise.all([
+        const [warnings, strikes, pointProfiles, giveaways] = await Promise.all([
           store.listWarnings(null, interaction.guildId).catch(() => []),
           store.listStrikes(null, interaction.guildId).catch(() => []),
           store.listPoints('staff', interaction.guildId).catch(() => []),
+          store.listGiveaways(interaction.guildId).catch(() => []),
         ]);
         const validActionsById = new Map();
         for (const row of [...warnings, ...strikes]) {
@@ -10643,7 +10556,16 @@ if (commandName === 'giveaway') {
           validActionsById.set(String(row.moderatorId || ''), (validActionsById.get(String(row.moderatorId || '')) || 0) + 1);
         }
         const manualById = new Map((pointProfiles || []).map(p => [String(p.userId), Number(p.currentMonth || 0)]));
-        const staffIds = new Set([...Object.keys(stats || {}), ...manualById.keys()]);
+        const giveawayValueById = new Map();
+        for (const g of giveaways || []) {
+          const at = Number(g.createdAt || g.endedAt || 0);
+          if (at < monthStart) continue;
+          const hostId = String(g.hostId || '');
+          if (!hostId) continue;
+          const value = Number(g.numericPrize || 0) || parseNumber(g.prize) || 0;
+          if (value > 0) giveawayValueById.set(hostId, (giveawayValueById.get(hostId) || 0) + value);
+        }
+        const staffIds = new Set([...Object.keys(stats || {}), ...manualById.keys(), ...giveawayValueById.keys()]);
         const rows = [];
         for (const staffId of staffIds) {
           const s = stats?.[staffId] || {};
@@ -10654,6 +10576,7 @@ if (commandName === 'giveaway') {
           const messages = supportMessages + standardMessages;
           const manual = manualById.get(String(staffId)) || 0;
           const validModActions = validActionsById.get(String(staffId)) || 0;
+          const giveawayPrizeValue = giveawayValueById.get(String(staffId)) || 0;
           const pointResult = calculateStaffPoints({
             resolvedTickets: closed,
             renamedTickets: renamed,
@@ -10661,11 +10584,13 @@ if (commandName === 'giveaway') {
             ticketMessages: supportMessages,
             standardMessages,
             validModActions,
+            giveawayPrizeValue,
             manual,
           });
           if (pointResult.total || closed || renamed || messages) rows.push({ staffId, closed, renamed, messages, points: pointResult.total });
         }
         rows.sort((a,b) => (b.points - a.points) || (b.closed - a.closed) || (b.renamed - a.renamed) || (b.messages - a.messages));
+        await hydrateLeaderboardLabels(interaction.guild, rows, 'staffId');
         const sessionId = generateId();
         const totalPages = Math.max(1, Math.ceil(rows.length / 10));
         statsPanelSessions.set(sessionId, { kind: 'staff', userId: interaction.user.id, page: 0, rows, createdAt: Date.now() });
@@ -10702,6 +10627,7 @@ if (commandName === 'giveaway') {
           if (!points && !mineRecords.length && !manual) return null;
           return { discordId, finished: mineRecords.length, earned, manual, points };
         }).filter(Boolean).sort((a, b) => (b.points - a.points) || (b.earned - a.earned) || (b.finished - a.finished));
+        await hydrateLeaderboardLabels(interaction.guild, totals, 'discordId');
         const sessionId = generateId();
         const totalPages = Math.max(1, Math.ceil(totals.length / 10));
         statsPanelSessions.set(sessionId, { kind: 'builder', userId: interaction.user.id, page: 0, rows: totals, createdAt: Date.now() });

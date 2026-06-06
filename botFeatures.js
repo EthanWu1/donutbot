@@ -18,17 +18,17 @@ const POINT_ROLE_THRESHOLDS = {
     { points: 75, label: 'Tier 3 Builder' }
   ],
   staff: [
-    { points: 15, label: 'Trial Helper' },
-    { points: 35, label: 'Helper' },
-    { points: 60, label: 'Sr Helper' },
-    { points: 90, label: 'Trial Mod' },
-    { points: 130, label: 'Mod' },
-    { points: 180, label: 'Sr Mod' },
-    { points: 250, label: 'Supervisor' },
-    { points: 500, label: 'Manager' },
-    { points: 900, label: 'Admin' },
-    { points: 1400, label: 'Head Admin' },
-    { points: 2500, label: 'Co-owner' }
+    { points: 0, label: 'Trial Helper' },
+    { points: 40, label: 'Helper' },
+    { points: 85, label: 'Sr Helper' },
+    { points: 145, label: 'Trial Mod' },
+    { points: 230, label: 'Mod' },
+    { points: 340, label: 'Sr Mod' },
+    { points: 500, label: 'Supervisor' },
+    { points: 850, label: 'Manager' },
+    { points: 1400, label: 'Admin' },
+    { points: 2150, label: 'Head Admin' },
+    { points: 3500, label: 'Co-owner' }
   ]
 };
 
@@ -75,6 +75,18 @@ function getPointProgress(kind, points) {
   };
 }
 
+function getRoleAwarePointProgress(kind, points, currentRoleLabel = null) {
+  const thresholds = (POINT_ROLE_THRESHOLDS[kind] || [])
+    .slice()
+    .sort((a, b) => Number(a.points || 0) - Number(b.points || 0));
+  const roleLabel = String(currentRoleLabel || '').trim().toLowerCase();
+  const currentRole = roleLabel
+    ? thresholds.find(t => String(t.label || '').trim().toLowerCase() === roleLabel)
+    : null;
+  const floor = Number(currentRole?.points || 0);
+  return getPointProgress(kind, Math.max(Number(points) || 0, floor));
+}
+
 function expectedBuildDurationMs(amount) {
   const value = Math.max(0, Number(amount) || 0);
   const day = 24 * 60 * 60 * 1000;
@@ -112,13 +124,15 @@ function calculateBuilderPoints(input = {}) {
 }
 
 function calculateStaffPoints(input = {}) {
-  const closedTickets = Math.max(0, Math.trunc(Number(input.resolvedTickets || input.closedTickets) || 0)) * 6;
-  const renamedTickets = Math.max(0, Math.trunc(Number(input.renamedTickets || input.ticketRenames) || 0)) * 1;
-  const applicationReviews = Math.max(0, Math.trunc(Number(input.applicationReviews) || 0)) * 2;
-  const modActions = Math.min(30, Math.max(0, Math.trunc(Number(input.validModActions) || 0)) * 3);
-  const supportMessages = Math.min(15, Math.floor(Math.max(0, Math.trunc(Number(input.supportTicketMessages) || 0)) / 10));
-  const messages = Math.min(5, Math.floor(Math.max(0, Math.trunc(Number(input.ticketMessages) || 0)) / 100));
-  const standardMessages = Math.min(3, Math.floor(Math.max(0, Math.trunc(Number(input.standardMessages) || 0)) / 300));
+  const closedTickets = Math.max(0, Math.trunc(Number(input.resolvedTickets || input.closedTickets) || 0)) * 4;
+  const renamedTickets = Math.floor(Math.max(0, Math.trunc(Number(input.renamedTickets || input.ticketRenames) || 0)) / 3);
+  const applicationReviews = Math.max(0, Math.trunc(Number(input.applicationReviews) || 0)) * 1;
+  const modActions = Math.min(20, Math.max(0, Math.trunc(Number(input.validModActions) || 0)) * 2);
+  const supportMessages = Math.min(8, Math.floor(Math.max(0, Math.trunc(Number(input.supportTicketMessages) || 0)) / 20));
+  const messages = Math.min(3, Math.floor(Math.max(0, Math.trunc(Number(input.ticketMessages) || 0)) / 250));
+  const standardMessages = Math.min(1, Math.floor(Math.max(0, Math.trunc(Number(input.standardMessages) || 0)) / 1000));
+  const giveawayValue = Math.max(0, Number(input.giveawayPrizeValue || input.giveawayValue) || 0);
+  const giveaways = Math.min(10, Math.floor(giveawayValue / 100_000_000));
   const parts = {
     closedTickets,
     renamedTickets,
@@ -127,13 +141,40 @@ function calculateStaffPoints(input = {}) {
     supportMessages,
     messages,
     standardMessages,
-    vouches: Math.max(0, Math.trunc(Number(input.vouches) || 0)) * 1,
+    giveaways,
+    vouches: Math.floor(Math.max(0, Math.trunc(Number(input.vouches) || 0)) / 3),
     overturned: Math.max(0, Math.trunc(Number(input.overturnedActions) || 0)) * -10,
     strikes: Math.max(0, Math.trunc(Number(input.strikes) || 0)) * -10,
     manual: Math.trunc(Number(input.manual) || 0)
   };
   const total = Math.max(0, Math.round(Object.values(parts).reduce((sum, v) => sum + v, 0) * 10) / 10);
   return { total, parts, thresholds: POINT_ROLE_THRESHOLDS.staff };
+}
+
+function censorBlacklistedWord(value) {
+  const text = String(value || '').trim().replace(/\s+/g, '*');
+  if (!text) return '';
+  const chars = [...text];
+  if (chars.length <= 2) return '*'.repeat(chars.length);
+  return `${chars[0]}${'*'.repeat(chars.length - 2)}${chars[chars.length - 1]}`;
+}
+
+function formatDiscordUserLabel(id, resolved = null) {
+  const clean = String(id || '').trim();
+  if (!clean) return 'Unknown';
+  if (clean.startsWith('manual:')) return 'Manual adjustment';
+  if (!/^\d{16,20}$/.test(clean)) return `Unknown source \`${clean.slice(0, 24)}\``;
+  const name = String(
+    resolved?.displayName ||
+    resolved?.nickname ||
+    resolved?.globalName ||
+    resolved?.username ||
+    resolved?.user?.globalName ||
+    resolved?.user?.username ||
+    resolved?.user?.tag ||
+    ''
+  ).trim();
+  return name ? `<@${clean}> (${name.slice(0, 32)})` : `<@${clean}>`;
 }
 
 function roleIdsFromMember(member) {
@@ -428,6 +469,9 @@ module.exports = {
   calculateBuilderPoints,
   calculateStaffPoints,
   getPointProgress,
+  getRoleAwarePointProgress,
+  censorBlacklistedWord,
+  formatDiscordUserLabel,
   expectedBuildDurationMs,
   builderSpeedBoostRate,
   roleIdsFromMember,
