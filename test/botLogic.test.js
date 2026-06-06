@@ -49,3 +49,37 @@ test('non-spawner tickets keep the configured staff viewer roles', () => {
 
   assert.deepEqual(roles, ['support-staff', 'legacy-support']);
 });
+
+test('building tickets only grant broad builder visibility to tier 3 builders', () => {
+  const roles = getTicketViewerRoleIds({
+    buttonKey: 'building_services',
+    isBuilding: true,
+    staffRoleIds: ['trial-mod', 'mod'],
+    builderRoleIds: ['builder-tier-3', 'builder-tier-2', 'builder-tier-1'],
+    spawnerRoleId: 'spawner-access',
+    config: {
+      ROLE_BUILDER_TIER_3: 'builder-tier-3',
+      ROLE_BUILDER_TIER_2: 'builder-tier-2',
+      ROLE_BUILDER_TIER_1: 'builder-tier-1',
+    },
+  });
+
+  assert.deepEqual(roles, ['trial-mod', 'mod', 'builder-tier-3']);
+});
+
+test('giveaway tickets still grant visibility to all builder tiers', () => {
+  const roles = getTicketViewerRoleIds({
+    buttonKey: 'gw_claim',
+    isBuilding: false,
+    staffRoleIds: ['trial-mod', 'mod'],
+    builderRoleIds: ['builder-tier-3', 'builder-tier-2', 'builder-tier-1'],
+    spawnerRoleId: 'spawner-access',
+    config: {
+      ROLE_BUILDER_TIER_3: 'builder-tier-3',
+      ROLE_BUILDER_TIER_2: 'builder-tier-2',
+      ROLE_BUILDER_TIER_1: 'builder-tier-1',
+    },
+  });
+
+  assert.deepEqual(roles, ['trial-mod', 'mod', 'builder-tier-3', 'builder-tier-2', 'builder-tier-1']);
+});

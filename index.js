@@ -2154,6 +2154,15 @@ const _CHIEF_MOD_ROLE  = C.ROLE_CHIEF_MOD;
 const _MOD_ROLE        = C.ROLE_MOD;
 const _TRIAL_MOD_ROLE  = C.ROLE_TRIAL_MOD;
 const _MOD_AND_ABOVE   = [_ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, _TRIAL_MOD_ROLE];
+const _BUILDER_TIER_3_ROLE = C.ROLE_BUILDER_TIER_3 || C.ROLE_TIER_3_BUILDER || C.ROLE_BUILDER_1;
+const _ALL_BUILDER_ROLES = [
+  C.ROLE_BUILDER_TIER_3 || C.ROLE_BUILDER_1,
+  C.ROLE_BUILDER_TIER_2 || C.ROLE_BUILDER_2,
+  C.ROLE_BUILDER_TIER_1 || C.ROLE_BUILDER_3,
+  C.ROLE_BUILDER_1,
+  C.ROLE_BUILDER_2,
+  C.ROLE_BUILDER_3,
+];
 
 // Extra viewer roles per category (strict allowlist — only these roles see the category)
 // Format: categoryId -> [roleId, ...]
@@ -2164,10 +2173,10 @@ const CATEGORY_EXTRA_VIEWER_ROLES = {
   // Mod-only categories — Trial Mod and above
   [C.TICKET_CATEGORIES.MOD_1]: [..._MOD_AND_ABOVE, C.ROLE_TRIAL_MOD].filter(Boolean),
   [C.TICKET_CATEGORIES.MOD_2]: [..._MOD_AND_ABOVE, C.ROLE_TRIAL_MOD].filter(Boolean),
-  // Builder category — all builder roles + Trial Mod and above
-  [C.TICKET_CATEGORIES.BUILDING]: [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, ..._MOD_AND_ABOVE].filter(Boolean),
+  // Builder category — only tier 3 builders + Trial Mod and above see every build ticket.
+  [C.TICKET_CATEGORIES.BUILDING]: [_BUILDER_TIER_3_ROLE, ..._MOD_AND_ABOVE].filter(Boolean),
   // Giveaway claim tickets — builders and Trial Mod+ can see them.
-  [C.TICKET_CATEGORIES.GIVEAWAY]: [C.ROLE_BUILDER_1, C.ROLE_BUILDER_2, C.ROLE_BUILDER_3, ..._MOD_AND_ABOVE].filter(Boolean),
+  [C.TICKET_CATEGORIES.GIVEAWAY]: [..._ALL_BUILDER_ROLES, ..._MOD_AND_ABOVE].filter(Boolean),
   // Spawner categories — mod-and-above plus the dedicated spawner-ticket
   // access role. Support/staff roles should not see spawner tickets.
   [C.TICKET_CATEGORIES.SPAWNER_BUY]: [C.ROLE_OWNER, C.ROLE_CO_OWNER, _ADMIN_ROLE, _MANAGER_ROLE, _CHIEF_MOD_ROLE, _MOD_ROLE, SPAWNER_TICKET_ACCESS_ROLE_ID].filter(Boolean),
@@ -2520,7 +2529,7 @@ async function createTicketChannel({ interaction, panelId, buttonKey, btnCfg, an
     staffRoleIds,
     builderRoleIds,
     spawnerRoleId: SPAWNER_TICKET_ACCESS_ROLE_ID,
-    config: C,
+    config: { ...C, ROLE_BUILDER_TIER_3: chiefB, ROLE_CHIEF_BUILDER: chiefB, ROLE_BUILDER_1: chiefB },
   }), guild.roles);
   if (isSpawnerButton(buttonKey)) {
     const supportId = await store.getConfigValue(guild.id, 'ROLE_SUPPORT').catch(() => null) || C.ROLE_SUPPORT || C.ROLE_TRIAL_MOD;
@@ -4549,11 +4558,14 @@ client.once('clientReady', async () => {
               C.ROLE_SUPPORT,
               C.ROLE_TRIAL_MOD,
             ], guild.roles);
+            const globalBuilderIds = filterCachedRoleIds(_ALL_BUILDER_ROLES, guild.roles);
+            const globalTicketViewerIds = [...new Set([...globalStaffIds, ...globalBuilderIds])];
             for (const rid of rolesWithAccess) {
               if (rid === guild.roles.everyone.id) continue; // keep @everyone deny
               const isAllowed = cachedAllowedRoles.includes(rid);
-              // If a global staff role is in here but not in allowedRoles, remove it
-              if (!isAllowed && globalStaffIds.includes(rid)) {
+              // If a global staff/builder viewer role is in here but not allowed
+              // for this category anymore, remove it from the channel.
+              if (!isAllowed && globalTicketViewerIds.includes(rid)) {
                 await ch.permissionOverwrites.delete(rid).catch(() => {});
               }
             }

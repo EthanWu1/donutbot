@@ -12,8 +12,21 @@ function isSpawnerButton(buttonKey) {
   return ['spawner_buy', 'spawner_sell'].includes(String(buttonKey || '').toLowerCase());
 }
 
+function getTier3BuilderRoleIds(config) {
+  return uniq([
+    config?.ROLE_BUILDER_TIER_3,
+    config?.ROLE_TIER_3_BUILDER,
+    config?.ROLE_CHIEF_BUILDER,
+    config?.ROLE_BUILDER_1,
+  ]);
+}
+
 function getTicketViewerRoleIds({ buttonKey, isBuilding, staffRoleIds, builderRoleIds, spawnerRoleId, config }) {
-  if (isBuilding) return uniq([...(staffRoleIds || []), ...(builderRoleIds || [])]);
+  if (isBuilding) {
+    const tier3Ids = new Set(getTier3BuilderRoleIds(config).map(String));
+    const tier3BuilderRoles = (builderRoleIds || []).filter(roleId => tier3Ids.has(String(roleId)));
+    return uniq([...(staffRoleIds || []), ...tier3BuilderRoles]);
+  }
   const key = String(buttonKey || '').toLowerCase();
   if (key.startsWith('gw_') || key.includes('giveaway') || key.includes('reward')) {
     return uniq([...(staffRoleIds || []), ...(builderRoleIds || [])]);
