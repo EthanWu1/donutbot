@@ -444,7 +444,7 @@ const LEVEL_UP_CHANNEL_ID = C.CHANNEL_LEVEL_UP;
 // Channel that gets a plain milestone shout every 5 levels.
 const LEVEL_MILESTONE_CHANNEL_ID = '1505582865813999789';
 const HEAD_BUILDER_ROLE_ID = process.env.HEAD_BUILDER_ROLE_ID || C.ROLE_BUILDER_1 || DEFAULT_ROLE_IDS.headBuilder;
-const HEAD_ADMIN_ROLE_ID = process.env.HEAD_ADMIN_ROLE_ID || C.ROLE_HEAD_ADMIN || C.ROLE_ADMIN;
+const CONFIGURED_HEAD_ADMIN_ROLE_ID = process.env.HEAD_ADMIN_ROLE_ID || C.ROLE_HEAD_ADMIN || null;
 const AI_ENABLED = process.env.AI_ENABLED === undefined
   ? !!process.env.ANTHROPIC_API_KEY
   : ['1', 'true', 'yes', 'on'].includes(String(process.env.AI_ENABLED).toLowerCase());
@@ -594,6 +594,16 @@ function isHeadBuilder(member) {
 
 function canRefundBuilds(member) {
   return isManagerPlus(member) || isHeadBuilder(member);
+}
+
+async function resolveHeadAdminRoleId(guild) {
+  if (CONFIGURED_HEAD_ADMIN_ROLE_ID) return String(CONFIGURED_HEAD_ADMIN_ROLE_ID);
+  const cached = guild?.roles?.cache;
+  const cachedRole = cached?.find?.(role => String(role.name || '').trim().toLowerCase() === 'head admin');
+  if (cachedRole?.id) return String(cachedRole.id);
+  const fetched = await guild?.roles?.fetch?.().catch(() => null);
+  const fetchedRole = fetched?.find?.(role => String(role.name || '').trim().toLowerCase() === 'head admin');
+  return String(fetchedRole?.id || C.ROLE_ADMIN || '');
 }
 
 function applicationGateForMember(member, typeId) {
@@ -10541,9 +10551,12 @@ if (commandName === 'giveaway') {
         if (result.refund.builderAlreadyPaid && updated.builderDiscordId) {
           content = `<@${updated.builderDiscordId}>`;
           mentionUsers.push(String(updated.builderDiscordId));
-        } else if (HEAD_ADMIN_ROLE_ID) {
-          content = `<@&${HEAD_ADMIN_ROLE_ID}>`;
-          mentionRoles.push(String(HEAD_ADMIN_ROLE_ID));
+        } else {
+          const headAdminRoleId = await resolveHeadAdminRoleId(interaction.guild);
+          if (headAdminRoleId) {
+            content = `<@&${headAdminRoleId}>`;
+            mentionRoles.push(String(headAdminRoleId));
+          }
         }
         await actionChannel.send({
           content,

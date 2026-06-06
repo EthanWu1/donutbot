@@ -120,4 +120,6 @@ test('refund flow has an action button and payout deduction tracking', () => {
   assert.match(indexSource, /setLabel\('Refund'\)/);
   assert.match(indexSource, /builderPayoutDeduction/);
   assert.match(indexSource, /refundBuildId/);
+  assert.match(indexSource, /resolveHeadAdminRoleId/);
+  assert.match(indexSource, /toLowerCase\(\) === 'head admin'/);
 });
