@@ -15,6 +15,7 @@ const {
   splitNumericalGiveawayPrize,
   formatDiscordUserLabel,
   getRoleAwarePointProgress,
+  resolveBuildPaymentReceiver,
   markBuildRemoved,
   applyRefundToBuild,
   computeNamePrefix,
@@ -196,6 +197,13 @@ test('build removal and refunds update tracking state', () => {
   assert.equal(refunded.refund.amount, 25_000_000);
   assert.equal(refunded.refund.builderLedgerImpact, 25_000_000);
   assert.equal(refunded.status, 'REFUNDED');
+});
+
+test('build payment receiver is locked to EmpireBot with iEtZ secondary', () => {
+  assert.deepEqual(resolveBuildPaymentReceiver({ receiverOption: 'iEtZ', defaultReceiverIgn: 'Vi2910NC' }), {
+    receiverIgn: 'EmpireBot',
+    secondaryReceiverIgn: 'iEtZ'
+  });
 });
 
 test('name prefix picks staff/builder marker and highest rank label', () => {

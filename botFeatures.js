@@ -5,11 +5,20 @@ const DEFAULT_ROLE_IDS = {
 };
 
 const DEFAULT_AI_MODEL = 'claude-haiku-4-5-20251001';
+const BUILD_PAYMENT_RECEIVER_IGN = 'EmpireBot';
+const BUILD_SECONDARY_RECEIVER_IGN = 'iEtZ';
 
 function clampNumber(value, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, n));
+}
+
+function resolveBuildPaymentReceiver() {
+  return {
+    receiverIgn: BUILD_PAYMENT_RECEIVER_IGN,
+    secondaryReceiverIgn: BUILD_SECONDARY_RECEIVER_IGN
+  };
 }
 
 const POINT_ROLE_THRESHOLDS = {
@@ -465,7 +474,10 @@ function shouldSyncTicketPermissions({ parentId, buildCategoryIds = [], giveaway
 module.exports = {
   DEFAULT_ROLE_IDS,
   DEFAULT_AI_MODEL,
+  BUILD_PAYMENT_RECEIVER_IGN,
+  BUILD_SECONDARY_RECEIVER_IGN,
   POINT_ROLE_THRESHOLDS,
+  resolveBuildPaymentReceiver,
   calculateBuilderPoints,
   calculateStaffPoints,
   getPointProgress,

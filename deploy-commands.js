@@ -196,12 +196,7 @@ const commands = [
       .addStringOption(o => o.setName('price').setDescription('Total build price (e.g. 5m, 500k)').setRequired(true))
       .addStringOption(o => o.setName('customer_ign').setDescription('Optional override if the ticket IGN is missing').setRequired(false))
       .addStringOption(o => o.setName('builder_ign').setDescription('Optional builder IGN override').setRequired(false))
-      .addUserOption(o => o.setName('customer_discord').setDescription('Optional customer Discord override').setRequired(false))
-      .addStringOption(o => o.setName('receiver').setDescription('Payment receiver IGN (default iEtZ)').setRequired(false)
-        .addChoices(
-          { name: 'iEtZ',     value: 'iEtZ' },
-          { name: 'Vi2910NC', value: 'Vi2910NC' },
-        )))
+      .addUserOption(o => o.setName('customer_discord').setDescription('Optional customer Discord override').setRequired(false)))
     .addSubcommand(s => s.setName('remove').setDescription('Remove a build from the queue/tracking')
       .addStringOption(o => o.setName('id').setDescription('Build/request ID').setRequired(true)))
     .addSubcommand(s => s.setName('history').setDescription('Show completed build history for a builder')

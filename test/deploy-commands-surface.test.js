@@ -82,6 +82,10 @@ test('build editing is tracking-button only and cannot edit status', () => {
   assert.doesNotMatch(block, /setName\('edit'\)/);
   assert.match(block, /setName\('start'\)/);
   assert.match(block, /setName\('remove'\)/);
+  assert.doesNotMatch(block, /setName\('receiver'\)/);
+  assert.doesNotMatch(block, /iEtZ|Vi2910NC/);
+  assert.doesNotMatch(indexSource, /RECEIVER_CHOICES/);
+  assert.match(indexSource, /resolveBuildPaymentReceiver/);
   assert.match(indexSource, /build_job_edit_modal/);
   assert.doesNotMatch(indexSource, /setCustomId\('status'\)/);
   assert.doesNotMatch(indexSource, /getTextInputValue\('status'\)/);
