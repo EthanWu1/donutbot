@@ -550,6 +550,16 @@ async function generateRankCard({ userOrMember, rank, level, xpIntoLevel, xpNeed
   roundRect(ctx, 0, 0, width, height, 24);
   ctx.clip();
   drawGrid(ctx, width, height, p.accent, 0.06, 30);
+  ctx.fillStyle = 'rgba(255,255,255,0.035)';
+  for (let sx = -120; sx < width + 120; sx += 34) {
+    ctx.beginPath();
+    ctx.moveTo(sx, 0);
+    ctx.lineTo(sx + 88, 0);
+    ctx.lineTo(sx + 28, height);
+    ctx.lineTo(sx - 60, height);
+    ctx.closePath();
+    ctx.fill();
+  }
   const glow = ctx.createRadialGradient(width * 0.82, 30, 10, width * 0.82, 30, 220);
   glow.addColorStop(0, tier.glow);
   glow.addColorStop(1, 'rgba(0,0,0,0)');
@@ -638,7 +648,7 @@ async function generateRankCard({ userOrMember, rank, level, xpIntoLevel, xpNeed
 
   ctx.font = '600 15px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
   ctx.fillStyle = 'rgba(225, 237, 242, 0.78)';
-  ctx.fillText(`Rank #${rank || 0}`, leftX, topY + 26);
+  ctx.fillText(rank ? `Rank #${rank}` : 'Rank pending', leftX, topY + 26);
 
   const xpLabel = `${fmt(xpIntoLevel)} / ${fmt(xpNeeded)} XP`;
   const subt = `${Math.round(pct * 100)}% complete`;
@@ -654,6 +664,12 @@ async function generateRankCard({ userOrMember, rank, level, xpIntoLevel, xpNeed
   const barY = 126;
   const barW = width - rightPad - barX;
   const barH = 24;
+  ctx.font = '700 11px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
+  ctx.fillStyle = 'rgba(210, 226, 231, 0.58)';
+  ctx.fillText('LEVEL PROGRESS', barX, barY - 10);
+  const nextLabel = 'NEXT LEVEL';
+  const nextLabelW = ctx.measureText(nextLabel).width;
+  ctx.fillText(nextLabel, barX + barW - nextLabelW, barY - 10);
   drawStripedProgress(ctx, barX, barY, barW, barH, pct, p);
 
   ctx.font = '700 13px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
@@ -678,6 +694,10 @@ async function generateRankCard({ userOrMember, rank, level, xpIntoLevel, xpNeed
     ctx.fillStyle = 'rgba(255,255,255,0.05)';
     roundRect(ctx, chipX, chipY, chipW, 30, 15);
     ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+    ctx.lineWidth = 1;
+    roundRect(ctx, chipX + 0.5, chipY + 0.5, chipW - 1, 29, 14.5);
+    ctx.stroke();
     ctx.fillStyle = 'rgba(210, 226, 231, 0.66)';
     ctx.font = labelFont;
     ctx.fillText(chip.label, chipX + 14, chipY + 12);

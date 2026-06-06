@@ -25,7 +25,6 @@ const commands = [
   new SlashCommandBuilder()
     .setName('panel')
     .setDescription('Publish bot panels')
-    .addSubcommand(s => s.setName('list').setDescription('List available panels'))
     .addSubcommand(s => s.setName('send').setDescription('Send a panel in this channel')
       .addStringOption(o => o.setName('type').setDescription('Panel to send').setRequired(true)
         .addChoices(
@@ -107,14 +106,15 @@ const commands = [
     .addSubcommand(s => s.setName('create').setDescription('Start a new giveaway')
       .addStringOption(o => o.setName('prize').setDescription('Prize').setRequired(true))
       .addIntegerOption(o => o.setName('winners').setDescription('Winner count').setRequired(true))
-      .addStringOption(o => o.setName('duration').setDescription('Time (e.g. 30m, 1h). Leave empty if using goals.').setRequired(false))
-      .addIntegerOption(o => o.setName('entries_goal').setDescription('End when X people join').setRequired(false))
-      .addIntegerOption(o => o.setName('member_goal').setDescription('End when server reaches X members').setRequired(false))
-      .addStringOption(o => o.setName('mode').setDescription('Optional giveaway mode').setRequired(false)
+      .addStringOption(o => o.setName('mode').setDescription('Giveaway mode').setRequired(true)
         .addChoices(
           { name: 'Standard', value: 'standard' },
+          { name: 'Entries', value: 'entries' },
+          { name: 'Members', value: 'members' },
           { name: 'Double or Keep', value: 'double_or_keep' },
         ))
+      .addStringOption(o => o.setName('duration').setDescription('Required for standard or double-or-keep, e.g. 30m, 1h').setRequired(false))
+      .addIntegerOption(o => o.setName('count').setDescription('Required for entries or members mode').setRequired(false))
       .addStringOption(o => o.setName('claimtime').setDescription('How long winners can claim after end, e.g. 30m, 2h').setRequired(false))
       .addStringOption(o => o.setName('note').setDescription('Optional note').setRequired(false)))
     .addSubcommand(s => s.setName('end').setDescription('End a giveaway early')
@@ -323,8 +323,9 @@ new SlashCommandBuilder()
 
 */
 // --- KELP FARM CATALOG ---
+/* archived kelp command for now
 new SlashCommandBuilder()
-  .setName('kelp')
+  .setName('kelp_archived')
   .setDescription('Kelp farm catalog')
   // ── public ──
   .addSubcommand(s => s.setName('panel').setDescription('Browse the kelp farm catalog'))
@@ -386,6 +387,7 @@ new SlashCommandBuilder()
     )
     .addNumberOption(o => o.setName('price').setDescription('Price per item').setRequired(true))
   ),
+*/
 ];
 
 const rest = new REST({ version: '10' }).setToken(APP_TOKEN);

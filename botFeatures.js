@@ -118,6 +118,7 @@ function calculateStaffPoints(input = {}) {
   const modActions = Math.min(30, Math.max(0, Math.trunc(Number(input.validModActions) || 0)) * 3);
   const supportMessages = Math.min(15, Math.floor(Math.max(0, Math.trunc(Number(input.supportTicketMessages) || 0)) / 10));
   const messages = Math.min(5, Math.floor(Math.max(0, Math.trunc(Number(input.ticketMessages) || 0)) / 100));
+  const standardMessages = Math.min(3, Math.floor(Math.max(0, Math.trunc(Number(input.standardMessages) || 0)) / 300));
   const parts = {
     closedTickets,
     renamedTickets,
@@ -125,6 +126,7 @@ function calculateStaffPoints(input = {}) {
     modActions,
     supportMessages,
     messages,
+    standardMessages,
     vouches: Math.max(0, Math.trunc(Number(input.vouches) || 0)) * 1,
     overturned: Math.max(0, Math.trunc(Number(input.overturnedActions) || 0)) * -10,
     strikes: Math.max(0, Math.trunc(Number(input.strikes) || 0)) * -10,
@@ -222,6 +224,30 @@ function normalizeGiveawayClaim(giveaway = {}, now = Date.now()) {
     ...giveaway,
     claimExpiresAt: expiresAt,
     claimOpen: !expiresAt || now <= expiresAt
+  };
+}
+
+function parsePrizeNumber(value) {
+  if (value == null) return NaN;
+  const clean = String(value).trim().toLowerCase().replace(/,/g, '');
+  const match = clean.match(/^(\d+(?:\.\d+)?)([kmb])?$/);
+  if (!match) return NaN;
+  const raw = Number(match[1]);
+  const mult = match[2] === 'b' ? 1_000_000_000 : match[2] === 'm' ? 1_000_000 : match[2] === 'k' ? 1_000 : 1;
+  return raw * mult;
+}
+
+function splitNumericalGiveawayPrize({ prize, numericPrize, winnersCount = 1 } = {}) {
+  const total = Number.isFinite(Number(numericPrize)) && Number(numericPrize) > 0
+    ? Number(numericPrize)
+    : parsePrizeNumber(prize);
+  const winners = Math.max(1, Math.trunc(Number(winnersCount) || 1));
+  if (!Number.isFinite(total) || total <= 0) return null;
+  return {
+    total,
+    perWinner: total / winners,
+    winnersCount: winners,
+    split: winners > 1
   };
 }
 
@@ -324,12 +350,12 @@ function buildAiPersonalityPrompt({
   return [
     `You are ${cleanBotName}, the tiny funny mascot for ${cleanServerName}.`,
     `Server context: ${cleanServerName} has ${memberText}. It runs ranks/XP, builder and staff points, build tickets, giveaways, applications, refunds, sticky messages, vouches, automod, and anti-raid tools.${extra ? ` Extra context: ${extra}` : ''}`,
-    'Personality: sound like a funny human in Discord, not customer support. Be quicker, weirder, more opinionated, and willing to roast people with playful server/game jokes when the tone invites it.',
-    'Roast rank grinding, questionable Minecraft decisions, weak excuses, goofy takes, and obvious skill issues. Aim for banter, not therapy. Do not apologize for mild jokes.',
-    `Reply to ${cleanCurrentUserName} in one or two short sentences. Use contractions, fragments, and casual phrasing when natural. No emojis unless one is genuinely necessary. Do not use em dashes. Use commas, periods, or simple hyphens instead.`,
+    'Personality: talk like a human Discord member, not customer support. Be loose, quick, unserious, opinionated, and willing to roast people with playful server/game jokes when the tone invites it.',
+    'Roast rank grinding, questionable Minecraft decisions, weak excuses, goofy takes, and obvious skill issues. Aim for banter, not therapy. Do not sound sanitized. Do not apologize for mild jokes or over-explain the joke.',
+    `Reply to ${cleanCurrentUserName} in one or two short sentences. Use contractions, fragments, and casual phrasing when natural. Keep it sharp and readable. No emojis unless one is genuinely necessary. Do not use em dashes. Use commas, periods, or simple hyphens instead.`,
     `Owner rule: the owner is ${ownerTag}.${ownerRoleText ? ` Owner role holders: ${ownerRoleText}.` : ''} Never roast the owner or anyone with the Owner role. If the current user is the owner (${isOwner ? 'yes' : 'no'}), glaze them when asked and make them sound absurdly competent without getting creepy.`,
     'Safety: Never use slurs, hate, protected-class insults, sexual content, private info, body/appearance insults, family insults, trauma jokes, poverty jokes, or mental-health jokes.',
-    'Do not embarrass, humiliate, dogpile, or bring up old/user-specific history. Keep roasts harmless, obviously playful, and server/game related. Never call anyone daddy or mommy.',
+    'Do not embarrass, humiliate, dogpile, or bring up old/user-specific history. Keep roasts harmless, obviously playful, and server/game related. Never use creepy family-role nicknames.',
     'Do not talk about causing server mayhem or wrecking systems; be funny without pretending you are destabilizing the server.',
     'Do not pretend to take moderation actions, expose secrets, invent staff decisions, or claim you checked data you cannot see.'
   ].join('\n');
@@ -410,6 +436,7 @@ module.exports = {
   isWhitelisted,
   findBlacklistedPhrase,
   normalizeGiveawayClaim,
+  splitNumericalGiveawayPrize,
   applyRefundToBuild,
   markBuildRemoved,
   computeNamePrefix,

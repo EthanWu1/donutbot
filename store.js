@@ -793,6 +793,7 @@ function ensureTicketStatsRow(guildId, staffId) {
     openCount: Number(existing.openCount || 0),
     renameCount: Number(existing.renameCount || 0),
     messageCount: Number(existing.messageCount || 0),
+    standardMessageCount: Number(existing.standardMessageCount || 0),
     responseTotalMs: Number(existing.responseTotalMs || 0),
     responseCount: Number(existing.responseCount || 0),
     monthly: existing.monthly && typeof existing.monthly === 'object' ? existing.monthly : {},
@@ -810,6 +811,7 @@ function ensureTicketStatsMonth(row, ts = Date.now()) {
     openCount: 0,
     renameCount: 0,
     messageCount: 0,
+    standardMessageCount: 0,
     responseTotalMs: 0,
     responseCount: 0,
   };
@@ -874,6 +876,15 @@ async function recordTicketMessage(guildId, staffId) {
   return row;
 }
 
+async function recordStandardMessage(guildId, staffId) {
+  await ensureDb();
+  const row = ensureTicketStatsRow(guildId, staffId);
+  row.standardMessageCount = (row.standardMessageCount || 0) + 1;
+  ensureTicketStatsMonth(row).standardMessageCount += 1;
+  scheduleDbWrite();
+  return row;
+}
+
 async function getTicketStats(guildId) {
   await ensureDb();
   return dataStore().ticketStats?.[guildId] || {};
@@ -922,6 +933,7 @@ async function getStaffPointMetrics(guildId, userId) {
     renamedTickets: Number(stats.renameCount || 0),
     ticketMessages: Number(stats.messageCount || 0),
     supportTicketMessages: Number(stats.messageCount || 0),
+    standardMessages: Number(stats.standardMessageCount || 0),
     applicationReviews,
     validModActions: warnings + strikes,
     vouches: Array.isArray(vouchRow?.vouchers) ? vouchRow.vouchers.length : 0
@@ -1191,6 +1203,15 @@ async function getPoints(kind, userId, guildId) {
   const profile = dataStore().points?.[bucketName]?.[key] || { userId, guildId, lifetime: 0, monthly: {}, events: 0 };
   const month = monthKey();
   return { ...profile, currentMonth: profile.monthly?.[month] || 0 };
+}
+
+async function listPoints(kind, guildId) {
+  await ensureDb();
+  const bucketName = kind === 'staff' ? 'staff' : 'builders';
+  const month = monthKey();
+  return Object.values(dataStore().points?.[bucketName] || {})
+    .filter(profile => !guildId || String(profile.guildId || '') === String(guildId))
+    .map(profile => ({ ...profile, currentMonth: profile.monthly?.[month] || 0 }));
 }
 
 async function listPointEvents(guildId, userId, limit = 20) {
@@ -1678,7 +1699,7 @@ module.exports = {
   setBuilderWork, getBuilderWork, listBuilderWork,
   setBuilderBoard, getBuilderBoard, listBuilderBoards,
   addBuildRecord, listBuildRecords, getBuilderFinishedCounts, getBuilderFinishedCountsById, listBuildRecordsByDiscord, getBuilderPointMetrics,
-  addBuildJob, getBuildJob, updateBuildJob, deleteBuildJob, listBuildJobs, recordBuildRefund, addPoints, getPoints,
+  addBuildJob, getBuildJob, updateBuildJob, deleteBuildJob, listBuildJobs, recordBuildRefund, addPoints, getPoints, listPoints,
   setAfk, clearAfk, getAfk,
   getReceiverIgn, getReceiverIgnGlobal, setReceiverIgnGlobal, setChannelReceiverIgn, clearChannelReceiverIgn,
   getXpMultiplierGlobal, setXpMultiplierGlobal, getChannelXpMultiplier, setChannelXpMultiplier, clearChannelXpMultiplier,
@@ -1694,7 +1715,7 @@ module.exports = {
   getTicketSystem, getTicketConfig, setTicketConfig,
   listTicketPanels, getTicketPanel, setTicketPanel, deleteTicketPanel,
   nextTicketId, createTicketRecord, getTicketRecord, updateTicketRecord, deleteTicketRecord, findOpenTicketByUserButton, listOpenSpawnerTickets,
-  recordTicketResponse, recordTicketClosed, recordTicketClaimed, recordTicketOpened, recordTicketRenamed, recordTicketMessage, getTicketStats, getTicketStatsForMonth, getStaffPointMetrics,
+  recordTicketResponse, recordTicketClosed, recordTicketClaimed, recordTicketOpened, recordTicketRenamed, recordTicketMessage, recordStandardMessage, getTicketStats, getTicketStatsForMonth, getStaffPointMetrics,
   listAppTypes, getAppType, setAppType, deleteAppType, createAppSubmission, getAppSubmission, updateAppSubmission,
 getAutoNickConfig, setAutoNickPrefix, seedAutoNickDefaults,
 addLoa, getLoas, revokeLoa, getActiveLoa,

@@ -11,6 +11,7 @@ const {
   findBlacklistedPhrase,
   canApplyForRole,
   normalizeGiveawayClaim,
+  splitNumericalGiveawayPrize,
   markBuildRemoved,
   applyRefundToBuild,
   computeNamePrefix,
@@ -62,6 +63,7 @@ test('staff points emphasize closed tickets and devalue raw messages', () => {
     validModActions: 4,
     ticketMessages: 120,
     supportTicketMessages: 30,
+    standardMessages: 900,
     vouches: 3,
     overturnedActions: 1,
     strikes: 1
@@ -69,8 +71,9 @@ test('staff points emphasize closed tickets and devalue raw messages', () => {
 
   assert.equal(points.parts.messages, 1);
   assert.equal(points.parts.supportMessages, 3);
+  assert.equal(points.parts.standardMessages, 3);
   assert.equal(points.parts.closedTickets, 12);
-  assert.equal(points.total, 16);
+  assert.equal(points.total, 19);
 });
 
 test('point progress uses builder and expanded staff rank thresholds', () => {
@@ -130,6 +133,17 @@ test('giveaway claimtime disables claim after expiry', () => {
   }, 7_000);
 
   assert.equal(giveaway.claimOpen, false);
+});
+
+test('numerical giveaway prize splits evenly across winners', () => {
+  assert.deepEqual(splitNumericalGiveawayPrize({ prize: '10m', winnersCount: 5 }), {
+    total: 10_000_000,
+    perWinner: 2_000_000,
+    winnersCount: 5,
+    split: true
+  });
+
+  assert.equal(splitNumericalGiveawayPrize({ prize: 'VIP rank', winnersCount: 5 }), null);
 });
 
 test('build removal and refunds update tracking state', () => {
@@ -276,7 +290,7 @@ test('ai personality prompt is server-aware and owner-safe while allowing light 
   assert.match(prompt, /embarrass/i);
   assert.doesNotMatch(prompt, /chaos/i);
   assert.doesNotMatch(prompt, /builder queue chaos/i);
-  assert.match(prompt, /daddy|mommy/i);
+  assert.doesNotMatch(prompt, /\bdaddy\b|\bmommy\b/i);
 });
 
 test('ai reply sanitizer removes em dashes before Discord send', () => {

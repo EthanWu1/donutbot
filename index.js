@@ -66,6 +66,7 @@ const {
   getPointProgress,
   canApplyForRole,
   normalizeGiveawayClaim,
+  splitNumericalGiveawayPrize,
   getBuilderIncentives,
   getStaffIncentives,
   shouldAiRespond,
@@ -441,8 +442,8 @@ const AI_ENABLED = process.env.AI_ENABLED === undefined
   ? !!process.env.ANTHROPIC_API_KEY
   : ['1', 'true', 'yes', 'on'].includes(String(process.env.AI_ENABLED).toLowerCase());
 const AI_MODEL = resolveAiModel(process.env);
-const AI_COOLDOWN_MS = Math.max(10_000, Number(process.env.AI_COOLDOWN_MS || 60_000));
-const AI_TIMEOUT_MS = Math.max(3_000, Number(process.env.AI_TIMEOUT_MS || 12_000));
+const AI_COOLDOWN_MS = Math.max(5_000, Number(process.env.AI_COOLDOWN_MS || 15_000));
+const AI_TIMEOUT_MS = Math.max(2_500, Number(process.env.AI_TIMEOUT_MS || 8_000));
 const aiCooldowns = new Map();
 const aiServerContextCache = new Map();
 // Category where the Members/Channels/Roles stat voice channels live.
@@ -872,12 +873,10 @@ const HELP_CATALOG = [
   },
   {
     id: 'schematics', label: 'Schematics & Farms', tier: 'staff',
-    blurb: 'Renders, schematic submissions, kelp catalog.',
+    blurb: 'Renders and schematic submissions.',
     commands: [
       ['/render <litematic>', 'Render a litematic file.'],
       ['Submission buttons', 'Publish/update or reject from the draft preview.'],
-      ['/kelp panel', 'Browse the kelp farm catalog.'],
-      ['/kelp add | edit | remove | setprice', 'Manage the kelp catalog.'],
     ],
   },
   {
@@ -3827,11 +3826,11 @@ function renderMonthlyStaffStatsEmbed(rows, page, totalPages) {
   const pageRows = chunkItems(rows, 10)[page] || [];
   const desc = pageRows.length ? pageRows.map((r, i) => {
     const n = page * 10 + i + 1;
-    return `**${n}.** <@${r.staffId}> - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Closed \`${r.closed}\` | Renamed \`${r.renamed}\` | Support msgs \`${r.supportMessages}\`\n> Valid punishments \`${r.validModActions}\` | Manual \`${r.manual || 0}\``;
+    return `**${n}.** <@${r.staffId}> - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Closed \`${r.closed}\` | Renamed \`${r.renamed}\` | Messages \`${r.messages}\``;
   }).join('\n\n') : 'No staff points yet this month.';
   return new EmbedBuilder()
     .setColor(0x00A8FF)
-    .setTitle('Staff Monthly Points')
+    .setTitle('Staff Points Leaderboard')
     .setDescription(desc)
     .setFooter({ text: `Page ${page + 1}/${totalPages} - Resets on the 1st` })
     .setTimestamp();
@@ -3841,11 +3840,11 @@ function renderMonthlyBuilderStatsEmbed(rows, page, totalPages) {
   const pageRows = chunkItems(rows, 10)[page] || [];
   const desc = pageRows.length ? pageRows.map((r, i) => {
     const n = page * 10 + i + 1;
-    return `**${n}.** <@${r.discordId}> - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Builds \`${r.finished}\` | Value \`${money(r.earned || 0)}\` | Manual \`${r.manual || 0}\``;
+    return `**${n}.** <@${r.discordId}> - **${Number(r.points || 0).toLocaleString('en-US')} pts**\n> Value \`${money(r.earned || 0)}\` | Completed \`${r.finished}\``;
   }).join('\n\n') : 'No builder points yet this month.';
   return new EmbedBuilder()
     .setColor(0xFFB300)
-    .setTitle('Builder Monthly Points')
+    .setTitle('Builder Points Leaderboard')
     .setDescription(desc)
     .setFooter({ text: `Page ${page + 1}/${totalPages} - Resets on the 1st` })
     .setTimestamp();
@@ -3907,21 +3906,101 @@ function pointProgressBar(ratio, size = 10) {
   return `[${'#'.repeat(filled)}${'-'.repeat(size - filled)}]`;
 }
 
-function pointsCategoryText(kind, points, saved, statsText) {
-  const progress = getPointProgress(kind, points);
+function pointsCategoryText(kind, monthlyPoints, lifetimePoints, statsText) {
+  const progress = getPointProgress(kind, lifetimePoints);
   const lines = [
-    `Monthly points: **${Number(points || 0).toLocaleString('en-US')}**`,
-    `Manual adjustments: **${Number(saved?.currentMonth || 0).toLocaleString('en-US')}** this month, **${Number(saved?.lifetime || 0).toLocaleString('en-US')}** lifetime`,
+    `This month: **${Number(monthlyPoints || 0).toLocaleString('en-US')}**`,
+    `Lifetime: **${Number(lifetimePoints || 0).toLocaleString('en-US')}**`,
   ];
   if (progress.complete) {
-    lines.push(`Progress: \`${pointProgressBar(1)}\` top threshold reached${progress.currentLabel ? ` (**${progress.currentLabel}**)` : ''}.`);
+    lines.push(`Current: **${progress.currentLabel || 'Top rank'}**`);
   } else {
     const currentText = progress.currentLabel ? `Current: **${progress.currentLabel}**` : 'Current: **Not ranked yet**';
     lines.push(`${currentText} -> **${progress.nextLabel}**`);
-    lines.push(`Progress: \`${pointProgressBar(progress.ratio)}\` ${Number(progress.progressPoints || 0).toLocaleString('en-US')}/${Number(progress.neededPoints || 0).toLocaleString('en-US')} points, **${Math.max(0, Number(progress.nextPoints || 0) - Number(points || 0)).toLocaleString('en-US')}** to go`);
+    lines.push(`To next: **${Math.max(0, Number(progress.nextPoints || 0) - Number(lifetimePoints || 0)).toLocaleString('en-US')}**`);
   }
   if (statsText) lines.push(statsText);
   return lines.join('\n');
+}
+
+function buildPointProgressImage({ displayName, avatarUrl, categories = [] } = {}) {
+  const rows = categories.filter(c => c && c.progress);
+  const width = 900;
+  const height = Math.max(190, 118 + rows.length * 104);
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  const bg = ctx.createLinearGradient(0, 0, width, height);
+  bg.addColorStop(0, '#101923');
+  bg.addColorStop(0.58, '#172333');
+  bg.addColorStop(1, '#102a2f');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = 'rgba(255,255,255,0.045)';
+  for (let x = -80; x < width + 80; x += 48) {
+    ctx.fillRect(x, 0, 1, height);
+    ctx.fillRect(0, x, width, 1);
+  }
+
+  const safeName = sanitizeDisplayName(displayName || 'Member', { maxLen: 28 });
+  ctx.fillStyle = '#eff7fb';
+  ctx.font = '800 34px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
+  ctx.fillText(safeName, 42, 54);
+  ctx.font = '600 15px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
+  ctx.fillStyle = 'rgba(220,236,242,0.68)';
+  ctx.fillText('Lifetime point progress', 44, 80);
+
+  rows.forEach((row, idx) => {
+    const y = 116 + idx * 104;
+    const accent = row.color || '#08a4a7';
+    const ratio = Math.max(0, Math.min(1, Number(row.progress.ratio) || 0));
+    ctx.fillStyle = 'rgba(6,11,20,0.62)';
+    roundRect(ctx, 36, y - 20, width - 72, 78, 18);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    roundRect(ctx, 36.5, y - 19.5, width - 73, 77, 18);
+    ctx.stroke();
+    ctx.fillStyle = '#eaf4f8';
+    ctx.font = '800 18px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
+    ctx.fillText(row.label, 58, y);
+    ctx.font = '700 15px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
+    ctx.fillStyle = 'rgba(218,232,238,0.74)';
+    const rankText = row.progress.complete
+      ? `Top threshold reached: ${row.progress.currentLabel || 'Complete'}`
+      : `${row.progress.currentLabel || 'Unranked'} -> ${row.progress.nextLabel}`;
+    ctx.fillText(rankText, 58, y + 24);
+
+    const barX = 338;
+    const barY = y - 3;
+    const barW = width - barX - 58;
+    const barH = 24;
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    roundRect(ctx, barX, barY, barW, barH, 12);
+    ctx.fill();
+    const fillW = Math.max(10, Math.round(barW * ratio));
+    const grad = ctx.createLinearGradient(barX, barY, barX + barW, barY);
+    grad.addColorStop(0, accent);
+    grad.addColorStop(1, '#f4d35e');
+    ctx.fillStyle = grad;
+    roundRect(ctx, barX, barY, fillW, barH, 12);
+    ctx.fill();
+    ctx.fillStyle = '#071019';
+    ctx.font = '800 13px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
+    ctx.fillText(`${Math.round(ratio * 100)}%`, barX + 14, barY + 17);
+    ctx.fillStyle = 'rgba(230,244,248,0.78)';
+    ctx.font = '700 13px "DejaVu Sans", "Segoe UI", Arial, sans-serif';
+    const pointsText = row.progress.complete
+      ? `${Number(row.lifetimePoints || 0).toLocaleString('en-US')} pts`
+      : `${Number(row.progress.progressPoints || 0).toLocaleString('en-US')}/${Number(row.progress.neededPoints || 0).toLocaleString('en-US')} pts`;
+    const tw = ctx.measureText(pointsText).width;
+    ctx.fillText(pointsText, barX + barW - tw, y + 42);
+  });
+
+  return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'points-progress.png' });
+}
+
+function estimatedLifetimePoints(saved = {}, monthlyCalculated = 0) {
+  return Math.max(0, Math.round((Number(saved.lifetime || 0) + Number(monthlyCalculated || 0) - Number(saved.currentMonth || 0)) * 10) / 10);
 }
 
 function pointsManageRows(userId) {
@@ -3941,31 +4020,55 @@ async function buildPointsPayload(guild, targetUser, viewerMember) {
   ]);
   const builderPoints = calculateBuilderPoints({ ...builderMetrics, manual: builderSaved.currentMonth || 0 });
   const staffPoints = calculateStaffPoints({ ...staffMetrics, manual: staffSaved.currentMonth || 0 });
+  const builderLifetime = estimatedLifetimePoints(builderSaved, builderPoints.total);
+  const staffLifetime = estimatedLifetimePoints(staffSaved, staffPoints.total);
   const displayName = member?.displayName || targetUser.displayName || targetUser.username;
   const embed = new EmbedBuilder()
     .setColor(0x2b2d31)
     .setAuthor({ name: `${displayName} Points`, iconURL: targetUser.displayAvatarURL({ extension: 'png', size: 128 }) })
-    .setDescription(`${targetUser}'s current monthly point snapshot.`)
+    .setDescription(`${targetUser}'s point snapshot.`)
     .setTimestamp();
+  const progressRows = [];
   if (hasStaffOrBuilderCategory(member, 'builder', builderSaved, builderPoints.total)) {
+    progressRows.push({
+      kind: 'builder',
+      label: 'Builder',
+      color: '#ffb300',
+      lifetimePoints: builderLifetime,
+      progress: getPointProgress('builder', builderLifetime)
+    });
     embed.addFields({
       name: 'Builder',
-      value: pointsCategoryText('builder', builderPoints.total, builderSaved, `Builds: **${builderMetrics.completedBuilds || 0}** | Value: **${money(builderMetrics.amount || 0)}**`),
+      value: pointsCategoryText('builder', builderPoints.total, builderLifetime, `Completed: **${builderMetrics.completedBuilds || 0}** | Value: **${money(builderMetrics.amount || 0)}**`),
       inline: false
     });
   }
   if (hasStaffOrBuilderCategory(member, 'staff', staffSaved, staffPoints.total)) {
+    progressRows.push({
+      kind: 'staff',
+      label: 'Staff',
+      color: '#00a8ff',
+      lifetimePoints: staffLifetime,
+      progress: getPointProgress('staff', staffLifetime)
+    });
     embed.addFields({
       name: 'Staff',
-      value: pointsCategoryText('staff', staffPoints.total, staffSaved, `Closed: **${staffMetrics.resolvedTickets || 0}** | Renamed: **${staffMetrics.renamedTickets || 0}** | Ticket msgs: **${staffMetrics.ticketMessages || 0}**`),
+      value: pointsCategoryText('staff', staffPoints.total, staffLifetime, `Closed: **${staffMetrics.resolvedTickets || 0}** | Renamed: **${staffMetrics.renamedTickets || 0}** | Messages: **${Number(staffMetrics.ticketMessages || 0) + Number(staffMetrics.standardMessages || 0)}**`),
       inline: false
     });
   }
   if (!embed.data.fields?.length) {
     embed.setDescription(`${targetUser} has no builder or staff point categories yet.`);
   }
+  if (progressRows.length) embed.setImage('attachment://points-progress.png');
+  const files = progressRows.length ? [buildPointProgressImage({
+    displayName,
+    avatarUrl: targetUser.displayAvatarURL({ extension: 'png', size: 128 }),
+    categories: progressRows
+  })] : [];
   return {
     embeds: [embed],
+    files,
     components: adminPanelAllowed(viewerMember) ? pointsManageRows(targetUser.id) : [],
     allowedMentions: { parse: [] }
   };
@@ -4014,6 +4117,12 @@ function manageRows(userId) {
     new ButtonBuilder().setCustomId(`manage_view:details:${userId}`).setLabel('Details').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`manage_view:log:${userId}`).setLabel('Log').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`manage_level_adjust:${userId}`).setLabel('Adjust Level').setStyle(ButtonStyle.Primary),
+  )];
+}
+
+function manageBackRow(userId) {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`manage_view:back:${userId}`).setStyle(ButtonStyle.Secondary).setEmoji('⬅️'),
   )];
 }
 
@@ -4130,6 +4239,14 @@ async function buildVouchesPayload(guild, targetUser, viewerMember) {
   return { embeds: [eb], components: [new ActionRowBuilder().addComponents(...buttons)], allowedMentions: { parse: [] } };
 }
 
+function formatVouchActor(entry = {}) {
+  const id = String(entry.voucherId || entry.userId || '').trim();
+  if (!id) return 'Unknown';
+  if (id.startsWith('manual:')) return 'Manual adjustment';
+  if (/^\d{16,20}$/.test(id)) return `<@${id}>`;
+  return `Unknown source \`${id.slice(0, 24)}\``;
+}
+
 function activityRoleIds(guild) {
   return [...new Set([
     C.ROLE_STAFF,
@@ -4187,8 +4304,9 @@ async function processDueActivityChecks() {
 }
 
 function automodSettingsEmbed(cfg = {}) {
+  const words = (cfg.blocked_words || []).map(String).filter(Boolean);
   return new EmbedBuilder()
-    .setColor(0x2b2d31)
+    .setColor(0xfaa61a)
     .setTitle('Automod Panel')
     .setDescription('Manage filters, whitelist entries, and blacklisted words from one place.')
     .addFields(
@@ -4196,7 +4314,7 @@ function automodSettingsEmbed(cfg = {}) {
       { name: 'Spam', value: `${cfg.spam_limit || 5} msgs / ${formatDuration(cfg.spam_window_ms || 4000)}`, inline: true },
       { name: 'Repeat', value: `${cfg.repeat_limit || 2} repeats / ${formatDuration(cfg.repeat_window_ms || 7000)}`, inline: true },
       { name: 'Whitelist', value: `Users ${(cfg.exempt_user_ids || []).length}; Roles ${(cfg.exempt_role_ids || []).length}; Channels ${(cfg.exempt_channel_ids || []).length}`, inline: false },
-      { name: 'Blacklisted Words', value: `${(cfg.blocked_words || []).length} configured`, inline: true },
+      { name: 'Blacklisted Words', value: words.length ? words.slice(0, 8).map(w => `\`${w}\``).join(', ').slice(0, 1024) : 'None configured', inline: false },
     )
     .setFooter({ text: 'Use the buttons below for exact automod edits.' })
     .setTimestamp();
@@ -4233,7 +4351,7 @@ async function readAntiRaidConfig(guildId) {
 
 function antiraidSettingsEmbed(cfg = {}) {
   return new EmbedBuilder()
-    .setColor(0x2b2d31)
+    .setColor(0xed4245)
     .setTitle('Anti-Raid Panel')
     .setDescription('Watch join bursts, new-account pressure, and destructive admin actions.')
     .addFields(
@@ -4305,6 +4423,158 @@ function buildWhitelistModal(panelId, action) {
   return modal;
 }
 
+function boolWord(value) {
+  return value === false ? 'off' : 'on';
+}
+
+function parseLimitWindowText(value, fallbackLimit, fallbackWindowMs) {
+  const text = String(value || '').trim();
+  const match = text.match(/(\d+)\s*(?:\/|,|\s+)\s*(\d+(?:\.\d+)?\s*[smhdw])/i);
+  const limit = match ? Math.max(1, Math.trunc(Number(match[1]) || fallbackLimit)) : fallbackLimit;
+  const windowMs = match ? parseDuration(match[2].replace(/\s+/g, '')) || fallbackWindowMs : fallbackWindowMs;
+  return { limit, windowMs };
+}
+
+function parseKeyValues(text) {
+  const out = {};
+  for (const part of String(text || '').split(/[,\n]+/)) {
+    const m = part.trim().match(/^([a-z_]+)\s*[:=]\s*([^,\n]+)$/i);
+    if (m) out[m[1].toLowerCase()] = m[2].trim();
+  }
+  return out;
+}
+
+function parseOnOff(value, fallback = true) {
+  const v = String(value || '').trim().toLowerCase();
+  if (['on', 'yes', 'true', '1', 'enabled'].includes(v)) return true;
+  if (['off', 'no', 'false', '0', 'disabled'].includes(v)) return false;
+  return fallback;
+}
+
+function parseWordList(value) {
+  return [...new Set(String(value || '')
+    .split(/[,\n]+/)
+    .map(x => x.trim())
+    .filter(Boolean)
+    .slice(0, 50))];
+}
+
+function buildAutomodSettingsModal(cfg = {}) {
+  const modal = new ModalBuilder()
+    .setCustomId('admin_panel_modal:automod:settings')
+    .setTitle('Automod Settings');
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('spam')
+        .setLabel('Spam limit/window')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(`${cfg.spam_limit || 5}/${formatDuration(cfg.spam_window_ms || 4000)}`)
+        .setMaxLength(32)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('repeat')
+        .setLabel('Repeat limit/window')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(`${cfg.repeat_limit || 2}/${formatDuration(cfg.repeat_window_ms || 7000)}`)
+        .setMaxLength(32)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('limits')
+        .setLabel('mentions, caps chars/ratio, attachments')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(`mentions=${cfg.mention_limit || 5}, caps=${cfg.caps_min_chars || 25}/${cfg.caps_ratio || 0.75}, attachments=${cfg.attachment_limit || 4}`)
+        .setMaxLength(120)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('filters')
+        .setLabel('invites, suspicious, caps')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(`invites=${boolWord(cfg.invite_filter_enabled !== false)}, suspicious=${boolWord(cfg.suspicious_link_filter_enabled !== false)}, caps=${boolWord(cfg.caps_enabled !== false)}`)
+        .setMaxLength(120)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('blocked_words')
+        .setLabel('Blacklisted words/phrases')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setValue((cfg.blocked_words || []).map(String).join('\n').slice(0, 1000))
+        .setMaxLength(1000)
+    )
+  );
+  return modal;
+}
+
+function buildAntiRaidSettingsModal(cfg = {}) {
+  const t = cfg.thresholds || {};
+  const modal = new ModalBuilder()
+    .setCustomId('admin_panel_modal:antiraid:settings')
+    .setTitle('Anti-Raid Settings');
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('mode')
+        .setLabel('Mode: off, watch, lockdown, quarantine')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(String(cfg.mode || 'watch'))
+        .setMaxLength(24)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('joins')
+        .setLabel('alert/lock/window')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(`${t.alertJoins || 5}/${t.lockJoins || 10}/${formatDuration(t.joinWindowMs || 5000)}`)
+        .setMaxLength(40)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('new_account')
+        .setLabel('New account strict age')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(formatDuration(t.newAccountMs || 3 * 24 * 60 * 60 * 1000))
+        .setMaxLength(24)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('destructive')
+        .setLabel('channel/role/roleperm/channelperm')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(`channel=${t.channelDeleteLimit || 3}, role=${t.roleDeleteLimit || 2}, roleperm=${t.rolePermEditLimit || 2}, channelperm=${t.channelPermEditLimit || 3}`)
+        .setMaxLength(140)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('messages')
+        .setLabel('new-member message limit/window')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(`${t.spamMsgLimit || 7}/${formatDuration(t.spamWindowMs || 4000)}`)
+        .setMaxLength(32)
+    )
+  );
+  return modal;
+}
+
+async function refreshAdminPanelMessage(interaction, panelId) {
+  const payload = await buildBuiltinPanelPayload(interaction.guild, panelId).catch(() => null);
+  if (payload && interaction.message?.editable !== false) {
+    await interaction.message?.edit(payload).catch(() => {});
+  }
+}
+
 async function handleAdminPanelButton(interaction) {
   if (!adminPanelAllowed(interaction.member)) {
     return safeComponentReply(interaction, { content: 'Manager+ only.', flags: 64 });
@@ -4314,7 +4584,7 @@ async function handleAdminPanelButton(interaction) {
   if (panelId === 'automod') {
     const cfg = await store.getAutomodConfig(interaction.guildId).catch(() => ({})) || {};
     if (action === 'settings') {
-      return safeComponentReply(interaction, { embeds: [automodSettingsEmbed(cfg)], flags: 64 });
+      return interaction.showModal(buildAutomodSettingsModal(cfg));
     }
     if (action === 'toggle') {
       const next = { ...cfg, enabled: cfg.enabled === false };
@@ -4369,7 +4639,7 @@ async function handleAdminPanelButton(interaction) {
   if (panelId === 'antiraid') {
     const cfg = await readAntiRaidConfig(interaction.guildId);
     if (action === 'settings') {
-      return safeComponentReply(interaction, { embeds: [antiraidSettingsEmbed(cfg)], flags: 64 });
+      return interaction.showModal(buildAntiRaidSettingsModal(cfg));
     }
     if (action === 'whitelist_add' || action === 'whitelist_remove') {
       return interaction.showModal(buildWhitelistModal('antiraid', action));
@@ -4439,6 +4709,56 @@ async function handleAdminPanelModal(interaction) {
     return interaction.reply({ content: 'Manager+ only.', flags: 64 });
   }
   const [, panelId, action] = interaction.customId.split(':');
+  if (panelId === 'automod' && action === 'settings') {
+    const cfg = await store.getAutomodConfig(interaction.guildId).catch(() => ({})) || {};
+    const spam = parseLimitWindowText(interaction.fields.getTextInputValue('spam'), cfg.spam_limit || 5, cfg.spam_window_ms || 4000);
+    const repeat = parseLimitWindowText(interaction.fields.getTextInputValue('repeat'), cfg.repeat_limit || 2, cfg.repeat_window_ms || 7000);
+    const limits = parseKeyValues(interaction.fields.getTextInputValue('limits'));
+    const filters = parseKeyValues(interaction.fields.getTextInputValue('filters'));
+    const capsMatch = String(limits.caps || '').match(/(\d+)\s*\/\s*(0?\.\d+|1(?:\.0+)?)/);
+    const patch = {
+      spam_limit: spam.limit,
+      spam_window_ms: spam.windowMs,
+      repeat_limit: repeat.limit,
+      repeat_window_ms: repeat.windowMs,
+      mention_limit: Math.max(1, Math.trunc(Number(limits.mentions ?? cfg.mention_limit ?? 5) || 5)),
+      attachment_limit: Math.max(1, Math.trunc(Number(limits.attachments ?? cfg.attachment_limit ?? 4) || 4)),
+      caps_min_chars: capsMatch ? Math.max(1, Math.trunc(Number(capsMatch[1]) || 25)) : Math.max(1, Math.trunc(Number(cfg.caps_min_chars || 25))),
+      caps_ratio: capsMatch ? Math.max(0.1, Math.min(1, Number(capsMatch[2]) || 0.75)) : Math.max(0.1, Math.min(1, Number(cfg.caps_ratio || 0.75))),
+      invite_filter_enabled: parseOnOff(filters.invites, cfg.invite_filter_enabled !== false),
+      suspicious_link_filter_enabled: parseOnOff(filters.suspicious, cfg.suspicious_link_filter_enabled !== false),
+      caps_enabled: parseOnOff(filters.caps, cfg.caps_enabled !== false),
+      blocked_words: parseWordList(interaction.fields.getTextInputValue('blocked_words')),
+    };
+    await store.setAutomodConfig(interaction.guildId, { ...cfg, ...patch });
+    await refreshAdminPanelMessage(interaction, 'automod');
+    return interaction.reply({ content: 'Automod settings updated.', flags: 64 });
+  }
+  if (panelId === 'antiraid' && action === 'settings') {
+    const cfg = await readAntiRaidConfig(interaction.guildId);
+    const mode = String(interaction.fields.getTextInputValue('mode') || cfg.mode || 'watch').trim().toLowerCase();
+    if (['off', 'watch', 'lockdown', 'quarantine'].includes(mode)) cfg.mode = mode;
+    cfg.thresholds ||= {};
+    const joins = String(interaction.fields.getTextInputValue('joins') || '').match(/(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+(?:\.\d+)?\s*[smhdw])/i);
+    if (joins) {
+      cfg.thresholds.alertJoins = Math.max(1, Math.trunc(Number(joins[1]) || 5));
+      cfg.thresholds.lockJoins = Math.max(cfg.thresholds.alertJoins, Math.trunc(Number(joins[2]) || 10));
+      cfg.thresholds.joinWindowMs = parseDuration(joins[3].replace(/\s+/g, '')) || cfg.thresholds.joinWindowMs || 5000;
+    }
+    const newAge = parseDuration(String(interaction.fields.getTextInputValue('new_account') || '').replace(/\s+/g, ''));
+    if (newAge) cfg.thresholds.newAccountMs = newAge;
+    const destructive = parseKeyValues(interaction.fields.getTextInputValue('destructive'));
+    if (destructive.channel) cfg.thresholds.channelDeleteLimit = Math.max(1, Math.trunc(Number(destructive.channel) || 3));
+    if (destructive.role) cfg.thresholds.roleDeleteLimit = Math.max(1, Math.trunc(Number(destructive.role) || 2));
+    if (destructive.roleperm) cfg.thresholds.rolePermEditLimit = Math.max(1, Math.trunc(Number(destructive.roleperm) || 2));
+    if (destructive.channelperm) cfg.thresholds.channelPermEditLimit = Math.max(1, Math.trunc(Number(destructive.channelperm) || 3));
+    const messages = parseLimitWindowText(interaction.fields.getTextInputValue('messages'), cfg.thresholds.spamMsgLimit || 7, cfg.thresholds.spamWindowMs || 4000);
+    cfg.thresholds.spamMsgLimit = messages.limit;
+    cfg.thresholds.spamWindowMs = messages.windowMs;
+    await store.setConfigValue(interaction.guildId, 'ANTIRAID_CONFIG', JSON.stringify(cfg));
+    await refreshAdminPanelMessage(interaction, 'antiraid');
+    return interaction.reply({ content: 'Anti-raid settings updated.', flags: 64 });
+  }
   if (panelId === 'automod' && action === 'add_word') {
     const phrase = (interaction.fields.getTextInputValue('phrase') || '').trim().slice(0, 120);
     if (!phrase) return interaction.reply({ content: 'Phrase cannot be blank.', flags: 64 });
@@ -4446,6 +4766,7 @@ async function handleAdminPanelModal(interaction) {
     const words = new Set((cfg.blocked_words || []).map(x => String(x).trim()).filter(Boolean));
     words.add(phrase);
     await store.setAutomodConfig(interaction.guildId, { ...cfg, blocked_words: [...words] });
+    await refreshAdminPanelMessage(interaction, 'automod');
     return interaction.reply({ content: `Added blacklisted phrase: \`${phrase}\`.`, flags: 64 });
   }
   if (panelId === 'automod' && action === 'remove_word') {
@@ -4455,6 +4776,7 @@ async function handleAdminPanelModal(interaction) {
     const words = new Set((cfg.blocked_words || []).map(x => String(x).trim()).filter(Boolean));
     words.delete(phrase);
     await store.setAutomodConfig(interaction.guildId, { ...cfg, blocked_words: [...words] });
+    await refreshAdminPanelMessage(interaction, 'automod');
     return interaction.reply({ content: `Removed blacklisted phrase if it existed: \`${phrase}\`.`, flags: 64 });
   }
   if (panelId === 'automod' && (action === 'whitelist_add' || action === 'whitelist_remove')) {
@@ -4468,6 +4790,7 @@ async function handleAdminPanelModal(interaction) {
     if (action === 'whitelist_add') current.add(clean);
     else current.delete(clean);
     await store.setAutomodConfig(interaction.guildId, { ...cfg, [key]: [...current] });
+    await refreshAdminPanelMessage(interaction, 'automod');
     return interaction.reply({ content: `Automod ${kind} whitelist ${action === 'whitelist_add' ? 'added' : 'removed'}: \`${clean}\`.`, flags: 64 });
   }
   if (panelId === 'antiraid' && (action === 'whitelist_add' || action === 'whitelist_remove')) {
@@ -4483,6 +4806,7 @@ async function handleAdminPanelModal(interaction) {
     else current.delete(clean);
     cfg.whitelist[key] = [...current];
     await store.setConfigValue(interaction.guildId, 'ANTIRAID_CONFIG', JSON.stringify(cfg));
+    await refreshAdminPanelMessage(interaction, 'antiraid');
     return interaction.reply({ content: `Anti-raid ${kind} whitelist ${action === 'whitelist_add' ? 'added' : 'removed'}: \`${clean}\`.`, flags: 64 });
   }
 }
@@ -5496,8 +5820,8 @@ async function maybeRespondWithAi(message) {
       },
       body: JSON.stringify({
         model: AI_MODEL,
-        max_tokens: 110,
-        temperature: 0.85,
+        max_tokens: 90,
+        temperature: 1.0,
         system: systemPrompt,
         messages: [{ role: 'user', content: prompt }]
       })
@@ -6004,10 +6328,10 @@ client.on('messageCreate', async (message) => {
     if (message.guildId && !message.author?.bot) {
       const cfg = await store.getTicketConfig().catch(() => null);
       if (message.channel?.type === ChannelType.GuildText) {
-        const rec = await store.getTicketRecord(message.channelId).catch(() => null);
-        if (rec && rec.status === 'OPEN') {
-          const isStaff = cfg ? isStaffMember(message.member, cfg) : false;
-          if (isStaff) {
+        const isStaff = cfg ? isStaffMember(message.member, cfg) : false;
+        if (isStaff) {
+          const rec = await store.getTicketRecord(message.channelId).catch(() => null);
+          if (rec && rec.status === 'OPEN') {
             await store.recordTicketMessage(message.guildId, message.author.id).catch(() => {});
             if (!rec.firstStaffMessageAt) {
               await store.updateTicketRecord(message.channelId, {
@@ -6015,6 +6339,8 @@ client.on('messageCreate', async (message) => {
                 firstResponderId: message.author.id
               }).catch(() => {});
             }
+          } else {
+            await store.recordStandardMessage(message.guildId, message.author.id).catch(() => {});
           }
         }
       }
@@ -6891,8 +7217,9 @@ if (interaction.isButton() && (interaction.customId.startsWith('gw_keep:') || in
   const desc = [
     `Ends: ${endsBits.length ? endsBits.join(' - ') : 'When goals are met'}`,
     `Hosted by: <@${g.hostId}>`,
-    'Mode: **Double or Keep**',
+    `Mode: **${giveawayModeLabel('double_or_keep')}**`,
     g.claimTimeMs ? `Claim window: **${formatDuration(g.claimTimeMs)}** after end` : null,
+    (g.winnersCount || 1) > 1 ? `Prize split: **${money(newPrizeValue / (g.winnersCount || 1))}** each (${money(newPrizeValue)} total)` : null,
     `Entries: **0**`,
     `Winners: **${g.winnersCount || 1}**`,
   ].filter(Boolean).join('\n');
@@ -7365,13 +7692,13 @@ if (interaction.isButton() && interaction.customId.startsWith('app_start:')) {
       key: 'reward',
       label: 'Giveaway Reward',
       categoryId: C.TICKET_CATEGORIES.GIVEAWAY || C.TICKET_CATEGORIES.SUPPORT || '',
-      welcome: `Congratulations {userMention}! You won **${g.prize}**.\nA staff member will deliver your reward shortly.`,
+      welcome: `Congratulations {userMention}! You won **${giveawayClaimPrizeText(g)}**.\nA staff member will deliver your reward shortly.`,
       questions: [
         { id: 'ign', label: 'IGN' },
       ],
     };
     // Ticket channel is named after the prize: giveaway-<prize>.
-    const prizeSlug = String(g.prize || 'prize')
+    const prizeSlug = String(giveawayClaimPrizeText(g) || 'prize')
       .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'prize';
     try {
       const ch = await createTicketChannel({
@@ -8634,6 +8961,11 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
   if (interaction.isButton() && interaction.customId.startsWith('manage_view:')) {
     if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 }).catch(() => {});
     const [, view, userId] = interaction.customId.split(':');
+    if (view === 'back') {
+      const eb = await buildMemberManageEmbed(interaction.guild, userId).catch(() => null);
+      if (!eb) return interaction.reply({ content: 'That member is no longer in this server.', flags: 64 }).catch(() => {});
+      return interaction.update({ embeds: [eb], components: manageRows(userId), allowedMentions: { parse: [] } }).catch(() => {});
+    }
     const builders = {
       level: buildManageLevelEmbed,
       infractions: buildManageInfractionsEmbed,
@@ -8642,7 +8974,7 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
     };
     const eb = builders[view] ? await builders[view](interaction.guild, userId).catch(() => null) : null;
     if (!eb) return interaction.reply({ content: 'That member is no longer in this server.', flags: 64 }).catch(() => {});
-    return interaction.update({ embeds: [eb], components: manageRows(userId), allowedMentions: { parse: [] } }).catch(() => {});
+    return interaction.update({ embeds: [eb], components: manageBackRow(userId), allowedMentions: { parse: [] } }).catch(() => {});
   }
 
   if (interaction.isButton() && interaction.customId.startsWith('manage_level_adjust:')) {
@@ -8723,7 +9055,7 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
       const rec = (all || []).find(v => String(v.userId) === String(userId));
       const vouchers = (rec?.vouchers || []).slice(-10).reverse();
       const desc = vouchers.length
-        ? vouchers.map(v => `${v.at ? tsR(v.at) : 'unknown time'} from ${String(v.voucherId || '').startsWith('manual:') ? '`manual`' : `<@${v.voucherId}>`}${v.reason ? `: ${String(v.reason).slice(0, 120)}` : ''}`).join('\n')
+        ? vouchers.map(v => `${v.at ? tsR(v.at) : 'unknown time'} - ${formatVouchActor(v)}${v.reason ? `: ${String(v.reason).slice(0, 120)}` : ''}`).join('\n')
         : 'No vouches recorded.';
       return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Vouch History').setDescription(desc)], flags: 64, allowedMentions: { parse: [] } }).catch(() => {});
     }
@@ -8967,77 +9299,6 @@ if (interaction.isModalSubmit() && interaction.customId.startsWith("create_embed
       await interaction.deferReply();
       const payload = await buildPointsPayload(interaction.guild, target, interaction.member);
       return interaction.editReply(payload);
-
-      const ud = await store.getUserXp(target.id, interaction.guildId);
-      const curXp = ud.xp || 0;
-      const level = getLevelFromXp(curXp);
-      const rank = await store.getRank(target.id, interaction.guildId).catch(() => 0);
-      const prevXp = getXpForLevel(level);
-      const nextXp = getXpForLevel(level + 1);
-      const xpIntoLevel = Math.max(0, curXp - prevXp);
-      const xpNeeded = Math.max(1, nextXp - prevXp);
-      const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-
-      let tierLabel = 'COMMON';
-      let tierAccent = null;
-      if (member) {
-        const levelRoleEntries = Object.entries(C.LEVEL_ROLES || {})
-          .map(([lvl, cfg]) => ({ level: Number(lvl), id: cfg?.id, color: cfg?.color || null }))
-          .filter(r => r.id && member.roles.cache.has(r.id))
-          .sort((a, b) => b.level - a.level);
-        if (levelRoleEntries.length) {
-          const highest = levelRoleEntries[0];
-          const roleObj = interaction.guild.roles.cache.get(highest.id);
-          tierLabel = String(roleObj?.name || 'Rank').replace(/\s*role$/i, '').toUpperCase();
-          tierAccent = roleObj?.hexColor && roleObj.hexColor !== '#000000' ? roleObj.hexColor : (highest.color || null);
-        }
-      }
-
-      const [builderMetrics, staffMetrics, builderSaved, staffSaved] = await Promise.all([
-        store.getBuilderPointMetrics(interaction.guildId, target.id).catch(() => ({})),
-        store.getStaffPointMetrics(interaction.guildId, target.id).catch(() => ({})),
-        store.getPoints('builder', target.id, interaction.guildId).catch(() => ({ currentMonth: 0, lifetime: 0 })),
-        store.getPoints('staff', target.id, interaction.guildId).catch(() => ({ currentMonth: 0, lifetime: 0 })),
-      ]);
-      const builderPoints = calculateBuilderPoints({
-        ...builderMetrics,
-        manual: builderSaved.currentMonth || 0
-      });
-      const staffPoints = calculateStaffPoints({
-        ...staffMetrics,
-        manual: staffSaved.currentMonth || 0
-      });
-      const builderIncentives = getBuilderIncentives({
-        monthly: builderPoints.total,
-        lifetime: (builderSaved.lifetime || 0) + builderPoints.total
-      });
-      const staffIncentives = getStaffIncentives({
-        monthly: staffPoints.total,
-        lifetime: (staffSaved.lifetime || 0) + staffPoints.total
-      });
-
-      const progressBlocks = 12;
-      const filled = Math.max(0, Math.min(progressBlocks, Math.round((xpIntoLevel / xpNeeded) * progressBlocks)));
-      const progressBar = `[${'#'.repeat(filled)}${'-'.repeat(progressBlocks - filled)}]`;
-      const displayName = member?.displayName || target.displayName || target.username;
-      const eb = new EmbedBuilder()
-        .setColor(tierAccent || 0x2b2d31)
-        .setAuthor({ name: `${displayName} Points`, iconURL: target.displayAvatarURL({ extension: 'png', size: 128 }) })
-        .setDescription([
-          `Level **${level}** • ${tierLabel} • Server rank **#${rank || 'N/A'}**`,
-          `XP **${curXp.toLocaleString('en-US')}** total`,
-          `\`${progressBar}\` ${xpIntoLevel.toLocaleString('en-US')}/${xpNeeded.toLocaleString('en-US')} XP`
-        ].join('\n'))
-        .addFields(
-          { name: 'Builder Points', value: `Current: **${builderPoints.total}**\nLifetime est: **${((builderSaved.lifetime || 0) + builderPoints.total).toLocaleString('en-US')}**`, inline: true },
-          { name: 'Staff Points', value: `Current: **${staffPoints.total}**\nLifetime est: **${((staffSaved.lifetime || 0) + staffPoints.total).toLocaleString('en-US')}**`, inline: true },
-          { name: 'Builder Calculation', value: `Completed ${builderPoints.parts.completed} + value ${builderPoints.parts.value} + on-time ${builderPoints.parts.onTime} + rating ${builderPoints.parts.rating} + manual ${builderPoints.parts.manual} ${builderPoints.parts.refundPenalty ? `+ refunds ${builderPoints.parts.refundPenalty}` : ''}`.slice(0, 1024), inline: false },
-          { name: 'Staff Calculation', value: `Tickets ${staffPoints.parts.resolvedTickets} + apps ${staffPoints.parts.applicationReviews} + moderation ${staffPoints.parts.modActions} + vouches ${staffPoints.parts.vouches} + messages ${staffPoints.parts.messages} + manual ${staffPoints.parts.manual} - penalties ${Math.abs(staffPoints.parts.overturned + staffPoints.parts.strikes)}`.slice(0, 1024), inline: false },
-          { name: 'Builder Incentives', value: builderIncentives.length ? builderIncentives.join('\n') : 'Complete builds, keep ratings high, and avoid refunds to unlock builder perks.', inline: true },
-          { name: 'Staff Incentives', value: staffIncentives.length ? staffIncentives.join('\n') : 'Resolve tickets, review apps, and keep clean moderation history to unlock staff perks.', inline: true },
-        )
-        .setTimestamp();
-      return interaction.editReply({ embeds: [eb] });
     }
 
     if (commandName === 'apply') {
@@ -9271,7 +9532,7 @@ Only the ticket creator can continue.`);
     if (commandName === 'manage') {
       if (!adminPanelAllowed(interaction.member)) return interaction.reply({ content: 'Manager+ only.', flags: 64 });
       const target = options.getUser('member', true);
-      await interaction.deferReply({ flags: 64 });
+      await interaction.deferReply();
       const eb = await buildMemberManageEmbed(interaction.guild, target.id);
       if (!eb) return interaction.editReply('That member is not in this server.');
       return interaction.editReply({ embeds: [eb], components: manageRows(target.id), allowedMentions: { parse: [] } });
@@ -9988,25 +10249,34 @@ if (commandName === 'giveaway') {
         await interaction.deferReply();
         const prize = options.getString('prize', true);
         const winnersCount = Math.max(1, Math.min(20, options.getInteger('winners', true)));
+        const mode = options.getString('mode', true);
         const durationRaw = options.getString('duration');
-        const entriesGoal = options.getInteger('entries_goal');
-        const memberGoal = options.getInteger('member_goal');
+        const count = options.getInteger('count');
         const note = options.getString('note');
-        const mode = options.getString('mode') || 'standard';
         const claimTimeRaw = options.getString('claimtime');
         const claimTimeMs = claimTimeRaw ? parseDuration(claimTimeRaw) : null;
         if (claimTimeRaw && !claimTimeMs) {
           return interaction.editReply('Invalid claimtime. Use values like `30m`, `2h`, or `1d`.');
         }
-        const numericPrize = mode === 'double_or_keep' ? parseNumber(prize) : null;
+        const numericPrizeRaw = parseNumber(prize);
+        const numericPrize = Number.isFinite(numericPrizeRaw) && numericPrizeRaw > 0 ? numericPrizeRaw : null;
         if (mode === 'double_or_keep' && (!numericPrize || numericPrize <= 0)) {
           return interaction.editReply('Double or Keep requires a numerical prize, like `50m` or `100000000`.');
         }
 
         const durMs = durationRaw ? parseDuration(durationRaw) : null;
-        const hasGoal = (typeof entriesGoal === 'number' && entriesGoal > 0) || (typeof memberGoal === 'number' && memberGoal > 0);
-        if (!durMs && !hasGoal) {
-          return interaction.editReply('❌ Provide either a duration (e.g. `30m`, `1h`) or at least one goal (`entries_goal` / `member_goal`).');
+        let entriesGoal = null;
+        let memberGoal = null;
+        if (mode === 'standard' || mode === 'double_or_keep') {
+          if (!durMs) return interaction.editReply('Duration is required for Standard and Double or Keep giveaways. Use something like `30m`, `2h`, or `1d`.');
+        } else if (mode === 'entries') {
+          if (!count || count <= 0) return interaction.editReply('Count is required for Entries mode.');
+          entriesGoal = count;
+        } else if (mode === 'members') {
+          if (!count || count <= 0) return interaction.editReply('Count is required for Members mode.');
+          memberGoal = count;
+        } else {
+          return interaction.editReply('Unknown giveaway mode.');
         }
 
         const endTime = durMs ? (Date.now() + durMs) : null;
@@ -10019,8 +10289,9 @@ if (commandName === 'giveaway') {
         const baseDesc = [
           `Ends: ${endsBits.length ? endsBits.join(' • ') : 'When goals are met'}`,
           `Hosted by: <@${interaction.user.id}>`,
-          mode === 'double_or_keep' ? 'Mode: **Double or Keep**' : 'Mode: **Standard**',
+          `Mode: **${giveawayModeLabel(mode)}**`,
           claimTimeMs ? `Claim window: **${formatDuration(claimTimeMs)}** after end` : null,
+          numericPrize && winnersCount > 1 ? `Prize split: **${money(numericPrize / winnersCount)}** each (${money(numericPrize)} total)` : null,
           note ? `${note}` : null,
           `Entries: **0**`,
           `Winners: **${winnersCount}**`
@@ -10100,6 +10371,7 @@ if (commandName === 'giveaway') {
 
         const unique = [...new Set(g.entries)];
         const pick = unique[Math.floor(Math.random() * unique.length)];
+        const rerollAwardText = giveawayAwardText(g);
 
         // Update original giveaway message + announce publicly
         try {
@@ -10136,14 +10408,14 @@ if (commandName === 'giveaway') {
                 base.setDescription(desc);
                 await msg.edit({ embeds: [base] }).catch(() => {});
               } else {
-                await msg.edit({ content: `🔁 **Rerolled Winner:** <@${pick}> — **${g.prize}**` }).catch(() => {});
+                await msg.edit({ content: `🔁 **Rerolled Winner:** <@${pick}> — **${rerollAwardText}**` }).catch(() => {});
               }
 
               // Reroll replaces the winner — sync the stored list so the
               // claim button only lets the new winner open a ticket.
               const rerolledGiveaway = await store.updateGiveaway(g.messageId, { winnerIds: [pick] }).catch(() => null) || { ...g, winnerIds: [pick] };
               const ann = await msg.reply({
-                content: `🎉 Congratulations <@${pick}>, you won **${g.prize}**!`,
+                content: `🎉 Congratulations <@${pick}>, you won **${rerollAwardText}**!`,
               }).catch(() => null);
               if (ann) await store.updateGiveaway(g.messageId, { lastAnnounceMessageId: ann.id }).catch(() => {});
               const claimMsg = await ch.send({
@@ -10169,7 +10441,8 @@ if (commandName === 'giveaway') {
       await interaction.deferReply({ flags: 64 });
       const payload = await buildBuiltinPanelPayload(interaction.guild, 'automod');
       await interaction.channel.send(payload);
-      return interaction.editReply('Automod panel sent.');
+      await interaction.deleteReply().catch(() => {});
+      return;
     }
 
     if (commandName === 'antiraid') {
@@ -10177,7 +10450,8 @@ if (commandName === 'giveaway') {
       await interaction.deferReply({ flags: 64 });
       const payload = await buildBuiltinPanelPayload(interaction.guild, 'antiraid');
       await interaction.channel.send(payload);
-      return interaction.editReply('Anti-raid panel sent.');
+      await interaction.deleteReply().catch(() => {});
+      return;
     }
 
     if (commandName === 'refund') {
@@ -10358,36 +10632,40 @@ if (commandName === 'giveaway') {
         const month = currentMonthKey();
         const monthStart = Date.parse(`${month}-01T00:00:00.000Z`);
         const stats = await store.getTicketStatsForMonth(interaction.guildId, month).catch(() => ({}));
-        const [warnings, strikes] = await Promise.all([
+        const [warnings, strikes, pointProfiles] = await Promise.all([
           store.listWarnings(null, interaction.guildId).catch(() => []),
           store.listStrikes(null, interaction.guildId).catch(() => []),
+          store.listPoints('staff', interaction.guildId).catch(() => []),
         ]);
         const validActionsById = new Map();
         for (const row of [...warnings, ...strikes]) {
           if (Number(row.timestamp || 0) < monthStart) continue;
           validActionsById.set(String(row.moderatorId || ''), (validActionsById.get(String(row.moderatorId || '')) || 0) + 1);
         }
+        const manualById = new Map((pointProfiles || []).map(p => [String(p.userId), Number(p.currentMonth || 0)]));
+        const staffIds = new Set([...Object.keys(stats || {}), ...manualById.keys()]);
         const rows = [];
-        for (const [staffId, s] of Object.entries(stats || {})) {
-          const member = await interaction.guild.members.fetch(staffId).catch(() => null);
-          if (!member) continue;
-          if (!isStaffMember(member, cfg) && !member.permissions?.has?.(PermissionsBitField.Flags.Administrator)) continue;
+        for (const staffId of staffIds) {
+          const s = stats?.[staffId] || {};
           const closed = Number(s.closed || 0);
           const renamed = Number(s.renameCount || 0);
           const supportMessages = Number(s.messageCount || 0);
-          const manual = (await store.getPoints('staff', staffId, interaction.guildId).catch(() => ({ currentMonth: 0 }))).currentMonth || 0;
+          const standardMessages = Number(s.standardMessageCount || 0);
+          const messages = supportMessages + standardMessages;
+          const manual = manualById.get(String(staffId)) || 0;
           const validModActions = validActionsById.get(String(staffId)) || 0;
           const pointResult = calculateStaffPoints({
             resolvedTickets: closed,
             renamedTickets: renamed,
             supportTicketMessages: supportMessages,
             ticketMessages: supportMessages,
+            standardMessages,
             validModActions,
             manual,
           });
-          rows.push({ staffId, closed, renamed, supportMessages, validModActions, manual, points: pointResult.total });
+          if (pointResult.total || closed || renamed || messages) rows.push({ staffId, closed, renamed, messages, points: pointResult.total });
         }
-        rows.sort((a,b) => (b.points - a.points) || (b.closed - a.closed) || (b.renamed - a.renamed) || (b.supportMessages - a.supportMessages));
+        rows.sort((a,b) => (b.points - a.points) || (b.closed - a.closed) || (b.renamed - a.renamed) || (b.messages - a.messages));
         const sessionId = generateId();
         const totalPages = Math.max(1, Math.ceil(rows.length / 10));
         statsPanelSessions.set(sessionId, { kind: 'staff', userId: interaction.user.id, page: 0, rows, createdAt: Date.now() });
@@ -10401,20 +10679,29 @@ if (commandName === 'giveaway') {
         const nextMonth = new Date(monthStart);
         nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
         const monthEnd = nextMonth.getTime();
-        const records = await store.listBuildRecords(interaction.guildId).catch(() => []);
-        await interaction.guild.members.fetch().catch(() => null);
-        const builderIds = new Set(interaction.guild.members.cache.filter(m => isBuilderMember(m)).map(m => m.id));
-        for (const r of records) if (r.builderDiscordId) builderIds.add(String(r.builderDiscordId));
-        const totals = (await Promise.all([...builderIds].map(async (discordId) => {
-          const member = await interaction.guild.members.fetch(discordId).catch(() => null);
-          if (!member || !isBuilderMember(member)) return null;
-          const mineRecords = records.filter(r => String(r.builderDiscordId || '') === String(discordId) && Number(r.at || 0) >= monthStart && Number(r.at || 0) < monthEnd);
+        const [records, pointProfiles] = await Promise.all([
+          store.listBuildRecords(interaction.guildId).catch(() => []),
+          store.listPoints('builder', interaction.guildId).catch(() => []),
+        ]);
+        const recordsByBuilder = new Map();
+        for (const r of records || []) {
+          const discordId = String(r.builderDiscordId || '');
+          if (!discordId) continue;
+          const at = Number(r.at || 0);
+          if (at < monthStart || at >= monthEnd) continue;
+          if (!recordsByBuilder.has(discordId)) recordsByBuilder.set(discordId, []);
+          recordsByBuilder.get(discordId).push(r);
+        }
+        const manualById = new Map((pointProfiles || []).map(p => [String(p.userId), Number(p.currentMonth || 0)]));
+        const builderIds = new Set([...recordsByBuilder.keys(), ...manualById.keys()]);
+        const totals = [...builderIds].map((discordId) => {
+          const mineRecords = recordsByBuilder.get(discordId) || [];
           const earned = mineRecords.reduce((a, r) => a + Number(r.price ?? r.amount ?? 0), 0);
-          const manual = (await store.getPoints('builder', discordId, interaction.guildId).catch(() => ({ currentMonth: 0 }))).currentMonth || 0;
+          const manual = manualById.get(String(discordId)) || 0;
           const points = calculateBuilderPoints({ completedBuilds: mineRecords.length, amount: earned, manual }).total;
           if (!points && !mineRecords.length && !manual) return null;
           return { discordId, finished: mineRecords.length, earned, manual, points };
-        }))).filter(Boolean).sort((a, b) => (b.points - a.points) || (b.earned - a.earned) || (b.finished - a.finished));
+        }).filter(Boolean).sort((a, b) => (b.points - a.points) || (b.earned - a.earned) || (b.finished - a.finished));
         const sessionId = generateId();
         const totalPages = Math.max(1, Math.ceil(totals.length / 10));
         statsPanelSessions.set(sessionId, { kind: 'builder', userId: interaction.user.id, page: 0, rows: totals, createdAt: Date.now() });
@@ -10630,12 +10917,6 @@ ${E_TIME} Created ${created}`)
     // --- TICKET PANELS ---
     if (commandName === "panel") {
       const sub = interaction.options.getSubcommand();
-      if (sub === "list") {
-        await interaction.deferReply({ flags: 64 });
-        const panels = await store.listTicketPanels();
-        const ids = [...new Set([...Object.keys(panels || {}), 'spawner_prices'])];
-        return interaction.editReply(ids.length ? `Panels: ${ids.map(x=>`\`${x}\``).join(", ")}` : "No panels configured.");
-      }
       if (sub === "send") {
         await interaction.deferReply({ flags: 64 });
         const panelId = interaction.options.getString("type", true);
@@ -10645,7 +10926,8 @@ ${E_TIME} Created ${created}`)
         if (panelId === 'spawner_prices') {
           const res = await refreshSpawnerPricesPanel(interaction.guild);
           if (!res) return interaction.editReply(`❌ Could not publish panel in <#${SPAWNER_PRICES_CHANNEL_ID}>.`);
-          return interaction.editReply(`✅ Spawner prices panel refreshed in <#${res.channel.id}>.`);
+          await interaction.deleteReply().catch(() => {});
+          return;
         }
 
         const panel = await store.getTicketPanel(panelId);
@@ -10707,7 +10989,8 @@ ${E_TIME} Created ${created}`)
         try {
           await store.setTicketPanelRef(panel.id, { channelId: sent.channelId, messageId: sent.id });
         } catch {}
-        return interaction.editReply("Panel sent.");
+        await interaction.deleteReply().catch(() => {});
+        return;
       }
     }
 
@@ -11085,6 +11368,36 @@ async function restorePayBuilderButtonFromWatch(watch) {
 }
 function cancelRow(watchId, enabled) { return enabled ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`paywatch_cancel:${watchId}`).setLabel('Cancel').setStyle(ButtonStyle.Danger))] : []; }
 async function safeEditOriginal(watch, embeds, enableCancel) { try { if (!watch.message_id) return; const ch = await client.channels.fetch(watch.channel_id); const msg = await ch.messages.fetch(watch.message_id); await msg.edit({ content: '', embeds, components: cancelRow(watch.id, enableCancel) }); } catch {} }
+const GIVEAWAY_MODE_LABELS = {
+  standard: 'Standard',
+  entries: 'Entries',
+  members: 'Members',
+  double_or_keep: 'Double or Keep',
+};
+
+function giveawayModeLabel(mode) {
+  return GIVEAWAY_MODE_LABELS[String(mode || 'standard').toLowerCase()] || 'Standard';
+}
+
+function giveawayPrizeSplit(giveaway = {}) {
+  return splitNumericalGiveawayPrize({
+    prize: giveaway.prize,
+    numericPrize: giveaway.numericPrize,
+    winnersCount: giveaway.winnersCount || 1
+  });
+}
+
+function giveawayAwardText(giveaway = {}) {
+  const split = giveawayPrizeSplit(giveaway);
+  if (split?.split) return `${money(split.perWinner)} each (${money(split.total)} total)`;
+  return String(giveaway.prize || 'the prize');
+}
+
+function giveawayClaimPrizeText(giveaway = {}) {
+  const split = giveawayPrizeSplit(giveaway);
+  if (split?.split) return `${money(split.perWinner)} (your share of ${money(split.total)} across ${split.winnersCount} winners)`;
+  return String(giveaway.prize || 'the prize');
+}
 // "Open Ticket" button shown on a giveaway's congratulations message. Only the
 // stored winners can use it — the giveaway message id is carried in the
 // customId so the handler can look the giveaway (and its winner list) up.
@@ -11133,9 +11446,10 @@ async function endGiveawayLogic(g, channel, msg) {
     winnerText = winnerIds.map(w => `<@${w}>`).join(', ');
   }
   const oldEmbed = msg.embeds[0];
-  const modeText = String(g.mode || 'standard') === 'double_or_keep' ? '\nMode: **Double or Keep**' : '';
+  const modeText = `\nMode: **${giveawayModeLabel(g.mode)}**`;
   const claimText = claimExpiresAt ? `\nClaim expires: ${tsR(claimExpiresAt)} (${ts(claimExpiresAt)})` : '';
-  const newDesc = `Ended: ${tsR(endedAt)} (${ts(endedAt)})\nHosted by: <@${g.hostId}>${modeText}${claimText}\nEntries: **${g.entries.length}**\nWinners: ${winnerText}`;
+  const awardText = giveawayAwardText(g);
+  const newDesc = `Ended: ${tsR(endedAt)} (${ts(endedAt)})\nHosted by: <@${g.hostId}>${modeText}${claimText}\nPrize: **${awardText}**\nEntries: **${g.entries.length}**\nWinners: ${winnerText}`;
   await msg.edit({ embeds: [new EmbedBuilder(oldEmbed.data).setColor(0x2F3136).setDescription(newDesc)], components: [row] });
 
   // Persist the winners + end time so the claim button can verify who may
@@ -11162,7 +11476,7 @@ async function endGiveawayLogic(g, channel, msg) {
 
   if (winnerIds.length > 0) {
     const announce = await msg.reply({
-      content: `🎉 Congratulations ${winnerText}, you won **${g.prize}**!`,
+      content: `🎉 Congratulations ${winnerText}, you won **${awardText}**!`,
     }).catch(() => null);
     if (announce) await store.updateGiveaway(g.messageId, { lastAnnounceMessageId: announce.id }).catch(() => {});
     // Claim button posted as its own message so it sits apart from the
