@@ -14,16 +14,66 @@ function clampNumber(value, min, max) {
 
 const POINT_ROLE_THRESHOLDS = {
   builder: [
-    { points: 25, label: 'Tier 1 Builder' },
-    { points: 75, label: 'Tier 2 Builder' },
-    { points: 150, label: 'Tier 3 Builder' }
+    { points: 25, label: 'Tier 2 Builder' },
+    { points: 75, label: 'Tier 3 Builder' }
   ],
   staff: [
-    { points: 30, label: 'Trial Helper' },
-    { points: 90, label: 'Helper' },
-    { points: 180, label: 'Moderator' }
+    { points: 15, label: 'Trial Helper' },
+    { points: 35, label: 'Helper' },
+    { points: 60, label: 'Sr Helper' },
+    { points: 90, label: 'Trial Mod' },
+    { points: 130, label: 'Mod' },
+    { points: 180, label: 'Sr Mod' },
+    { points: 250, label: 'Supervisor' },
+    { points: 500, label: 'Manager' },
+    { points: 900, label: 'Admin' },
+    { points: 1400, label: 'Head Admin' },
+    { points: 2500, label: 'Co-owner' }
   ]
 };
+
+function getPointProgress(kind, points) {
+  const thresholds = (POINT_ROLE_THRESHOLDS[kind] || [])
+    .slice()
+    .sort((a, b) => Number(a.points || 0) - Number(b.points || 0));
+  const value = Math.max(0, Number(points) || 0);
+  let current = null;
+  let next = null;
+  for (const threshold of thresholds) {
+    if (value >= Number(threshold.points || 0)) current = threshold;
+    else {
+      next = threshold;
+      break;
+    }
+  }
+  if (!next) {
+    return {
+      currentLabel: current?.label || null,
+      nextLabel: null,
+      currentFloor: Number(current?.points || 0),
+      nextPoints: null,
+      progressPoints: 0,
+      neededPoints: 0,
+      ratio: 1,
+      complete: true
+    };
+  }
+  const currentFloor = Number(current?.points || 0);
+  const nextPoints = Number(next.points || 0);
+  const neededPoints = Math.max(1, nextPoints - currentFloor);
+  const progressPoints = Math.max(0, value - currentFloor);
+  const ratio = Math.max(0, Math.min(1, Math.round((progressPoints / neededPoints) * 1000) / 1000));
+  return {
+    currentLabel: current?.label || null,
+    nextLabel: next.label,
+    currentFloor,
+    nextPoints,
+    progressPoints,
+    neededPoints,
+    ratio,
+    complete: false
+  };
+}
 
 function expectedBuildDurationMs(amount) {
   const value = Math.max(0, Number(amount) || 0);
@@ -351,6 +401,7 @@ module.exports = {
   POINT_ROLE_THRESHOLDS,
   calculateBuilderPoints,
   calculateStaffPoints,
+  getPointProgress,
   expectedBuildDurationMs,
   builderSpeedBoostRate,
   roleIdsFromMember,

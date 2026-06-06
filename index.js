@@ -63,7 +63,7 @@ const {
   DEFAULT_ROLE_IDS,
   calculateBuilderPoints,
   calculateStaffPoints,
-  POINT_ROLE_THRESHOLDS,
+  getPointProgress,
   canApplyForRole,
   normalizeGiveawayClaim,
   getBuilderIncentives,
@@ -3902,19 +3902,24 @@ function hasStaffOrBuilderCategory(member, category, saved = {}, calculated = 0)
   return false;
 }
 
-function nextPointThreshold(kind, points) {
-  const thresholds = POINT_ROLE_THRESHOLDS[kind] || [];
-  return thresholds.find(t => Number(points || 0) < t.points) || null;
+function pointProgressBar(ratio, size = 10) {
+  const filled = Math.max(0, Math.min(size, Math.round((Number(ratio) || 0) * size)));
+  return `[${'#'.repeat(filled)}${'-'.repeat(size - filled)}]`;
 }
 
 function pointsCategoryText(kind, points, saved, statsText) {
-  const next = nextPointThreshold(kind, points);
+  const progress = getPointProgress(kind, points);
   const lines = [
     `Monthly points: **${Number(points || 0).toLocaleString('en-US')}**`,
     `Manual adjustments: **${Number(saved?.currentMonth || 0).toLocaleString('en-US')}** this month, **${Number(saved?.lifetime || 0).toLocaleString('en-US')}** lifetime`,
   ];
-  if (next) lines.push(`Next role: **${next.label}** at **${next.points}** monthly points`);
-  else lines.push('Top threshold reached for now.');
+  if (progress.complete) {
+    lines.push(`Progress: \`${pointProgressBar(1)}\` top threshold reached${progress.currentLabel ? ` (**${progress.currentLabel}**)` : ''}.`);
+  } else {
+    const currentText = progress.currentLabel ? `Current: **${progress.currentLabel}**` : 'Current: **Not ranked yet**';
+    lines.push(`${currentText} -> **${progress.nextLabel}**`);
+    lines.push(`Progress: \`${pointProgressBar(progress.ratio)}\` ${Number(progress.progressPoints || 0).toLocaleString('en-US')}/${Number(progress.neededPoints || 0).toLocaleString('en-US')} points, **${Math.max(0, Number(progress.nextPoints || 0) - Number(points || 0)).toLocaleString('en-US')}** to go`);
+  }
   if (statsText) lines.push(statsText);
   return lines.join('\n');
 }

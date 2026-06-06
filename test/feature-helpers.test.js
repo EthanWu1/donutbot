@@ -3,8 +3,10 @@ const assert = require('node:assert/strict');
 
 const {
   DEFAULT_ROLE_IDS,
+  POINT_ROLE_THRESHOLDS,
   calculateBuilderPoints,
   calculateStaffPoints,
+  getPointProgress,
   isWhitelisted,
   findBlacklistedPhrase,
   canApplyForRole,
@@ -69,6 +71,26 @@ test('staff points emphasize closed tickets and devalue raw messages', () => {
   assert.equal(points.parts.supportMessages, 3);
   assert.equal(points.parts.closedTickets, 12);
   assert.equal(points.total, 16);
+});
+
+test('point progress uses builder and expanded staff rank thresholds', () => {
+  assert.deepEqual(POINT_ROLE_THRESHOLDS.builder, [
+    { points: 25, label: 'Tier 2 Builder' },
+    { points: 75, label: 'Tier 3 Builder' }
+  ]);
+  assert.equal(POINT_ROLE_THRESHOLDS.staff.at(0).label, 'Trial Helper');
+  assert.equal(POINT_ROLE_THRESHOLDS.staff.at(-1).label, 'Co-owner');
+
+  assert.deepEqual(getPointProgress('builder', 40), {
+    currentLabel: 'Tier 2 Builder',
+    nextLabel: 'Tier 3 Builder',
+    currentFloor: 25,
+    nextPoints: 75,
+    progressPoints: 15,
+    neededPoints: 50,
+    ratio: 0.3,
+    complete: false
+  });
 });
 
 test('whitelist matches user, channel, or any member role', () => {
